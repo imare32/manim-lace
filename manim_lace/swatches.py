@@ -1,9 +1,15 @@
-"""Swatches from Japanese Color Harmony Dictionary by Teruko Sakurai"""
+"""Swatches from Japanese Color Harmony Dictionary by Teruko Sakurai."""
+
+from __future__ import annotations
 
 import random
 
+__all__ = ["SWATCH_SIZE", "random_swatch", "swatches"]
 
-swatches = [
+#: 每张色卡包含的颜色数量。
+SWATCH_SIZE = 9
+
+swatches: list[list[str]] = [
     ["#9F2158", "#782255", "#A58490", "#ECD1BF", "#BB5548", "#007D8E", "#6B5146", "#4B1A47", "#DCD3B2"],
     ["#E94709", "#27120A", "#C3AAB0", "#F7D5B3", "#8F8FB0", "#A593AD", "#F4B3C2", "#7B6667", "#4D3E4B"],
     ["#D2BE6C", "#A78B5B", "#E2D7A8", "#8C6D5C", "#767676", "#949495", "#A99E93", "#E5DECE", "#EAEBEB"],
@@ -91,6 +97,14 @@ swatches = [
 ]
 
 
-def random_swatch():
-    """Return a random swatch."""
-    return random.choice(swatches)
+def random_swatch(rng: random.Random | None = None) -> list[str]:
+    """随机返回一张色卡。
+
+    参数:
+        rng: 可选的自定义随机源, 传入固定种子的 :class:`random.Random` 可获得
+            可复现的结果; ``None`` 表示使用全局随机源。
+
+    返回:
+        形如 ``["#RRGGBB", ...]`` 的颜色列表。
+    """
+    return (rng or random).choice(swatches)

@@ -8,6 +8,7 @@ wheels/
 
 .vscode/
 .claude/
+.idea/
 
 # Virtual environments
 .venv
@@ -16,5 +17,13 @@ uv.lock
 
 # manim
 media/
+
+# 测试与检查工具产物
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 references/
