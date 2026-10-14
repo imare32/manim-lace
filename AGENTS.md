@@ -8,6 +8,12 @@
    算法自动计算交点处的绘制/跳过关系以模拟编织物, 无需 Z-buffer。
 2. **星形玫瑰 (StarRosette)**: 基于"核 (kernel) + 镜像 + 旋转"的算法生成对称星形/花朵图案。
 
+> **动手前先读**:
+> - [`PROGRESS.md`](PROGRESS.md) —— 进度与待办(唯一进度入口): 已完成(带证据)、正在做、未完成,
+>   以及**已经试过并被否决的做法**(含原因与数据, 避免重复踩坑)、关键口径与回归底线;
+> - [`DEFECTS.md`](DEFECTS.md) —— 缺陷清单、复现、根因与**修复状态**;
+> - [`CHANGELOG.md`](CHANGELOG.md) —— 按版本记录的变更(含 `[Unreleased]` 的已知限制)。
+
 ## 架构分层
 
 代码严格分为两层, 便于分别测试:
@@ -22,8 +28,8 @@
 | 文件 | 内容 |
 | --- | --- |
 | `manim_lace/interlacing.py` | `Interlacing` 求解器与 `clear_paths` / `merge_paths` / `generate_offset_lines` / `vectorized_intersection` / `right_handed` / `longest_chain` / `is_cycle` / `is_open_walk` |
-| `manim_lace/lace.py` | `Lace`(继承 `VGroup`)与 `to_3d`、`HOLE_GROUP_METHODS` |
-| `manim_lace/rosette.py` | `StarRosette`(继承 `Polygram`)与 `cal_kernels` / `get_petals_by_kernel` / `sort_petals` / `merge_adjacent_petals` / `transform_reps` |
+| `manim_lace/lace.py` | `Lace`(继承 `VGroup`)与 `mobject_paths`(曲线折线化, `CURVE_SAMPLES`)、`to_3d`、`HOLE_GROUP_METHODS`、`RIBBON_GROUP_METHODS`(丝带分组配色) |
+| `manim_lace/rosette.py` | **可选模块**: `StarRosette`(继承 `Polygram`)与 `cal_kernels` / `get_petals_by_kernel` / `sort_petals` / `merge_adjacent_petals` / `transform_reps`。只依赖 `numpy` + `manim`, 与核心零耦合, 由 `__init__.py` 惰性转发 |
 | `manim_lace/swatches.py` | 84 张日式配色色卡与 `random_swatch` |
 
 `Interlacing` 的主要中间量: `paths` / `paths_l` / `paths_r` / `paths_closed` / `paths_flag` /
@@ -66,6 +72,18 @@ uv run manim -pql examples/lace_scenes.py TestLaceScene0   # 直接使用 Manim 
   (例如高阶核旋转后与 x 轴平行时的退化情形);
 - 空输入应退化为空结果而不是抛异常;
 - 所有输出的多边形保持逆时针绕向, 且首尾点重复(便于直连 Manim `Polygon`);
+- **任何"容差"都必须尺度无关**: 判共线比 `sinθ = |v1 × v2| / (|v1||v2|)`, 判平行比 `sinθ`,
+  绝不要比较叉积的**绝对量**(它随线段长度平方缩小 —— 采样一密的曲线就会被误判成"全共线"或
+  "全平行", 前者把曲线删空, 后者让角点事件丢失、输出空白)。参见 `DEFECTS.md` 缺陷 5 / 8;
+- **曲线输入必须先折线化**: 用 `mobject_paths()`(按三次贝塞尔采样), 不要把
+  `get_subpaths()` 的**控制点**当折线(A/B 基线依赖"直线输入几何不变"这一点);
+- **核心不依赖玫瑰线**: `manim_lace/rosette.py` 是可选模块, 核心代码与核心测试都不得 import 它
+  (测试里用 `pytest.importorskip("manim_lace.rosette")` 保护相关的构造器/用例);
+  要把它拆成独立包时, 动这几个地方即可 —— `__init__.py` 的惰性转发与 `_ROSETTE_EXPORTS`、
+  `__all__` 里对应的 4 个名字、`manim_lace/rosette.py`、`tests/test_rosette.py`、
+  `tests/test_package.py` 的 `ROSETTE_EXPORTS`、`README.md` 的玫瑰线小节、
+  `examples/rosette_scenes.py` / `rosette_gallery.py` / `gallery_page.html` / `rosette_levels.py`,
+  以及 A/B 底线脚本里的 Scene0/1(它们是玫瑰线输入, 拆分前要先换成非玫瑰线的固定输入);
 - 变更需记录到 `CHANGELOG.md`。
 
 ### 可视化约定(示例脚本)

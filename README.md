@@ -15,13 +15,17 @@
 
 ## 特性
 
-- **通用输入**: 任何 `VMobject`(圆、多边形、`FunctionGraph`、`NumberPlane`、任意贝塞尔路径)都可直接编织。
+- **通用输入**: 任何 `VMobject`(圆、多边形、`FunctionGraph`、`NumberPlane`、任意贝塞尔路径)都可直接编织;
+  曲线会先按三次贝塞尔重采样成折线(见 `manim_lace.lace.mobject_paths`), 采样点落在真正的曲线上;
 - **纯几何内核**: `Interlacing` 只依赖 `numpy` / `scipy` / `networkx`, 可脱离渲染环境做单元测试。
 - **两种产物**: 丝带片段 (`ribbons`) 与孔洞色块 (`holes`), 其中孔洞支持 4 种自动分组配色策略。
 - **内置配色**: 84 张日式配色色卡, 无需手动指定颜色即可得到协调的配色。
-- **星形玫瑰**: `StarRosette` 提供 `PA / PO / PR / CA / CR` 五种花型与任意阶数。
-- **健壮性**: 输入参数校验、空输入安全退化为空图形、对退化几何与浮点误差做了容错处理。
-- **可维护**: 240+ 单元测试、约 97% 覆盖率、ruff 代码规范、GitHub Actions 多版本 CI。
+- **星形玫瑰(可选)**: `manim_lace.rosette` 提供 `StarRosette` 与 `PA / PO / PR / CA / CR` 五种花型。
+  它与核心的"任意路径 → 编织丝带"**零耦合**(不引用 `interlacing` / `lace`), 导入包时惰性加载,
+  将来可以整体拆成独立包: `from manim_lace import StarRosette` 仍然可用;
+- **健壮性**: 输入参数校验、空输入安全退化为空图形、对退化几何与浮点误差做了容错处理
+  (所有容差都按角度判定, 与图形尺度无关)。
+- **可维护**: 420+ 单元测试、ruff 代码规范、GitHub Actions 多版本 CI。
 
 ## 安装
 
@@ -249,7 +253,7 @@ manim_lace/
 ├── manim_lace/            # 包源码
 │   ├── interlacing.py     # 纯几何内核: 清洗/合并/偏移/求交/拓扑
 │   ├── lace.py            # 渲染层: Lace(VGroup) 与参数校验
-│   ├── rosette.py         # 星形玫瑰: 核计算 + StarRosette(Polygram)
+│   ├── rosette.py         # 可选模块: 星形玫瑰(核计算 + StarRosette), 核心不依赖它
 │   ├── swatches.py        # 内置配色色卡
 │   └── py.typed           # PEP 561 类型标记
 ├── tests/                 # pytest 测试套件
