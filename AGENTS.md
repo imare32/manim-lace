@@ -60,9 +60,20 @@ uv run python examples/rosette_levels.py --star-type PA   # 相邻阶叠加对�
 uv run manim -pql examples/lace_scenes.py TestLaceScene0   # 直接使用 Manim CLI
 ```
 
+改动核心逻辑后必须跑的两条回归(见 `PROGRESS.md` §0):
+
+```bash
+uv run python tools/ab_render.py --root media/_review/head_tree --out media/_review/ab_old
+uv run python tools/ab_render.py --root . --out media/_review/ab_new   # 两边 png 必须 md5 一致
+uv run python tools/matrix_digest.py media/_review/digest.txt          # 全矩阵指纹, 前后 diff
+uv run python tools/defect_report.py                                   # 缺陷对照报告 + 网页
+```
+
 预览图输出到 `media/` 下的子目录, 该目录已被 `.gitignore` 忽略。两个预览脚本的产物都能用
 浏览器直接打开: `media/rosette_gallery/index.html` 是可按键筛选(花型 / N / 等级)的浏览页,
-模板在 `examples/gallery_page.html`。
+模板在 `examples/gallery_page.html`; `media/defect_report/index.html` 是**缺陷对照报告** ——
+每条缺陷的"修复前 / 修复后"渲染图 + 症状 / 根因 / 修法 / 修复到什么程度,
+"修复前"用 `git archive` 取出的历史源码树(`v020` / `prestep3` / `head`)渲染, 基线是实测挑的。
 
 ## 约定
 
@@ -101,6 +112,8 @@ uv run manim -pql examples/lace_scenes.py TestLaceScene0   # 直接使用 Manim 
 
 ```
 manim_lace/          # 包源码
+tools/               # 入库的验证工具: ab_render.py(A/B 逐字节底线)、matrix_digest.py(全矩阵指纹)、
+                     #   defect_report.py(缺陷对照报告 + 网页)
 tests/               # pytest 测试套件(含 helpers.py)
 examples/            # 可运行的渲染示例与预览工具, 不参与打包
                      #   rosette_gallery.py + gallery_page.html(图形大全与浏览页模板)
