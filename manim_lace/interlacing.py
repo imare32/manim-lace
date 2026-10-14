@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 #: 判定两点重合 / 三点共线 / 向量平行的默认容差。
 DEFAULT_ATOL = 1e-6
+#: 求交时判定"平行"的夹角正弦容差(尺度无关): ``|d1 × d2| / (|d1||d2|) < PARALLEL_SIN_ATOL``。
+#:
+#: 不能用叉积的绝对量: 叉积 ≈ ``|d1||d2|sinθ`` 随线段长度平方缩小, 折线点一密, 相邻两段就会被
+#: 误判成平行 —— 共享角点事件随之丢失, 丝带链断开, 整幅图输出为空(实测 800 段的采样圆弧命中)。
+PARALLEL_SIN_ATOL = 1e-9
 #: :class:`Interlacing` 的 ``validate`` 参数可选值。
 VALIDATE_MODES = ("ignore", "warn", "raise")
 #: Miter Join 的最大延伸倍数, 防止锐角处的偏移线无限伸长。
@@ -131,9 +136,18 @@ def annulus_polygon(first: np.ndarray, second: np.ndarray) -> np.ndarray:
 
 
 def _is_non_collinear(v_in: np.ndarray, v_out: np.ndarray, atol: float) -> np.ndarray:
-    """判断相邻两条边向量是否**不共线**(叉积模长不小于容差)。"""
+    """判断相邻两条边向量是否**不共线**(夹角的正弦不小于容差)。
+
+    判据必须是**尺度无关**的: 叉积模长 ``|v_in||v_out|sinθ`` 会随边长平方缩小, 直接与
+    绝对容差比较会把"点很密"的曲线里的**每一段**都判成共线 —— 实测
+    ``Lace(ParametricFunction(...))`` 的默认采样会让整条曲线塌成首尾两点(渲染成一条
+    直线), 采样更密时整条路径被删空(输出空白)。改成比较 ``sinθ`` 后, 只有**真正
+    共线**的冗余顶点(如 Manim 贝塞尔控制点落在直线上)才会被删除。
+    """
     cross = v_in[:, 0] * v_out[:, 1] - v_in[:, 1] * v_out[:, 0]
-    return np.abs(cross) >= atol
+    scale = np.linalg.norm(v_in, axis=1) * np.linalg.norm(v_out, axis=1)
+    scale[scale <= 0.0] = 1.0
+    return np.abs(cross) / scale >= atol
 
 
 def clear_paths(paths: Sequence[np.ndarray], atol: float = DEFAULT_ATOL) -> list[np.ndarray]:
@@ -528,10 +542,15 @@ def vectorized_intersection(
         ``(points, mask)``, 其中 ``points`` 为 ``(N, 2)`` 的交点坐标(无效位置为
         外推点, 需用 ``mask`` 过滤), ``mask`` 为 ``(N,)`` 的布尔有效标记。
         平行或不相交的线段其 ``mask`` 为 ``False``。
+
+    注意: "平行"判据是**尺度无关**的(比较 `sinθ = |d1 × d2| / (|d1||d2|)`), 而不是比较
+    叉积的绝对量 —— 后者在很短的线段上会把相邻折线段误判成平行(见 :data:`PARALLEL_SIN_ATOL`),
+    于是折线的"共享角点"事件丢失、丝带链断开, 输出直接变空。
     """
     d1, d2, d13 = P2 - P1, P4 - P3, P1 - P3
     denom = d1[0] * d2[:, 1] - d1[1] * d2[:, 0]
-    is_p = np.abs(denom) < 1e-9
+    scale = np.linalg.norm(d1) * np.linalg.norm(d2, axis=1)
+    is_p = (scale <= 0.0) | (np.abs(denom) < PARALLEL_SIN_ATOL * scale)
     denom_s = np.where(is_p, 1.0, denom)
     ua = (d2[:, 0] * d13[:, 1] - d2[:, 1] * d13[:, 0]) / denom_s
     ub = (d1[0] * d13[:, 1] - d1[1] * d13[:, 0]) / denom_s
@@ -638,9 +657,12 @@ class Interlacing:
         self._prepare_paths()
         self._build_segments()
         self._cal_intersections()
-        # 先按交叉事件补齐缺失的交点, 再做契约自检与降级判定
+        # 按"交叉配对"重归属事件(修左右接缝弧长不同导致的逐段错位) → 补近失交点 →
+        # 最后做契约自检与降级判定
+        self._normalize_rail_attribution()
         self._align_all_rails()
         self._check_rail_geometry()
+        self._fix_path_flags()
         if compute_overlaps:
             # 必须在 _set_holes 之前调用: 后者会向 d_seg_intersects 插入虚拟端点
             self._set_overlaps()
@@ -658,12 +680,192 @@ class Interlacing:
         """输入是否不含任何有效路径。"""
         return not self.paths
 
+    def _rail_events(self, i: int, track: int) -> tuple[list[dict], list[tuple[list, list]]]:
+        """一条轨道上的事件记录与各线段的"接缝事件"。
+
+        返回 ``(records, seams)``:
+
+        * ``records``: 除接缝(相邻同轨线段的共享角点、开放路径端点封口)以外的全部事件,
+          每项含 ``seg``(所在线段下标)、``tgt``(对方线段标识)、``point``(交点坐标)、
+          ``arc``(沿轨道的弧长), 按弧长升序排列;
+        * ``seams``: 每个线段的 ``(前导接缝, 后继接缝)`` 标识列表, 保持原始登记顺序。
+
+        接缝事件负责把逐段子图缝成整条轨道, 不参与交叉配对, 重组时原样留在首尾。
+        """
+        num_seg = len(self.paths_l[i]) - 1
+        rail = self.paths_l[i] if track == 1 else self.paths_r[i]
+        starts = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(rail, axis=0), axis=1))])
+
+        records: list[dict] = []
+        seams: list[tuple[list, list]] = []
+        for j in range(num_seg):
+            seg_id = (i, track, j)
+            raw = list(self.d_seg_intersects[seg_id])
+            if self.paths_closed[i]:
+                prev_id, next_id = (i, track, (j - 1) % num_seg), (i, track, (j + 1) % num_seg)
+            else:
+                prev_id, next_id = (i, track, j - 1), (i, track, j + 1)
+            # 接缝按"对方是上一段 / 下一段"分开, 而不是按列表里的位置切分: 一条**没有任何
+            # 交叉事件**的弧段也要能与另一条轨道对上(按位置切分会把两个角点都塞进前导,
+            # 两侧长度不等 -> 整条路径被跳过重归属, 于是"两圆相交"这种最基础的情形也降级)。
+            leading = [tgt for tgt in raw if tgt == prev_id]
+            trailing = [tgt for tgt in raw if tgt == next_id]
+            caps = [tgt for tgt in raw if not isinstance(tgt, tuple)]  # 开放路径的端点封口
+            if caps:
+                if j == 0:
+                    leading = [*caps, *leading]
+                if j == num_seg - 1:
+                    trailing = [*trailing, *caps]
+            seams.append((leading, trailing))
+            for tgt in raw:
+                if self._is_rail_corner(seg_id, tgt):
+                    continue
+                point = self.d_intersections[frozenset((seg_id, tgt))]
+                records.append(
+                    {
+                        "seg": j,
+                        "tgt": tgt,
+                        "point": point,
+                        "arc": float(starts[j] + np.linalg.norm(point - rail[j])),
+                    },
+                )
+        records.sort(key=lambda record: record["arc"])
+        return records, seams
+
+    def _is_mirror_event(self, i: int, first: dict, second: dict) -> bool:
+        """两个事件是否互为"同一个交叉"在左右两条轨道上的那一对。
+
+        判据: 对方路径相同、间隔接近丝带宽度(实测配对距离集中在 2.0 ~ 2.9 × offset),
+        且对方轨道要么相同(与另一条丝带横穿), 要么互为两侧(本丝带自交时两条轨各自与
+        自己的另一侧相交)。
+        """
+        tgt_first, tgt_second = first["tgt"], second["tgt"]
+        if not isinstance(tgt_first, tuple) or not isinstance(tgt_second, tuple):
+            return False
+        if tgt_first[0] != tgt_second[0]:
+            return False
+        gap = float(np.linalg.norm(first["point"] - second["point"]))
+        if not 0.1 * self.offset <= gap <= 8.0 * self.offset:
+            return False
+        if tgt_first[1] != tgt_second[1]:
+            # 对方轨道不同: 只可能出现在本丝带自交(自交的两条轨各与自己的另一侧相交)
+            return tgt_first[0] == i
+        return True
+
+    @staticmethod
+    def _centerline_segment_index(path: np.ndarray, point: np.ndarray) -> int:
+        """把点投影到中心线折线, 返回最近线段的下标。"""
+        seg_a, seg_b = path[:-1], path[1:]
+        ab = seg_b - seg_a
+        ab_len2 = np.maximum(np.sum(ab * ab, axis=1), 1e-18)
+        ratio = np.clip(np.sum((point - seg_a) * ab, axis=1) / ab_len2, 0.0, 1.0)
+        proj = seg_a + ratio[:, None] * ab
+        return int(np.argmin(np.linalg.norm(point - proj, axis=1)))
+
+    def _normalize_rail_attribution(self) -> None:
+        """按"交叉配对"重新归属偏移线交点, 使同一条线段上左右事件数相等。
+
+        左右偏移线互为平行轨, 但**接缝(拐点)的弧长位置不同**(miter 在凸角外侧延伸、
+        凹角内侧收缩), 于是同一个交叉的两侧交点可能被登记到相邻的线段上: 逐段计数不再
+        相等, :meth:`_check_rail_geometry` 据此把整条路径降级, 按索引配对也会错配事件
+        (CA n=9/15/16 的 L4~L5 就是这种情形, 两侧事件总数其实完全相等)。
+
+        做法: 把两侧事件按**沿轨道的弧长顺序**逐位配对, 用配对中点在**中心线**上的投影
+        决定线段归属 —— 两侧共用同一个中点, 归属结果必然一致, 逐段计数随之相等。
+        改挂线段时同步重挂交点 key 与对方线段里的反向引用(事件的"身份"是
+        ``(线段标识, 对方线段标识)``)。
+
+        只有整条路径的每一对都通过 :meth:`_is_mirror_event` 校验时才重建; 否则原样保留,
+        交由 :meth:`_check_rail_geometry` 按既有策略降级(不会比原来更差)。逐段计数本来
+        就相等的路径**直接跳过**, 保证对正常输入的输出不变(重建虽然不改变丝带的并集, 但会
+        把片段切得更碎)。
+
+        已知局限: CR/PR/PO 一族的偏移线**自交**事件在两条轨道上的位置不同, 会把两侧事件的
+        相对顺序打乱, 逐位配对随之失效(这些路径继续走降级); 另有部分交叉的镜像事件在几何
+        上根本不存在(对方偏移线段被 miter 接头截短), 需要先修接头拓扑才能编织。
+        """
+        for i in range(len(self.paths)):
+            num_seg = len(self.paths_l[i]) - 1
+            if all(
+                len(self.d_seg_intersects[(i, 1, j)]) == len(self.d_seg_intersects[(i, 2, j)]) for j in range(num_seg)
+            ):
+                continue
+            left, seams_l = self._rail_events(i, 1)
+            right, seams_r = self._rail_events(i, 2)
+            if not left or len(left) != len(right):
+                continue
+            if any(len(a) != len(b) for a, b in zip(seams_l, seams_r)):
+                continue
+            if not all(self._is_mirror_event(i, a, b) for a, b in zip(left, right)):
+                # 两侧事件不是逐位对应(真漏登记 / 相切退化 / 自交事件打乱顺序):
+                # 保留原样交给降级与近失补齐
+                logger.debug("Interlacing: 路径 %d 的左右轨道事件无法逐位配对, 跳过重归属。", i)
+                continue
+
+            for first, second in zip(left, right):
+                owner = self._centerline_segment_index(self.paths[i], (first["point"] + second["point"]) / 2.0)
+                first["owner"] = owner
+                second["owner"] = owner
+
+            if not self._reservation_is_consistent(i, left, right):
+                # 逐位配对得到的"新归属"会让同一个交点出现两条记录(同一条轨道上的自交事件
+                # 共用一把 key), 无法同时改挂 —— 整条路径放弃重归属, 交给既有降级策略,
+                # 而不是让求解中途抛 KeyError。
+                logger.debug("Interlacing: 路径 %d 的重归属目标不自洽(自交事件共用交点), 跳过重归属。", i)
+                continue
+
+            for track, records, seams in ((1, left, seams_l), (2, right, seams_r)):
+                buckets: dict[int, list] = defaultdict(list)
+                for record in records:
+                    partner = record["tgt"]
+                    buckets[record["owner"]].append(partner)
+                    old_seg, new_seg = (i, track, record["seg"]), (i, track, record["owner"])
+                    if new_seg == old_seg:
+                        continue
+                    # 事件的"身份"是 (线段标识, 对方线段标识), 所以改挂线段时必须
+                    # 同步: 交点表换 key + 对方线段列表里的反向引用换成新线段标识
+                    self.d_intersections[frozenset((new_seg, partner))] = self.d_intersections.pop(
+                        frozenset((old_seg, partner)),
+                    )
+                    if partner in self.d_seg_intersects[old_seg]:
+                        self.d_seg_intersects[old_seg].remove(partner)
+                    if isinstance(partner, tuple) and old_seg in self.d_seg_intersects[partner]:
+                        index = self.d_seg_intersects[partner].index(old_seg)
+                        self.d_seg_intersects[partner][index] = new_seg
+                for j, (leading, trailing) in enumerate(seams):
+                    self.d_seg_intersects[(i, track, j)] = [*leading, *buckets[j], *trailing]
+            logger.debug("Interlacing: 路径 %d 按交叉配对重归属了 %d 个偏移线交点。", i, len(left))
+
+    def _reservation_is_consistent(self, i: int, left: list[dict], right: list[dict]) -> bool:
+        """预演一遍 :meth:`_normalize_rail_attribution` 的改挂, 判断能否安全执行。
+
+        每条记录要把交点键 ``{原线段, 对方线段}`` 换成 ``{新线段, 对方线段}``。**同一条
+        轨道上的自交事件**的两条记录共用同一把键, 改挂时第二条记录会指向与第一条不同的
+        新键(或 pop 到不存在的键) —— 这种情形必须在动手之前查出来, 否则求解会中途抛
+        :class:`KeyError`(实测稠密自交曲线会命中, 见 ``tests/test_lace.py::TestDenseCurves``)。
+        """
+        keys = set(self.d_intersections)
+        for track, records in ((1, left), (2, right)):
+            for record in records:
+                old_seg, new_seg = (i, track, record["seg"]), (i, track, record["owner"])
+                if new_seg == old_seg:
+                    continue
+                old_key = frozenset((old_seg, record["tgt"]))
+                if old_key not in keys:
+                    return False
+                keys.discard(old_key)
+                keys.add(frozenset((new_seg, record["tgt"])))
+        return True
+
     def _align_all_rails(self) -> None:
         """对所有"左右偏移线交点数不等"的线段按**交叉事件**补齐缺失的交点。
 
         另一条丝带的偏移线恰好在本轨道拐角前结束时, 只有一条轨道登记到交点, 左右
         交点数相差 1; 按索引配对会把不同的交叉事件配到一起(双带同绘 / 丝带缺失)。
         这里把缺失的交点补回较短的轨道(拓扑上紧跟其配对事件), 恢复逐事件配对。
+
+        重归属(:meth:`_normalize_rail_attribution`)之后这里只剩"真正漏登记"的近失
+        交点(共线端点、对方线段在到达本轨前结束), 见 :meth:`_align_rail_events`。
         """
         for i in range(len(self.paths)):
             for j in range(len(self.paths_l[i]) - 1):
@@ -698,6 +900,8 @@ class Interlacing:
             )
             if bad:
                 self.rail_issues.append(f"路径 {i}: {bad}/{num_seg} 条线段的左右偏移线交点数不等")
+                # 整条路径降级(而不是只在坏段上"不切分"): 后者在不对称普遍存在时
+                # 会让整条丝带一次都不切, 双带同绘比例从 19% 涨到 72%, 详见 CHANGELOG。
                 self._degraded_paths.add(i)
 
         if self.rail_issues:
@@ -814,7 +1018,10 @@ class Interlacing:
                 intersection_clusters[coord_key].add(curr_id)
                 intersection_clusters[coord_key].add(target_id)
 
-        # --- 4. 收尾: 多线共点告警 + 按距离排序 ---
+        # --- 4. 补齐"相邻同轨线段共享端点"的角点(结构事实, 不依赖浮点判定) ---
+        self._fill_rail_corners()
+
+        # --- 5. 收尾: 多线共点告警 + 按距离排序 ---
         for coord, seg_set in intersection_clusters.items():
             if len(seg_set) >= 3:
                 warnings.warn(
@@ -828,6 +1035,53 @@ class Interlacing:
             tgt_ids.sort(
                 key=lambda tgt_id: np.linalg.norm(self.d_intersections[frozenset((seg_id, tgt_id))] - seg_start),
             )
+
+    def _plain_band(self, i: int) -> np.ndarray:
+        """整条丝带(不参与编织的降级形态)。
+
+        * **闭合路径**: 环形带(外环 + 反向内环 + 一条狭缝, 见 :func:`annulus_polygon`),
+          中间的孔洞得以露出;
+        * **开放路径**: 左右偏移线合围的条带(左轨正向 + 右轨反向 + 首尾封口)。
+
+        之前两种情况都走 :func:`annulus_polygon`, 而它假定输入是**两条闭合环** —— 开放路径
+        会因此得到一个自交的怪多边形(非零环绕填充下会出现"凭空的白洞")。
+        """
+        left, right = self.paths_l[i], self.paths_r[i]
+        if self.paths_closed[i]:
+            return annulus_polygon(left, right)
+        strip = np.vstack([left, right[::-1], left[:1]])
+        return strip if right_handed(strip) else strip[::-1]
+
+    def _fill_rail_corners(self) -> None:
+        """补齐"相邻同轨线段共享端点"的角点事件。
+
+        这类事件本该由通用求交登记, 但采样很密的折线上两条相邻线段的夹角极小, 共享端点的
+        判定会落在浮点误差里(``denom ≈ |d1||d2|sinθ`` 很小, 相对误差被放大) —— 于是角点事件
+        丢失, 逐段子图连不成整条轨道, 整幅图**输出为空**(实测 800 段的采样圆弧: 末 3 段
+        事件数 1/0/0)。
+
+        共享端点是构造保证的, 所以这里按结构直接登记, 而不是去求交。**已经登记过的角点
+        原样保留**(因此对既有输入零影响)。
+
+        开放路径的首尾封口不在这里处理(:meth:`_set_holes` 负责)。
+        """
+        for i in range(len(self.paths_l)):
+            num_seg = len(self.paths_l[i]) - 1
+            if num_seg < 2:
+                continue
+            for track in (1, 2):
+                rail = self.paths_l[i] if track == 1 else self.paths_r[i]
+                pairs = [(j, j + 1) for j in range(num_seg - 1)]
+                if self.paths_closed[i]:
+                    pairs.append((num_seg - 1, 0))
+                for first, second in pairs:
+                    seg_a, seg_b = (i, track, first), (i, track, second)
+                    key = frozenset((seg_a, seg_b))
+                    if key in self.d_intersections:
+                        continue
+                    self.d_intersections[key] = rail[second]
+                    self.d_seg_intersects[seg_a].append(seg_b)
+                    self.d_seg_intersects[seg_b].append(seg_a)
 
     def _set_overlaps(self) -> None:
         """(实验性) 提取四条交点围成的交错重叠区域。
@@ -1025,7 +1279,8 @@ class Interlacing:
         p3, p4 = self.d_segments[other_seg]
         d1, d2 = p2 - p1, p4 - p3
         den = d1[0] * d2[1] - d1[1] * d2[0]
-        if abs(den) < 1e-12:
+        scale = float(np.linalg.norm(d1) * np.linalg.norm(d2))
+        if scale <= 0.0 or abs(den) < PARALLEL_SIN_ATOL * scale:  # 平行(尺度无关, 同求交)
             return None
         d13 = p1 - p3
         ua = (d2[0] * d13[1] - d2[1] * d13[0]) / den
@@ -1113,6 +1368,93 @@ class Interlacing:
                 partners[second] = first
         return partners
 
+    def _path_crossings(self, i: int) -> list[tuple[np.ndarray, int]]:
+        """路径 ``i`` 上**按先后顺序**排列的交叉: ``(代表点, 对方路径下标)``。
+
+        一个交叉 = 同一线段上成对出现的两个真实事件(对方丝带的左右两条轨), 与
+        :meth:`_set_ribbons` 里 ``flag`` 翻转的粒度一致(每段按事件对逐个翻转)。
+        """
+        sequence: list[tuple[np.ndarray, int]] = []
+        for j in range(len(self.paths_l[i]) - 1):
+            seg_id = (i, 1, j)
+            genuine = [tgt for tgt in self.d_seg_intersects[seg_id] if not self._is_rail_corner(seg_id, tgt)]
+            for k in range(0, len(genuine) - 1, 2):
+                first, second = genuine[k], genuine[k + 1]
+                if not isinstance(first, tuple) or not isinstance(second, tuple):
+                    continue
+                point = (
+                    self.d_intersections[frozenset((seg_id, first))] + self.d_intersections[frozenset((seg_id, second))]
+                ) / 2.0
+                sequence.append((point, first[0]))
+        return sequence
+
+    def _fix_path_flags(self) -> None:
+        """修正各路径的起始 ``flag``, 使**每个交叉恰好一方压上**(织法自洽)。
+
+        每条路径的 ``flag`` 在**每个交叉**处翻转一次, 所以它在自己第 ``pos`` 个交叉处的
+        取值是 ``paths_flag[i] ^ (pos % 2)``; 自洽要求一个交叉的两方取值相反 —— 这构成一个
+        以路径为顶点的二元约束系统, 用 BFS 二着色求解。
+
+        为什么必须修: 闭合路径的 ``paths_flag`` 一律为 ``True``, 当两条闭合曲线只相交两次
+        (最典型的"两圆相交")时, 双方在交叉处的取值**同时**为真 -> 双方都下压、丝带根本不
+        切分。实测这正是"简单闭合几何体组合"大面积不编织的原因(冲突数 = 0 与能否编织完全
+        对应: 平铺 A / Kaplan / 双三角 / X 基准全为 0, 两圆 / 三圆链为 4)。
+
+        **当前取值本来就自洽时一个字节都不动**, 保证对既有正常输入零影响。
+        """
+        sequences = [self._path_crossings(i) for i in range(len(self.paths))]
+        constraints: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for i, sequence in enumerate(sequences):
+            for position, (point, partner) in enumerate(sequence):
+                if partner == i or partner < 0 or not sequences[partner]:
+                    continue
+                distances = [float(np.linalg.norm(point - other)) for other, _ in sequences[partner]]
+                position_j = int(np.argmin(distances))
+                if distances[position_j] > 2.0 * self.offset:
+                    continue  # 离得太远, 不是同一个交叉(或匹配不可靠), 不下约束
+                required = 1 ^ (position % 2) ^ (position_j % 2)
+                constraints[i].append((partner, required))
+                constraints[partner].append((i, required))
+        if not constraints:
+            return
+
+        current = list(self.paths_flag)
+        if not any((current[i] ^ current[j]) != required for i, pairs in constraints.items() for j, required in pairs):
+            return  # 本来就自洽, 不动
+
+        solved = list(current)
+        visited: set[int] = set()
+        for start in sorted(constraints):
+            if start in visited:
+                continue
+            colouring: dict[int, bool] = {start: current[start]}
+            visited.add(start)
+            queue = [start]
+            consistent = True
+            while queue:
+                node = queue.pop()
+                for neighbour, required in constraints[node]:
+                    expected = bool(colouring[node] ^ bool(required))
+                    if neighbour in colouring:
+                        consistent = consistent and colouring[neighbour] == expected
+                        continue
+                    colouring[neighbour] = expected
+                    visited.add(neighbour)
+                    queue.append(neighbour)
+            if not consistent:
+                logger.debug("Interlacing: 路径 %d 所在的上下压约束不自洽, 保持既有 flag。", start)
+                continue
+            # 两种着色取"与现状差异更小"的那个, 尽量少动既有行为
+            flips = sum(1 for index, value in colouring.items() if value != current[index])
+            inverted = sum(1 for index, value in colouring.items() if (not value) != current[index])
+            if inverted < flips:
+                colouring = {index: not value for index, value in colouring.items()}
+            for index, value in colouring.items():
+                solved[index] = value
+        if solved != current:
+            logger.debug("Interlacing: 修正起始 flag 以满足交叉处的上下压自洽: %s -> %s", current, solved)
+        self.paths_flag = solved
+
     def _set_ribbons(self) -> None:
         """提取丝带片段多边形。
 
@@ -1135,7 +1477,7 @@ class Interlacing:
         self.ribbons = []
         for i, path in enumerate(self.paths):
             if self._is_simple_closed(i) or i in self._degraded_paths:
-                self.ribbons.append(annulus_polygon(self.paths_l[i], self.paths_r[i]))
+                self.ribbons.append(self._plain_band(i))
                 continue
 
             flag = self.paths_flag[i]
@@ -1161,12 +1503,12 @@ class Interlacing:
 
                 # 左右偏移线互为平行轨, 正常情况下的交点数一致; 当某侧没有交点
                 # (例如丝带边缘恰好落在另一条丝带之外) 时数量会不相等, 此时只按
-                # 两侧对齐的部分切分, 避免索引越界。
+                # 两侧对齐的部分切分, 避免索引越界。注意: 左右交点数不等的路径已在
+                # 前面整条降级, 正常情况下走不到这里。
                 num_pairs = min(len(tgt_ids_l), len(tgt_ids_r))
                 if num_pairs < 2:
                     continue
                 if len(tgt_ids_l) != len(tgt_ids_r):
-                    # 能走到这里说明补齐没能修好(退化路径已在前面跳过), 只记日志
                     logger.debug(
                         "Interlacing: 线段 %s 的左右交点数不一致 (L=%d, R=%d), 按较少的 %d 切分。",
                         seg_id_l,
@@ -1217,6 +1559,12 @@ class Interlacing:
 
             for cycle in networkx.cycle_basis(nx_graph):
                 if len(cycle) < 3:
+                    continue
+                if any(node not in self.d_intersections for node in cycle):
+                    # 自交事件在"按交叉重归属"里改挂线段时, 另一条轨道的反向引用可能仍是旧
+                    # 标识, 极端情况下会攒出缺坐标的节点。跳过该环(少一条丝带)而不是让整幅
+                    # 图崩掉 —— 缺的丝带会被 C/D/E/F 检查抓出来。
+                    logger.debug("Interlacing: 跳过缺少坐标的丝带环 %s", cycle)
                     continue
                 coords = np.array([self.d_intersections[node] for node in [*cycle, cycle[0]]])
                 if not right_handed(coords):

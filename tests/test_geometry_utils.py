@@ -177,6 +177,27 @@ class TestClearPaths:
         collinear = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [0.0, 0.0]])
         assert clear_paths([collinear]) == []
 
+    def test_keeps_a_dense_curve_whose_segments_are_short(self):
+        # 共线判据必须尺度无关: 以前比较"叉积的绝对量", 点很密的曲线每一段都被判成共线,
+        # 整条曲线会被删到只剩首尾两点(渲染成一条直线)。
+        angles = np.linspace(0.0, np.pi / 2.0, 800)
+        dense = np.column_stack([np.cos(angles), np.sin(angles)])
+        assert len(clear_paths([dense])[0]) == 800
+
+    def test_keeps_every_vertex_of_a_dense_closed_ring(self):
+        # 更密时会整条路径被删空(输出空白): 1024 边形环以前返回空列表
+        cleared = clear_paths([ring_path(1024, 2.0)])
+        assert len(cleared) == 1
+        assert len(cleared[0]) == 1025
+        np.testing.assert_allclose(cleared[0][0], cleared[0][-1])
+
+    def test_still_drops_exactly_collinear_vertices_inside_a_dense_curve(self):
+        # 尺度无关之后, "真正共线"的冗余顶点仍然要被删掉
+        angles = np.linspace(0.0, np.pi / 2.0, 400)
+        dense = np.column_stack([np.cos(angles), np.sin(angles)])
+        with_midpoint = np.insert(dense, 11, (dense[10] + dense[11]) / 2.0, axis=0)
+        assert len(clear_paths([with_midpoint])[0]) == len(dense)
+
 
 class TestAnnulusPolygon:
     def test_area_is_outer_minus_inner(self):

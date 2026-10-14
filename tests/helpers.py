@@ -1,8 +1,13 @@
-"""测试共享的路径构造工具与几何断言辅助。"""
+"""测试共享的路径构造工具与几何断言辅助。
+
+玫瑰线(`manim_lace.rosette`)是**可选模块**: 下面用到它的构造器会先
+``pytest.importorskip`` —— 将来把它拆成独立包后, 核心的编织测试仍然可以单独跑。
+"""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 
 def square_ring(size: float = 3.0, clockwise: bool = False) -> np.ndarray:
@@ -72,28 +77,29 @@ def ring_with_collinear_seam(size: float = 3.0) -> np.ndarray:
     return np.array(corners, dtype=float)
 
 
+def _mobject_paths(mobject) -> list[np.ndarray]:
+    """按库的公开转换(`mobject_paths`)把对象掰成路径, 让测试走与 `Lace` 相同的输入通道。"""
+    from manim_lace.lace import mobject_paths
+
+    return [np.asarray(path, dtype=float) for path in mobject_paths(mobject)]
+
+
 def level_zero_rosette_paths(n: int = 7, star_type: str = "PO") -> list[np.ndarray]:
     """返回 ``level=0`` 玫瑰线的全部子路径(花瓣互不相交, 无真实交点)。"""
+    pytest.importorskip("manim_lace.rosette", reason="玫瑰线是可选模块")
     from manim_lace import StarRosette
 
     rosette = StarRosette(n, 0, star_type)
-    return [
-        np.asarray(subpath, dtype=float)
-        for member in rosette.family_members_with_points()
-        for subpath in member.get_subpaths()
-    ]
+    return [path for member in rosette.family_members_with_points() for path in _mobject_paths(member)]
 
 
 def rosette_paths(n: int, level: int, star_type: str) -> tuple[list[np.ndarray], float]:
     """返回玫瑰线的子路径与按 ``r_max`` 1.5% 取定的丝带半宽。"""
+    pytest.importorskip("manim_lace.rosette", reason="玫瑰线是可选模块")
     from manim_lace import StarRosette
 
     rosette = StarRosette(n, level, star_type)
-    paths = [
-        np.asarray(subpath, dtype=float)
-        for member in rosette.family_members_with_points()
-        for subpath in member.get_subpaths()
-    ]
+    paths = [path for member in rosette.family_members_with_points() for path in _mobject_paths(member)]
     r_max = max(float(np.linalg.norm(path[:, :2], axis=1).max()) for path in paths)
     return paths, 0.015 * r_max
 

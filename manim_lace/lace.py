@@ -18,17 +18,38 @@ from typing import Any, Literal
 
 import manim
 import numpy as np
+from manim.utils.bezier import bezier as _bezier
 
-from .interlacing import Interlacing
+from .interlacing import PARALLEL_SIN_ATOL, Interlacing
 from .swatches import random_swatch
 
-__all__ = ["HOLE_GROUP_METHODS", "HoleGroupMethod", "Lace"]
+__all__ = [
+    "CURVE_SAMPLES",
+    "HOLE_GROUP_METHODS",
+    "RIBBON_GROUP_METHODS",
+    "HoleGroupMethod",
+    "Lace",
+    "RibbonGroupMethod",
+    "mobject_paths",
+]
 
 logger = logging.getLogger(__name__)
+
+#: 每条贝塞尔曲线在转成折线时采样的段数(见 :func:`mobject_paths`)。
+#:
+#: Manim 的 :meth:`~manim.VMobject.get_subpaths` 返回的是**控制点**(锚点 + 控制柄)而不是
+#: 曲线上的点: 直接把控制点当折线用会让平滑曲线失真(控制柄把曲线"撑"开), 例如
+#: ``ParametricFunction`` 的默认采样会得到一条不自交的之字形。这里按贝塞尔公式重采样,
+#: 每段取 ``CURVE_SAMPLES`` 个点(不含末点, 避免与下一段重复)。
+CURVE_SAMPLES = 8
 
 #: 支持的孔洞分组方法。
 HoleGroupMethod = Literal["by_area", "by_distance", "by_hole_index", "by_vertex_count"]
 HOLE_GROUP_METHODS: tuple[str, ...] = ("by_area", "by_distance", "by_hole_index", "by_vertex_count")
+
+#: 支持的丝带分组方法(``by_ribbon_index`` 逐片段轮换, 其余按分组线性铺开调色板)。
+RibbonGroupMethod = Literal["by_area", "by_distance", "by_path", "by_ribbon_index", "by_vertex_count"]
+RIBBON_GROUP_METHODS: tuple[str, ...] = ("by_area", "by_distance", "by_path", "by_ribbon_index", "by_vertex_count")
 
 
 def to_3d(coords: np.ndarray) -> np.ndarray:
@@ -46,6 +67,71 @@ def to_3d(coords: np.ndarray) -> np.ndarray:
     if coords.shape[1] == 3:
         return coords
     return np.hstack([coords, np.zeros((len(coords), 1))])
+
+
+def mobject_paths(mobject: manim.VMobject, samples: int = CURVE_SAMPLES) -> list[np.ndarray]:
+    """把一个 Manim 对象拆成"曲线折线"列表(每个子路径一条)。
+
+    与 :meth:`~manim.VMobject.get_subpaths` 的区别: 后者返回的是**控制点**(锚点 + 控制柄),
+    直接当折线用会让平滑曲线失真 —— ``ParametricFunction`` 的默认采样会被控制柄"撑"成一条
+    不自交的之字形, ``Circle`` 则变成控制点多边形(半径 2.069 的 17 边形)。这里按三次贝塞尔
+    公式在每个子路径上重采样, 得到真正落在曲线上的折线。
+
+    全是直线段的子路径(``Line`` / ``Rectangle`` / ``Polygram`` ...)直接取各段端点, 不做采样
+    —— 与"采样后共线清理"的结果完全一致, 但少 8 倍的点, 因此这类输入的几何**与之前完全相同**
+    (A/B 字节级基线依赖这一点)。
+
+    参数:
+        mobject: 任意 Manim 对象(会用到它的 ``points`` 与子路径切分)。传 ``VGroup`` 时请对
+            ``family_members_with_points()`` 的每个成员分别调用(:class:`Lace` 就是这么做的)。
+        samples: 每条贝塞尔曲线采样的段数, 必须 ``>= 2``。
+
+    返回:
+        折线坐标列表, 每项形如 ``(N, 3)``。
+
+    异常:
+        ValueError: ``samples < 2``。
+    """
+    if samples < 2:
+        raise ValueError(f"samples must be >= 2, got {samples}")
+
+    n_per_curve = int(getattr(mobject, "n_points_per_cubic_curve", 4))
+    paths: list[np.ndarray] = []
+    for subpath in mobject.get_subpaths():
+        points = np.asarray(subpath, dtype=float)
+        if n_per_curve != 4 or len(points) < n_per_curve or len(points) % n_per_curve:
+            paths.append(points)  # 不是标准的三次贝塞尔结构: 原样当作折线
+            continue
+
+        curves = points.reshape(-1, n_per_curve, 3)
+        if _all_straight(curves):
+            # 全是直线段(Line / Rectangle / Polygon / Star ...): 折线就是各段端点,
+            # 不必采样 —— 与下游的共线清理结果完全一致, 但少 8 倍的点。
+            paths.append(np.vstack([curves[:, 0], curves[-1, -1]]))
+            continue
+
+        params = np.linspace(0.0, 1.0, samples, endpoint=False)
+        # 向量化: 把每条曲线重复 samples 次, 一次求出所有段上的采样点
+        stacked = np.repeat(curves.transpose(1, 0, 2), samples, axis=1)  # (4, M * samples, 3)
+        polyline = _bezier(stacked)(np.tile(params, len(curves))[:, None])
+        paths.append(np.vstack([polyline, curves[-1][-1]]))
+    return paths
+
+
+def _all_straight(curves: np.ndarray) -> bool:
+    """判断一批三次贝塞尔段是否**全是直线**(两个控制柄都与弦共线)。
+
+    用相对判据(夹角正弦)而不是绝对量: ``|u × v| / (|u||v|)``, 阈值同
+    :data:`~manim_lace.interlacing.PARALLEL_SIN_ATOL`。
+    """
+    start, handle1, handle2, end = curves[:, 0], curves[:, 1], curves[:, 2], curves[:, 3]
+    chord = end - start
+    for handle in (handle1 - start, handle2 - start):
+        scale = np.linalg.norm(chord, axis=1) * np.linalg.norm(handle, axis=1)
+        cross = np.abs(chord[:, 0] * handle[:, 1] - chord[:, 1] * handle[:, 0])
+        if np.any(cross > PARALLEL_SIN_ATOL * np.maximum(scale, 1e-300)):
+            return False
+    return True
 
 
 def _polygon_area(coords: np.ndarray) -> float:
@@ -77,9 +163,31 @@ class Lace(manim.VGroup):
       - ``"by_hole_index"``: 每个孔自成一组, 颜色偏随机;
       - ``"by_vertex_count"``: 仅按孔的边数分组。
 
-    丝带样式直接通过 Manim 关键字参数传入(如 ``stroke_color`` /
+    丝带样式可以直接通过 Manim 关键字参数传入(如 ``stroke_color`` /
     ``stroke_width`` / ``fill_color`` / ``fill_opacity``), 它们会被转发给每个
-    丝带片段的 :class:`~manim.mobject.geometry.polygram.Polygon`。
+    丝带片段的 :class:`~manim.mobject.geometry.polygram.Polygon`; 也可以按分组自动
+    配色(与孔洞对称):
+
+    - ``ribbon_color``: 所有丝带的统一填充色(优先级高于 ``ribbon_swatch``);
+    - ``ribbon_swatch``: 自动着色使用的调色板; ``None``(默认)表示不按分组着色,
+      即所有丝带沿用传入的 kwargs, 保持旧行为;
+    - ``ribbon_group_method``: 丝带的分组方法, 默认 ``"by_ribbon_index"``:
+
+      - ``"by_ribbon_index"``: 每个片段自成一组并**逐片段轮换**调色板, 相邻片段换色,
+        便于看清交织结构的断口;
+      - ``"by_path"``: 按丝带归属的输入路径分组(最近的路径), 同一条路径的丝带同色,
+        适合多条路径组成的图形;
+      - ``"by_distance"``: 按丝带中心到整体中心的距离分组, 适合径向对称图形;
+      - ``"by_area"``: 按 (顶点数, 面积) 分组;
+      - ``"by_vertex_count"``: 仅按片段的边数分组。
+
+    显式传入 ``fill_color`` 时会覆盖分组配色。
+
+    输入转换: 目标对象会先被拆成**曲线折线**(见 :func:`mobject_paths`: 每个三次贝塞尔段按
+    :data:`CURVE_SAMPLES` 个点采样), 而不是把 Manim 的**控制点**直接当折线 —— 后者会让平滑
+    曲线失真(``ParametricFunction`` 默认采样会被控制柄"撑"成一条不自交的之字形)。
+    ``Line`` / ``Rectangle`` / ``Polygram`` 这类直线输入采样后会全部共线, 由共线清理还原,
+    几何与之前完全一致。
 
     输入退化检查: ``validate`` 参数转发给
     :class:`~manim_lace.interlacing.Interlacing`(见
@@ -95,7 +203,8 @@ class Lace(manim.VGroup):
 
     异常:
         ValueError: ``offset`` 非正、``hole_opacity`` 不在 ``[0, 1]``、
-            ``hole_group_method`` 不被支持、``hole_swatch`` 为空列表, 或
+            ``hole_group_method`` / ``ribbon_group_method`` 不被支持、
+            ``hole_swatch`` / ``ribbon_swatch`` 为空列表, 或
             ``validate="raise"`` 且输入退化时抛出。
     """
 
@@ -107,6 +216,9 @@ class Lace(manim.VGroup):
         hole_color: Any | None = None,
         hole_swatch: Sequence[Any] | None = None,
         hole_group_method: str = "by_area",
+        ribbon_color: Any | None = None,
+        ribbon_swatch: Sequence[Any] | None = None,
+        ribbon_group_method: str = "by_ribbon_index",
         validate: str = "warn",
         **kwargs: Any,
     ):
@@ -122,18 +234,28 @@ class Lace(manim.VGroup):
             )
         if hole_swatch is not None and len(hole_swatch) == 0:
             raise ValueError("hole_swatch must not be empty; pass None to use a random palette")
+        if ribbon_group_method not in RIBBON_GROUP_METHODS:
+            raise ValueError(
+                f"unknown ribbon_group_method {ribbon_group_method!r}, expected one of {RIBBON_GROUP_METHODS}",
+            )
+        if ribbon_swatch is not None and len(ribbon_swatch) == 0:
+            raise ValueError("ribbon_swatch must not be empty; pass None to keep the kwargs colour")
 
         self.offset = offset
         self.hole_opacity = hole_opacity
         self.hole_color = hole_color
         self.hole_group_method = hole_group_method
+        self.ribbon_color = ribbon_color
+        self.ribbon_group_method = ribbon_group_method
         self.kwargs = kwargs
         #: 实际用于孔洞着色的调色板。
         self.hole_swatch: tuple[Any, ...] = tuple(hole_swatch) if hole_swatch is not None else tuple(random_swatch())
+        #: 实际用于丝带分组着色的调色板; ``None`` 表示不按分组着色。
+        self.ribbon_swatch: tuple[Any, ...] | None = tuple(ribbon_swatch) if ribbon_swatch is not None else None
 
         paths: list[np.ndarray] = []
         for mob in list(target_mobject.family_members_with_points()):
-            paths.extend(mob.get_subpaths())
+            paths.extend(mobject_paths(mob))
 
         self.interlacing = Interlacing(paths, offset, validate=validate)
 
@@ -181,9 +303,15 @@ class Lace(manim.VGroup):
                     ),
                 )
 
-        # 2. 丝带片段: 用户传入的 kwargs 优先级更高
-        for ribbon in self.interlacing.ribbons:
+        # 2. 丝带片段: 分组配色(如启用)只填 fill_color, 用户传入的 kwargs 优先级更高
+        ribbon_colors = self._ribbon_colors()
+        for index, ribbon in enumerate(self.interlacing.ribbons):
             poly_kwargs: dict[str, Any] = {"color": self.kwargs.get("stroke_color", manim.WHITE)}
+            color = self.ribbon_color if self.ribbon_color is not None else None
+            if color is None and ribbon_colors is not None:
+                color = ribbon_colors[index]
+            if color is not None and "fill_color" not in self.kwargs:
+                poly_kwargs["fill_color"] = color
             poly_kwargs.update(self.kwargs)
             self.ribbons.add(manim.Polygon(*to_3d(ribbon), **poly_kwargs))
 
@@ -261,3 +389,103 @@ class Lace(manim.VGroup):
             raise ValueError(f"unknown hole_group_method {self.hole_group_method!r}")
 
         return {k: groups[k] for k in sorted_keys}
+
+    @functools.cached_property
+    def ribbon_groups(self) -> dict[Any, list[int]]:
+        """按 :attr:`ribbon_group_method` 对丝带片段分组。
+
+        返回:
+            ``{分组键: [片段下标, ...]}``, 键已排序以保证配色稳定可复现; 没有丝带时返回
+            空字典。与 :attr:`hole_groups` 的区别: 丝带着色的关键是"哪个片段用哪种颜色",
+            所以这里给的是**下标**而不是坐标。
+        """
+        ribbons = self.interlacing.ribbons
+        if not ribbons:
+            return {}
+
+        groups: dict[Any, list[int]] = defaultdict(list)
+
+        if self.ribbon_group_method == "by_ribbon_index":
+            for index in range(len(ribbons)):
+                groups[index].append(index)
+        elif self.ribbon_group_method == "by_vertex_count":
+            for index, ribbon in enumerate(ribbons):
+                groups[len(ribbon) - 1].append(index)
+        elif self.ribbon_group_method == "by_area":
+            for index, ribbon in enumerate(ribbons):
+                groups[(len(ribbon) - 1, round(_polygon_area(ribbon), 4))].append(index)
+        elif self.ribbon_group_method == "by_path":
+            for index, ribbon in enumerate(ribbons):
+                groups[self._nearest_path(ribbon)].append(index)
+        elif self.ribbon_group_method == "by_distance":
+            centers = np.array([np.mean(np.asarray(ribbon, dtype=float)[:-1, :2], axis=0) for ribbon in ribbons])
+            groups.update(self._group_indices_by_distance(centers))
+        else:  # pragma: no cover - 构造时已校验, 仅作为防御
+            raise ValueError(f"unknown ribbon_group_method {self.ribbon_group_method!r}")
+
+        return {key: groups[key] for key in sorted(groups)}
+
+    def _nearest_path(self, ribbon: np.ndarray) -> int:
+        """丝带片段归属到最近的输入路径(按片段顶点到折线的平均最近距离)。"""
+        verts = np.asarray(ribbon, dtype=float)[:-1, :2]
+        best_index, best_distance = 0, np.inf
+        for index, path in enumerate(self.interlacing.paths):
+            coords = np.asarray(path, dtype=float)[:, :2]
+            seg_a, seg_b = coords[:-1], coords[1:]
+            ab = seg_b - seg_a
+            ab_len2 = np.maximum(np.sum(ab * ab, axis=1), 1e-18)
+            ap = verts[:, None, :] - seg_a[None, :, :]
+            ratio = np.clip(np.sum(ap * ab[None, :, :], axis=2) / ab_len2[None, :], 0.0, 1.0)
+            proj = seg_a[None, :, :] + ratio[:, :, None] * ab[None, :, :]
+            distance = float(np.mean(np.linalg.norm(verts[:, None, :] - proj, axis=2).min(axis=1)))
+            if distance < best_distance:
+                best_index, best_distance = index, distance
+        return best_index
+
+    @staticmethod
+    def _group_indices_by_distance(centers: np.ndarray) -> dict[int, list[int]]:
+        """按"到整体中心的距离"把点分组: 排序后相邻距离出现明显跳跃就切一组。
+
+        阈值取最小真实跳跃的一半(过滤浮点噪声), 与 :attr:`hole_groups` 的
+        ``"by_distance"`` 保持一致。
+        """
+        global_center = np.mean(centers, axis=0)
+        distances = np.linalg.norm(centers - global_center, axis=1)
+        order = np.argsort(distances)
+        sorted_distances = distances[order]
+        diffs = np.diff(sorted_distances)
+        significant = diffs[diffs > 1e-5]
+        tolerance = float(np.min(significant) * 0.5) if len(significant) > 0 else 1e-3
+
+        groups: dict[int, list[int]] = defaultdict(list)
+        group_id = 0
+        groups[group_id].append(int(order[0]))
+        for position in range(len(sorted_distances) - 1):
+            if sorted_distances[position + 1] - sorted_distances[position] > tolerance:
+                group_id += 1
+            groups[group_id].append(int(order[position + 1]))
+        return groups
+
+    def _ribbon_colors(self) -> list[Any] | None:
+        """每个丝带片段的填充色(:attr:`ribbon_swatch` 为 ``None`` 时返回 ``None``)。
+
+        ``"by_ribbon_index"`` 逐片段轮换调色板(相邻片段换色, 便于看清断口); 其余分组方法
+        把调色板按组序线性铺开, 与孔洞的配色方式一致。
+        """
+        if self.ribbon_swatch is None:
+            return None
+        swatch = self.ribbon_swatch
+        count = len(self.interlacing.ribbons)
+        if self.ribbon_group_method == "by_ribbon_index":
+            return [swatch[index % len(swatch)] for index in range(count)]
+
+        colors: list[Any] = [swatch[0]] * count
+        groups = list(self.ribbon_groups.values())
+        for position, indices in enumerate(groups):
+            if len(groups) > 1:
+                color_index = int(round(position * (len(swatch) - 1) / (len(groups) - 1)))
+            else:
+                color_index = 0
+            for index in indices:
+                colors[index] = swatch[color_index % len(swatch)]
+        return colors
