@@ -67,6 +67,18 @@ def ring_path(sides: int = 65, radius: float = 2.0) -> np.ndarray:
     return np.vstack([coords, coords[:1]])
 
 
+def lissajous_paths(step: float = 0.01) -> list[np.ndarray]:
+    """密采样的利萨如曲线 ``(sin 2t, sin 3t)``: 一条自交 7 次的闭合路径。
+
+    这是"密采样自交曲线"的最小输入(缺陷报告的 d5/d6)。``step`` 是**折线步长**(不是参数
+    步长), 默认 ``0.01`` —— 与 ``offset=0.05`` 的丝带宽度之比约 ``0.3``: 一次自交的两个交点
+    沿轨相距约 ``2 * offset``, 会跨 4~8 条线段, 逐段索引配对的模型不再成立。
+    """
+    t = np.arange(0.0, 2.0 * np.pi, step)
+    coords = np.column_stack([np.sin(2.0 * t), np.sin(3.0 * t)])
+    return [np.vstack([coords, coords[:1]])]
+
+
 def ring_with_collinear_seam(size: float = 3.0) -> np.ndarray:
     """返回首尾边共线的闭合正方形(起点落在底边中点)。
 

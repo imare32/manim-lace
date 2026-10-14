@@ -14,9 +14,12 @@ import pytest
 
 from manim_lace.interlacing import Interlacing
 from tests.helpers import (
+    assert_closed_polygons,
+    assert_is_counter_clockwise,
     crossing_lines,
     lattice_paths,
     level_zero_rosette_paths,
+    lissajous_paths,
     ring_path,
     rosette_paths,
     square_ring,
@@ -359,3 +362,56 @@ class TestCheckerSelfConsistency:
         solver.ribbons.append(np.array([[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0], [0.0, 0.0]]))
         problems = visibility_problems(solver)
         assert any(problem.startswith("F") for problem in problems)
+
+
+class TestCrossingWeave:
+    """阶段 1 第三步: "按交叉身份"的编织(只对现行降级路径启用)。
+
+    逐段索引配对的前提是"一次穿越的两个交点落在同一条线段上", 密采样时它们沿轨相距约
+    ``2 * offset``、会跨若干条线段, 于是整个配对错位(实测交点处双带同绘)。新路径改用
+    :meth:`Interlacing._crossing_ribbon_cycles`, 并且**只修坏的**、宁缺勿滥。
+    """
+
+    def test_dense_lissajous_is_woven(self):
+        """密采样自交曲线: 不再降级, 且画面通过全部可见性检查。"""
+        solver = build(lissajous_paths(0.01), 0.05)
+        assert solver._degraded_paths == set()
+        assert set(solver._woven_paths) == {0}
+        assert len(solver.ribbons) >= 3
+        assert visibility_problems(solver) == []
+
+    def test_dense_lissajous_stays_finite_and_ccw(self):
+        solver = build(lissajous_paths(0.01), 0.05)
+        assert_closed_polygons(solver.ribbons)
+        assert_is_counter_clockwise(solver.ribbons)
+
+    def test_healthy_config_never_enters_the_new_path(self):
+        """健康配置不进新路径("只修坏的")。"""
+        paths, offset = rosette_paths(12, 2, "PA")
+        solver = build(paths, offset)
+        assert solver._woven_paths == {}
+        assert solver._degraded_paths == set()
+
+    def test_unaligned_config_keeps_degraded(self):
+        """新路径切出退化片段时整体放弃, 该路径保持降级(宁缺勿滥)。"""
+        paths, offset = rosette_paths(6, 3, "PR")
+        solver = build(paths, offset)
+        assert solver._woven_paths == {}
+        assert solver._degraded_paths == {0, 1}
+        assert solver.rail_issues
+
+    def test_cluster_pass_records_requires_mirrors(self):
+        cluster = [
+            (1, {"tgt": (0, 1, 5)}),
+            (1, {"tgt": (0, 2, 7)}),
+            (2, {"tgt": (0, 1, 6)}),
+            (2, {"tgt": (0, 2, 8)}),
+        ]
+        left, right = Interlacing._cluster_pass_records(cluster)
+        assert left[0]["tgt"] == (0, 1, 5)
+        assert left[1]["tgt"] == (0, 2, 7)
+        assert right[0]["tgt"] == (0, 1, 6)
+        assert right[1]["tgt"] == (0, 2, 8)
+        # 少一条镜像记录 / 对方轨道凑不齐 {1, 2} 时都不构成一次穿越
+        assert Interlacing._cluster_pass_records(cluster[:3]) is None
+        assert Interlacing._cluster_pass_records([*cluster[:3], (2, {"tgt": (0, 1, 9)})]) is None

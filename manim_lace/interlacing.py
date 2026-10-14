@@ -663,6 +663,7 @@ class Interlacing:
         self.ribbons: list[np.ndarray] = []
         self.rail_issues: list[str] = []
         self._degraded_paths: set[int] = set()
+        self._woven_paths: dict[int, list[np.ndarray]] = {}
 
         if not self.paths:
             logger.debug("Interlacing: 输入中没有可用的路径, 跳过求解。")
@@ -677,6 +678,8 @@ class Interlacing:
         self._align_all_rails()
         self._check_rail_geometry()
         self._fix_path_flags()
+        # 对"现行降级"的路径试一次按交叉身份的切分(只修坏的: 健康路径不进这里)
+        self._try_crossing_weave()
         if compute_overlaps:
             # 必须在 _set_holes 之前调用: 后者会向 d_seg_intersects 插入虚拟端点
             self._set_overlaps()
@@ -929,6 +932,21 @@ class Interlacing:
             for members, indices in zip(groups, crossings_per_group, strict=True)
         ]
 
+    def _segment_window(self, i: int) -> int:
+        """分簇/归属共用的**段数窗口**: 同一分支的角点沿轨相距约 ``2 * offset``。
+
+        换算成段数的阈值(``8 * offset / 段长``)同时用于 :meth:`_branch_clusters` 的分簇与
+        :meth:`_crossing_attribution` 的归属半径。
+        """
+        step = float(np.median(np.linalg.norm(np.diff(self.paths[i], axis=0), axis=1)))
+        return max(1, int(np.ceil(8.0 * self.offset / max(step, 1e-12))))
+
+    @staticmethod
+    def _segment_gap(first: float, second: float, num_seg: int, closed: bool) -> float:
+        """两个线段号之间的**环距**(闭合路径取绕回方向, 与 :meth:`_branch_clusters` 一致)。"""
+        gap = abs(float(first) - float(second))
+        return min(gap, num_seg - gap) if closed else gap
+
     @staticmethod
     def _nearest_segment(candidates: set[int], segs: list[int], num_seg: int, closed: bool) -> int:
         """在候选线段里挑离这一簇记录最近的那一段(闭合路径用环距)。
@@ -958,8 +976,7 @@ class Interlacing:
             return [list(members)]
         segs = np.array([record["seg"] for _track, record in members])
         num_seg = len(self.paths_l[i]) - 1
-        step = float(np.median(np.linalg.norm(np.diff(self.paths[i], axis=0), axis=1)))
-        window = max(1, int(np.ceil(8.0 * self.offset / max(step, 1e-12))))
+        window = self._segment_window(i)
         gaps = np.abs(segs[:, None] - segs[None, :])
         if self.paths_closed[i]:
             gaps = np.minimum(gaps, num_seg - gaps)
@@ -980,6 +997,56 @@ class Interlacing:
             clustered.setdefault(find(index), []).append(member)
         return list(clustered.values())
 
+    @staticmethod
+    def _pair_cluster_records(cluster: list[tuple[int, dict]]) -> list[tuple[dict, dict]] | None:
+        """把"一次穿越"在一个分支簇里的记录按**对方线段**配对(左轨记录 ↔ 它的镜像)。
+
+        判据是对方线段标识**完全相同**(对方路径 + 对方轨道 + 对方段号): 对方丝带的两条偏移线
+        与本丝带相交, 每个交点在本丝带的左右两条轨道上各有一条记录, 它们指向**同一条**对方
+        偏移线段。找不到唯一镜像时返回 ``None``(调用方放弃按交叉重建)。
+        """
+        rights = [record for track, record in cluster if track == 2]
+        pairs: list[tuple[dict, dict]] = []
+        for track, record in cluster:
+            if track != 1:
+                continue
+            target = record["tgt"]
+            if not isinstance(target, tuple):
+                return None
+            matched = [other for other in rights if isinstance(other["tgt"], tuple) and other["tgt"] == target]
+            if len(matched) != 1:
+                return None
+            rights.remove(matched[0])
+            pairs.append((record, matched[0]))
+        return pairs or None
+
+    @staticmethod
+    def _cluster_pass_records(cluster: list[tuple[int, dict]]) -> tuple[tuple[dict, dict], tuple[dict, dict]] | None:
+        """把一个分支簇整理成"一次穿越"的四个角点。
+
+        对方丝带的两条偏移线各与本丝带的左右两条轨道相交, 所以一次穿越在**每条轨道上**留下
+        两个交点。这里按**对方轨道**索引它们(1 = 对方左偏移线, 2 = 对方右偏移线), 返回
+        ``(左轨的一对, 右轨的一对)``; 同一个交叉的两条偏移线在同一位置的不同段上被登记
+        (密采样时更是跨 4~8 段), 所以不能用对方**段号**来配对。
+
+        任一条轨道的记录不是恰好两条、或对方轨道索引凑不齐 ``{1, 2}`` 时返回 ``None``。
+        """
+        result: dict[int, tuple[dict, dict]] = {}
+        for track in (1, 2):
+            records = [record for record_track, record in cluster if record_track == track]
+            if len(records) != 2:
+                return None
+            slots: dict[int, dict] = {}
+            for record in records:
+                target = record["tgt"]
+                if not isinstance(target, tuple) or target[1] not in (1, 2):
+                    return None
+                slots[target[1]] = record
+            if set(slots) != {1, 2}:
+                return None
+            result[track] = (slots[1], slots[2])
+        return result[1], result[2]
+
     def _crossing_attribution(self, i: int) -> tuple[list[dict], list, list[dict], list, int] | None:
         """按交叉分组算出新的线段归属(阶段 1); 分组不干净或配对不完整时返回 ``None``。
 
@@ -996,6 +1063,7 @@ class Interlacing:
             return None
 
         num_seg = len(self.paths_l[i]) - 1
+        window = self._segment_window(i)
         pairs = 0
         for group_index, (members, raw_crossings) in enumerate(groups):
             if not members:
@@ -1009,43 +1077,31 @@ class Interlacing:
             # 段数(`8 * offset / 段长`), 闭合路径用**环距**(交叉落在闭合点附近时同一分支横跨绕回处)。
             clusters = self._branch_clusters(i, members)
             for cluster in clusters:
-                lefts = [record for track, record in cluster if track == 1]
-                rights = [record for track, record in cluster if track == 2]
-                if len(lefts) != len(rights):
+                cluster_pairs = self._pair_cluster_records(cluster)
+                if cluster_pairs is None:
                     logger.debug(
-                        "Interlacing: 路径 %d 的交叉 %d 里同一分支两侧记录数不等(L=%d, R=%d), 放弃按交叉重建。",
+                        "Interlacing: 路径 %d 的交叉 %d 里同一分支的镜像记录不唯一, 放弃按交叉重建。",
                         i,
                         group_index,
-                        len(lefts),
-                        len(rights),
                     )
                     return None
-                for first in lefts:
-                    key = first["tgt"][:2] if isinstance(first["tgt"], tuple) else None
-                    if key is None:
-                        return None
-                    matched = [
-                        record for record in rights if isinstance(record["tgt"], tuple) and record["tgt"][:2] == key
-                    ]
-                    if len(matched) != 1:
-                        logger.debug(
-                            "Interlacing: 路径 %d 的交叉 %d 里 seg=%d 找不到唯一的镜像记录(命中 %d), 放弃按交叉重建。",
-                            i,
-                            group_index,
-                            first["seg"],
-                            len(matched),
-                        )
-                        return None
-                    second = matched[0]
-                    rights.remove(second)
-                    cluster_segs = [record["seg"] for _track, record in cluster]
-                    owner = self._nearest_segment(
-                        candidates,
-                        cluster_segs,
-                        num_seg,
-                        self.paths_closed[i],
-                    )
-                    first["owner"] = second["owner"] = owner
+                cluster_segs = [record["seg"] for _track, record in cluster]
+                owner = self._nearest_segment(
+                    candidates,
+                    cluster_segs,
+                    num_seg,
+                    self.paths_closed[i],
+                )
+                for first, second in cluster_pairs:
+                    own_seg = int(round(float(np.median([first["seg"], second["seg"]]))))
+                    pair_owner = owner
+                    if self._segment_gap(pair_owner, own_seg, num_seg, self.paths_closed[i]) > window:
+                        # 候选段离这一对太远: 自交的两条分支可以相隔近半个曲线, 而它们共用
+                        # 同一批候选段 —— 强行归过去会把两条分支折叠到同一段(不同旧键 ->
+                        # 同一新键, 坐标互相覆盖), 事件于是挂在"不在其上的线段"上, 后续按段
+                        # 切分整片错乱。保留这一对自己所在的段。
+                        pair_owner = own_seg
+                    first["owner"] = second["owner"] = pair_owner
                     pairs += 1
         return left, seams_l, right, seams_r, pairs
 
@@ -1095,6 +1151,15 @@ class Interlacing:
                     moves.append((old_key, new_key))
         if len({old for old, _ in moves}) != len(set(moves)):
             logger.debug("Interlacing: 路径 %d 的重归属目标互相冲突, 跳过重归属。", i)
+            return
+        folded: dict[frozenset, set[frozenset]] = defaultdict(set)
+        for old_key, new_key in moves:
+            folded[new_key].add(old_key)
+        if any(len(olds) > 1 for olds in folded.values()):
+            # 两条**不同**的边被折到同一把新键上: 字典写入会互相覆盖, 一个交点的坐标被另一个
+            # 顶替 —— 事件挂在"不在其上的线段"上, 后续按段切分会整片错乱(实测稠密自交曲线)。
+            # 宁可保持降级, 也不静默画错。
+            logger.debug("Interlacing: 路径 %d 的重归属会把不同交点折叠到同一把键上, 跳过重归属。", i)
             return
         try:
             # 同一次改挂里两条记录共用旧键(同一事件的另一端), 所以先一并读出、再一并删除/写入
@@ -1229,6 +1294,23 @@ class Interlacing:
                 self.rail_issues.append(f"路径 {i}: 存在落在偏移线拐点上的交叉(接头处退化)")
                 self._degraded_paths.add(i)
 
+    def _try_crossing_weave(self) -> None:
+        """对"现行降级"的路径试一次**按交叉身份**的编织(阶段 1 第三步)。
+
+        流程 = :meth:`_crossing_ribbon_cycles`, **不改任何中间状态**(失败即放弃)。成功的路径
+        改用编织片段并撤销降级标记, 其余保持"不编织"的整条丝带 —— 即"只修坏的": 健康路径根本
+        不进这里, 救不回来的配置输出也逐字节不变。降级结论与**告警**在这里统一给出(此前
+        :meth:`_check_rail_geometry` 只写 :attr:`rail_issues`, 结论要等这次尝试之后才最终确定)。
+        """
+        self._woven_paths: dict[int, list[np.ndarray]] = {}
+        for i in sorted(self._degraded_paths):
+            cycles = self._crossing_ribbon_cycles(i)
+            if cycles is None:
+                continue
+            self._woven_paths[i] = cycles
+            self._degraded_paths.discard(i)
+            prefix = f"路径 {i}:"
+            self.rail_issues = [issue for issue in self.rail_issues if not issue.startswith(prefix)]
         if self.rail_issues:
             warnings.warn(
                 "偏移线不满足配对契约(同一线段左右交点数不等或交叉落在拐点上), "
@@ -1816,6 +1898,163 @@ class Interlacing:
             logger.debug("Interlacing: 修正起始 flag 以满足交叉处的上下压自洽: %s -> %s", current, solved)
         self.paths_flag = solved
 
+    def _outer_boundary_vertices(self, first: dict, second: dict) -> list[tuple]:
+        """一次穿越的两条记录所连的**对方偏移线**上、两个交点之间的折线顶点。
+
+        切口端头必须贴着对方丝带的边界, 否则(密采样时对方边界本身也跨若干段)端头直线会
+        **斜穿中心线**: 实测交叉附近出现"一侧双覆盖、另一侧破洞"各一处。返回
+        ``[(节点键, 坐标), ...]``(不含两个交点本身); 对方轨道/段号对不上时返回空列表。
+        """
+        target_a, target_b = first["tgt"], second["tgt"]
+        if not isinstance(target_a, tuple) or not isinstance(target_b, tuple):
+            return []
+        if target_a[0] != target_b[0] or target_a[1] != target_b[1]:
+            return []
+        path_index, track = int(target_a[0]), int(target_a[1])
+        rail = self.paths_l[path_index] if track == 1 else self.paths_r[path_index]
+        num_seg = len(rail) - 1
+        if num_seg < 1:
+            return []
+        start, end = int(target_a[2]), int(target_b[2])
+        if start == end:
+            return []
+        if self.paths_closed[path_index]:
+            forward = (end - start) % num_seg
+            backward = (start - end) % num_seg
+        else:
+            forward, backward = end - start, start - end
+        if forward <= backward:
+            indices = [(start + 1 + k) % num_seg for k in range(max(forward, 0))]
+        else:
+            indices = [(start - k) % num_seg for k in range(max(backward, 0))]
+        return [((path_index, "o", track, index), rail[index]) for index in indices]
+
+    def _crossing_ribbon_cycles(self, i: int) -> list[np.ndarray] | None:
+        """按**交叉身份**切分路径 ``i`` 的丝带(阶段 1 第三步, 只用于现行降级路径)。
+
+        :meth:`_set_ribbons` 的逐段索引配对有一个隐含前提: "一次穿越的两个交点落在同一条
+        线段的左右两条轨道上"。密采样时这两个交点沿轨相距约 ``2 * offset``(正好是对方丝带的
+        宽度), 会跨 4~8 条线段 —— 逐段配对足以把整条曲线连成一片(交点处双带同绘)。契约自检
+        只保证"每段左右计数相等", 抓不到这种跨段错位(实测密采样利萨如的载荷里出现 (3,3) 的
+        奇数段)。
+
+        这里改用与"段"无关的表示:
+
+        * **穿越** = :meth:`_crossing_groups` 给出的一个中心线交叉在某条分支上的一次通过,
+          它在左/右轨道上各有 2 个交点(与对方丝带的两条偏移线), 由
+          :meth:`_cluster_pass_records` 按**对方轨道**配对;
+        * **覆盖区间** = 这一对交点在轨道上的区间(可以跨段), 按弧长顺序处理;
+        * **过/欠**仍按交替赋值: 实测自交交叉的两次通过在通过序列里的位置差恒为奇数, 所以
+          交替一定自洽(`paths_flag[i]` 只决定相位); 被压的一方在覆盖区间处断开, 并在区间两端
+          与另一条轨道连成丝带端头。
+
+        返回片段多边形列表; 任何一步对不上(分组不干净 / 镜像不唯一 / 一次穿越不是 2 个交点)
+        都返回 ``None``, 调用方保持降级(宁缺勿滥)。**只对现行降级路径调用**, 因此健康配置的
+        输出逐字节不变。
+        """
+        left, _seams_l = self._rail_events(i, 1)
+        right, _seams_r = self._rail_events(i, 2)
+        if not left or len(left) != len(right):
+            return None
+        groups = self._crossing_groups(i, left, right)
+        if groups is None:
+            return None
+
+        passes: list[tuple[tuple[dict, dict], tuple[dict, dict]]] = []
+        for members, _raw in groups:
+            for cluster in self._branch_clusters(i, members):
+                corners = self._cluster_pass_records(cluster)
+                if corners is None:
+                    return None
+                passes.append(corners)
+        if not passes:
+            return None
+        passes.sort(key=lambda corners: min(record["arc"] for pair in corners for record in pair))
+
+        cuts: list[tuple[tuple[dict, dict], tuple[dict, dict]]] = []
+        flag = self.paths_flag[i]
+        for corners in passes:
+            if flag:
+                cuts.append(corners)
+            flag = not flag
+        if not cuts:
+            return None
+
+        nodes: list[np.ndarray] = []
+        seen: dict = {}
+
+        def node(key, point) -> int:
+            if key not in seen:
+                seen[key] = len(nodes)
+                nodes.append(np.asarray(point, dtype=float)[:2])
+            return seen[key]
+
+        graph = networkx.Graph()
+        chains: dict[int, list[int]] = {}
+        positions: dict[int, dict[int, int]] = {}
+        for track, rail, records in ((1, self.paths_l[i], left), (2, self.paths_r[i], right)):
+            num_seg = len(rail) - 1
+            by_seg: dict[int, list[dict]] = defaultdict(list)
+            for record in records:
+                by_seg[record["seg"]].append(record)
+            chain: list[int] = []
+            position: dict[int, int] = {}
+            for j in range(num_seg):
+                chain.append(node((track, "v", j), rail[j]))
+                for record in by_seg.get(j, []):
+                    position[id(record)] = len(chain)
+                    chain.append(node((track, "e", id(record)), record["point"]))
+            if not self.paths_closed[i]:
+                chain.append(node((track, "v", num_seg), rail[num_seg]))
+            for first, second in zip(chain, chain[1:]):
+                graph.add_edge(first, second)
+            if self.paths_closed[i]:
+                graph.add_edge(chain[-1], node((track, "v", 0), rail[0]))
+            chains[track] = chain
+            positions[track] = position
+
+        for left_pair, right_pair in cuts:
+            for track, pair in ((1, left_pair), (2, right_pair)):
+                chain = chains[track]
+                position = positions[track]
+                start, end = position[id(pair[0])], position[id(pair[1])]
+                if start > end:
+                    start, end = end, start
+                if end - start > len(chain) // 2:
+                    # 覆盖区间跨过闭合点(原点这类"两次通过都贴着起点"的自交): 该挖的是补集
+                    spans = [(0, start), (end, len(chain) - 1)]
+                else:
+                    spans = [(start, end)]
+                for span_start, span_end in spans:
+                    for k in range(span_start, span_end):
+                        if graph.has_edge(chain[k], chain[k + 1]):
+                            graph.remove_edge(chain[k], chain[k + 1])
+            for left, right in ((left_pair[0], right_pair[0]), (left_pair[1], right_pair[1])):
+                previous = node((1, "e", id(left)), left["point"])
+                for key, point in self._outer_boundary_vertices(left, right):
+                    current = node(key, point)
+                    graph.add_edge(previous, current)
+                    previous = current
+                graph.add_edge(previous, node((2, "e", id(right)), right["point"]))
+
+        cycles: list[np.ndarray] = []
+        for cycle in networkx.cycle_basis(graph):
+            if len(cycle) < 3:
+                continue
+            coords = np.array([nodes[index] for index in [*cycle, cycle[0]]])
+            if not right_handed(coords):
+                coords = coords[::-1]
+            if len(coords) < 4 or abs(_signed_area(coords)) <= DEFAULT_ATOL:
+                # 退化片段(顶点不足 / 面积为零): 说明这次切分没对上, **整体放弃**保持降级。
+                # 这是"宁缺勿滥"的运行期兜底 —— 实测 PR n=6 L=3 会切出退化的零面积片段,
+                # 画面 A/C/D/E 全亮(证据见 PROGRESS §3 P0-5)。
+                return None
+            cycles.append(coords)
+        if len(cycles) != len(cuts):
+            # 片段数与"该切几刀"不符, 同样视为没对上
+            return None
+        return cycles or None
+
     def _set_ribbons(self) -> None:
         """提取丝带片段多边形。
 
@@ -1826,18 +2065,25 @@ class Interlacing:
         两条轨道互为平行轨, 交点应成对出现且顺序一致; 缺失的近失交点已由
         :meth:`_align_all_rails` 在求解早期补齐, 这里直接逐事件配对。
 
-        以下两类路径不参与编织切分, 直接产出一条**整条丝带**(外轮廓 + 内轮廓合成的
-        环形带):
+        以下路径不参与逐段编织切分:
 
         * 无自交点的闭合路径: 否则左右偏移线会各自闭合成一个实心圆盘, 内侧圆盘把
-          孔洞整个盖死(缺陷 1);
-        * 派生几何不满足配对契约的路径(见 :meth:`_check_rail_geometry`): 强行切分
-          只会产出跨越大半个图形的错乱片段(缺陷 3), 降级成"不编织"的整条丝带至少
-          保证形状正确。
+          孔洞整个盖死(缺陷 1), 直接产出一条"整条丝带"(外轮廓 + 内轮廓合成的环形带);
+        * 派生几何不满足配对契约的路径(见 :meth:`_check_rail_geometry`): 强行按索引配对
+          只会产出跨越大半个图形的错乱片段(缺陷 3)。这类路径先试一次
+          :meth:`_crossing_ribbon_cycles`(按交叉身份切分, 见 :meth:`_try_crossing_weave`),
+          成功就用编织片段, 否则降级成"不编织"的整条丝带(至少保证形状正确)。
         """
         self.ribbons = []
         for i, path in enumerate(self.paths):
-            if self._is_simple_closed(i) or i in self._degraded_paths:
+            if self._is_simple_closed(i):
+                self.ribbons.append(self._plain_band(i))
+                continue
+            if i in self._woven_paths:
+                # 现行降级、但"按交叉身份"切分成功(阶段 1 第三步): 用编织片段
+                self.ribbons.extend(self._woven_paths[i])
+                continue
+            if i in self._degraded_paths:
                 self.ribbons.append(self._plain_band(i))
                 continue
 
