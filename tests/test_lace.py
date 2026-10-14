@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from manim import (
+    BLACK,
     BLUE,
     GREEN,
     LEFT,
@@ -16,14 +17,17 @@ from manim import (
     Line,
     ManimColor,
     ParametricFunction,
+    Polygon,
+    Polygram,
     Square,
     VGroup,
     VMobject,
 )
 
 from manim_lace import HOLE_GROUP_METHODS, RIBBON_GROUP_METHODS, Lace
-from manim_lace.lace import mobject_paths, to_3d
-from tests.helpers import polygon_area
+from manim_lace.interlacing import Interlacing, annulus_polygon
+from manim_lace.lace import _annulus_loops, _signed_area, mobject_paths, to_3d
+from tests.helpers import polygon_area, ring_path
 from tests.weave_checks import points_in_polygon
 
 
@@ -463,3 +467,195 @@ class TestDenseCurves:
         assert len(circle) == 1 and len(segment) == 1
         assert circle[0].shape[1] == 3
         np.testing.assert_allclose(segment[0][[0, -1], :2], [[-1.0, 0.0], [1.0, 0.0]])
+
+
+class TestAnnulusRibbonSubpaths:
+    """无自交闭合路径的环形丝带: 渲染成"外环 + 内环"两个子路径, 描边无狭缝线。
+
+    缺陷 1 修复后, 环形丝带由 :func:`~manim_lace.interlacing.annulus_polygon` 缝成
+    **一条**轮廓(狭缝 = 两条零宽度重合边): 填充正确, 但描边会把狭缝画成一条横跨带子的
+    线。现在渲染层把它拆回两个子路径(外环逆时针 / 内环顺时针), Manim 的 cairo 后端对
+    每个子路径分别 ``close_path`` 再描边, 狭缝线消失; 几何点阵不变, 因此指纹与编织
+    校验不受影响。
+    """
+
+    @staticmethod
+    def crossing_lines() -> VGroup:
+        return VGroup(Line([-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]), Line([-1.0, 1.0, 0.0], [1.0, -1.0, 0.0]))
+
+    def test_simple_closed_ribbon_has_two_subpaths(self, square):
+        lace = Lace(square, offset=0.2)
+        assert lace.num_ribbons == 1
+        ribbon = lace.ribbons[0]
+        assert isinstance(ribbon, Polygram)
+        loops = ribbon.get_subpaths()
+        assert len(loops) == 2
+        for loop in loops:
+            assert np.array_equal(loop[0], loop[-1])  # 每条子路径各自闭合
+        areas = [_signed_area(loop[:, :2]) for loop in loops]
+        assert areas[0] > 0 > areas[1]  # 外环逆时针 / 内环顺时针(非零绕数下内区为 0)
+
+    def test_circle_ribbon_has_two_subpaths(self):
+        # Circle 的环带顶点最密(32+), 结构识别不能依赖"边长"之类的启发式
+        lace = Lace(Circle(radius=2.0), offset=0.2)
+        assert lace.num_ribbons == 1
+        assert len(lace.ribbons[0].get_subpaths()) == 2
+
+    def test_annulus_ribbon_keeps_fill_and_stroke_kwargs(self, square):
+        lace = Lace(square, offset=0.2, fill_color="#123456", stroke_color=BLACK, stroke_width=3)
+        ribbon = lace.ribbons[0]
+        assert ManimColor(ribbon.get_fill_color()).to_hex() == "#123456"
+        assert ribbon.get_stroke_width() == pytest.approx(3)
+
+    def test_woven_ribbons_stay_single_contour(self):
+        lace = Lace(self.crossing_lines(), offset=0.2)
+        assert lace.num_ribbons > 1
+        for ribbon in lace.ribbons:
+            assert len(ribbon.get_subpaths()) == 1
+            assert isinstance(ribbon, Polygon)
+
+    def test_open_path_strip_stays_single_contour(self):
+        lace = Lace(Line(LEFT, RIGHT), offset=0.2)
+        assert lace.num_ribbons == 1
+        assert len(lace.ribbons[0].get_subpaths()) == 1
+
+    def test_geometry_array_is_unchanged(self, square):
+        # 几何层仍是带狭缝的单轮廓(matrix_digest / weave_checks 依赖这一点),
+        # 只有 mobject 拆成两个子路径
+        lace = Lace(square, offset=0.2)
+        ribbon = lace.interlacing.ribbons[0]
+        loops = _annulus_loops(ribbon)
+        assert loops is not None
+        outer, inner = loops
+        assert np.array_equal(outer[0], ribbon[0])  # 外环从数组首点出发
+        vertices = np.vstack([outer, inner])
+        for point in ribbon:  # 原数组的每个顶点都来自拆开的两条环
+            assert np.any((vertices == point).all(axis=1))
+        for point in vertices:  # 反之亦然(没有凭空多出/丢掉顶点)
+            assert np.any((ribbon == point).all(axis=1))
+
+    def test_hole_under_the_annulus_is_still_visible(self, square):
+        # 拆子路径不改变填充区域: 孔洞中心仍不在丝带内(缺陷 1 的回归不能破)
+        lace = Lace(square, offset=0.2)
+        hole_center = lace.interlacing.holes[0][:-1].mean(axis=0)
+        assert not np.any(points_in_polygon(lace.interlacing.ribbons[0], hole_center[None, :]))
+
+
+class TestCrossingGroups:
+    """阶段 1 的只读前置: 按中心线交叉给轨记录分组(不参与任何决策)。"""
+
+    @staticmethod
+    def crossing_lines() -> list[np.ndarray]:
+        return [
+            np.array([[-1.0, 0.0], [1.0, 0.0]]),
+            np.array([[0.0, -1.0], [0.0, 1.0]]),
+        ]
+
+    def test_crossing_lines_group_cleanly(self):
+        inter = Interlacing(self.crossing_lines(), 0.2, validate="ignore")
+        groups = inter._crossing_groups(0)
+        assert groups is not None
+        assert len(groups) == 1  # 一个交叉
+        attribution = inter._crossing_attribution(0)
+        assert attribution is not None
+        assert attribution[4] == 2  # 两侧轨道各 2 个角点 = 2 对
+
+    def test_healthy_config_has_clean_groups_for_every_path(self):
+        inter = Interlacing(self.crossing_lines(), 0.2, validate="ignore")
+        for i in range(len(inter.paths)):
+            assert inter._crossing_groups(i) is not None
+            assert inter._crossing_attribution(i) is not None
+
+    def test_dense_lissajous_has_near_coincident_crossings(self):
+        # (2,3) 利萨如的采样点正好落在交叉上(离散化使然) → 同一位置被两条相邻线段对各枚举一次,
+        # 出现两个几乎重合的锚点; `_merge_crossings` 必须把它们并成一组, 否则记录会"命中两个锚点"
+        # 而被判歧义(见 PROGRESS §3 P0-5)。
+        curve = ParametricFunction(
+            lambda t: np.array([np.sin(2 * t), np.sin(3 * t), 0.0]),
+            t_range=(0, TAU, 0.05),
+            use_smoothing=False,
+        )
+        inter = Interlacing(mobject_paths(curve), 0.05, validate="ignore")
+        crossings = inter._centerline_crossings(0)
+        points = np.array([crossing["point"] for crossing in crossings])
+        gaps = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+        np.fill_diagonal(gaps, np.inf)
+        assert gaps.min() < 0.1 * inter.offset  # 存在两个几乎重合的锚点
+        anchors, _limits, merged = inter._merge_crossings(crossings)
+        assert len(anchors) < len(crossings)  # 合并后锚点变少
+        assert any(len(group) > 1 for group in merged)  # 确实合并了
+
+    def test_dense_lissajous_is_degraded_and_groups_cleanly(self):
+        # 新路径的启用前提: ① 现行实现确实降级; ② 分组干净(合并 + 绕回感知分簇之后)。
+        # ⚠️ "归属算得出来"在测试进程里不是稳定的性质(几何对枚举顺序敏感), 所以不断言;
+        # 更要紧的是: **画面判定(C/D/E)仍不过** —— 缺口在 `_set_ribbons` 的片段构造,
+        # 因此这条新路径**不接入决策路径**(见 PROGRESS §3 P0-5)。
+        curve = ParametricFunction(
+            lambda t: np.array([np.sin(2 * t), np.sin(3 * t), 0.0]),
+            t_range=(0, TAU, 0.05),
+            use_smoothing=False,
+        )
+        inter = Interlacing(mobject_paths(curve), 0.05, validate="ignore")
+        assert inter._degraded_paths == {0}
+        assert inter._crossing_groups(0) is not None
+
+    def test_healthy_configs_are_not_degraded(self):
+        # 阶段 1 的启用条件是"现行实现会降级", 健康配置根本不会走到新路径
+        inter = Interlacing(self.crossing_lines(), 0.2, validate="ignore")
+        assert inter._degraded_paths == set()
+        assert inter.rail_issues == []
+
+
+class TestAnnulusLoops:
+    """``_annulus_loops`` 的结构识别: 只认 ``annulus_polygon`` 的产物。"""
+
+    @staticmethod
+    def restitch(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+        """按 annulus_polygon 的公式把两条环缝回一条轮廓。
+
+        ``inner`` 是**遍历方向**(顺时针)的内环, 缝回去要先换回逆时针起点环。
+        """
+        ccw = np.roll(inner[::-1], 1, axis=0)
+        return np.vstack([outer, outer[:1], ccw[:1], ccw[:0:-1], ccw[:1], outer[:1]])
+
+    def test_round_trips_annulus_polygon(self):
+        outer = np.array([[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]])
+        inner = np.array([[1.0, 1.0], [1.0, 3.0], [3.0, 3.0], [3.0, 1.0]])  # 顺时针
+        ribbon = annulus_polygon(outer, inner)
+        loops = _annulus_loops(ribbon)
+        assert loops is not None
+        split_outer, split_inner = loops
+        np.testing.assert_array_equal(self.restitch(split_outer, split_inner), ribbon)
+        assert _signed_area(split_outer) > 0 > _signed_area(split_inner)
+        assert _signed_area(split_outer) > -_signed_area(split_inner)
+
+    def test_round_trips_dense_ring(self):
+        outer = ring_path(65, 2.0)
+        inner = ring_path(65, 1.8)[::-1]
+        ribbon = annulus_polygon(outer, inner)
+        loops = _annulus_loops(ribbon)
+        assert loops is not None
+        split_outer, split_inner = loops
+        np.testing.assert_array_equal(self.restitch(split_outer, split_inner), ribbon)
+
+    def test_rejects_plain_closed_polygon(self):
+        triangle = np.array([[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 0.0]])
+        assert _annulus_loops(triangle) is None
+
+    def test_rejects_open_path_strip(self):
+        left = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        right = np.array([[0.0, 0.3], [1.0, 0.3], [2.0, 0.3]])
+        strip = np.vstack([left, right[::-1], left[:1]])
+        assert _annulus_loops(strip) is None
+
+    def test_rejects_same_winding_inner_loop(self):
+        # 内环与外环同向时非零绕数填不出孔洞, 必须退回单轮廓狭缝多边形
+        outer = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]])
+        inner = np.array([[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]])
+        assert _annulus_loops(np.vstack([outer, inner, outer[:1]])) is None
+
+    def test_rejects_inner_loop_larger_than_outer(self):
+        # "内环"比外环还大时不是环形带, 同样退回单轮廓狭缝多边形
+        outer = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]])
+        inner = np.array([[0.5, 0.5], [0.5, 3.0], [3.0, 3.0], [3.0, 0.5], [0.5, 0.5]])
+        assert _annulus_loops(np.vstack([outer, inner, outer[:1]])) is None

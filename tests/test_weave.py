@@ -15,6 +15,7 @@ import pytest
 from manim_lace.interlacing import Interlacing
 from tests.helpers import (
     crossing_lines,
+    lattice_paths,
     level_zero_rosette_paths,
     ring_path,
     rosette_paths,
@@ -100,7 +101,13 @@ class TestSimpleClosedCurves:
 
 
 class TestConcentricRosetteAlignment:
-    """缺陷 3: 同心玫瑰线(CR)的左右偏移线交点应逐事件对齐。"""
+    """缺陷 3: 同心玫瑰线(CR)的左右偏移线交点应逐事件对齐。
+
+    注意(缺陷 10 之后): 这些配置降级的原因从"逐段交点数不等"变成了更精确的结构判据
+    ——"交叉落在偏移线拐点上"(见 :meth:`Interlacing._has_joint_crossing`)。原先它们是被
+    **丢掉的交点**意外保护的: 固定参数容差 1e-9 把落在对方线段端点(构造误差 ~1e-7)的
+    交点整条丢掉, 于是逐段计数恰好不等。
+    """
 
     def test_rail_event_counts_match_on_the_defective_segment(self):
         paths, offset = rosette_paths(10, 3, "CR")
@@ -143,6 +150,36 @@ class TestConcentricRosetteAlignment:
         solver = build(paths, offset)
         assert solver.rail_issues == []
         assert solver.ribbons  # 仍然正常编织
+
+    def test_near_endpoint_intersections_are_registered(self):
+        """缺陷 10: 交点落在对方线段端点(构造误差 ~1e-7)时**不能**被容差丢掉。
+
+        两条路径的中心线恰好交在对方**拐点**上时, 偏移线求交就落在对方轨段的端点上。
+        旧实现用固定的参数容差 ``1e-9`` 判"是否落在段内", 参数误差却可以到 ``1e-7``
+        (偏移线拐点由 miter 公式算出, 与另一条轨的直线交点只会**近似**重合) —— 于是
+        这些交点被整条丢掉, 同一个交叉只有一侧登记事件。
+        """
+        paths, offset = rosette_paths(10, 3, "CR")
+        solver = build(paths, offset)
+        for seg_id, tgt in (((0, 2, 1), (1, 2, 11)), ((0, 1, 1), (1, 1, 11))):
+            assert frozenset((seg_id, tgt)) in solver.d_intersections
+            assert tgt in solver.d_seg_intersects[seg_id]
+
+    def test_joint_crossings_are_reported_as_degenerate(self):
+        # 交叉落在拐点上 = 按索引配对无法表达 -> 结构化地判退化(而不是靠"丢事件"意外保护)
+        paths, offset = rosette_paths(10, 3, "CR")
+        solver = build(paths, offset)
+        assert solver._has_joint_crossing(0)
+        assert any("拐点" in issue for issue in solver.rail_issues)
+        assert len(solver.rail_issues) == len(solver.paths)
+
+    @pytest.mark.parametrize(("n", "level", "star_type"), [(12, 2, "PA"), (9, 1, "CA"), (8, 4, "PA"), (12, 4, "CA")])
+    def test_clean_configs_have_no_joint_crossings(self, n, level, star_type):
+        # 判据不能误伤正常输入(否则会把已经编织正确的配置打成降级)
+        paths, offset = rosette_paths(n, level, star_type)
+        solver = build(paths, offset)
+        assert not any(solver._has_joint_crossing(i) for i in range(len(solver.paths)))
+        assert solver._degraded_paths == set()
 
 
 class TestRailAttributionNormalization:
@@ -191,6 +228,67 @@ class TestRailAttributionNormalization:
         assert (len(solver.holes), len(solver.ribbons)) == (49, 48)
         problems: list[str] = []
         assert check_alternation(solver, problems) == 0
+
+
+def dangling_event_references(solver: Interlacing) -> list[tuple]:
+    """返回"线段列表里引用了、但交点表里查不到坐标"的事件标识(正常必须为空)。"""
+    return [
+        (seg_id, tgt)
+        for seg_id, targets in solver.d_seg_intersects.items()
+        for tgt in targets
+        if isinstance(tgt, tuple) and frozenset((seg_id, tgt)) not in solver.d_intersections
+    ]
+
+
+class TestReattributionConsistency:
+    """缺陷 9: 重归属必须把"事件的另一端"一起改写, 不留查不到坐标的引用。
+
+    事件的身份是 ``(本方线段, 对方线段)`` 这一对标识。**同一条线段上常常只有一部分事件
+    改挂**、其余留在原线段(实测 ``CA n=9 L4`` 的 36 号线段 6 个事件里只走 1 个), 所以对方
+    那一端只能按**事件**找到它的另一端记录再改写, 不能按线段整体替换。
+
+    漏改的后果不是"少切一刀", 而是线段列表里出现**没有交点坐标的标识**: 后续
+    :meth:`Interlacing._fix_path_flags` / :meth:`Interlacing._set_holes` 按标识取坐标时抛
+    :class:`KeyError`, 整幅图求解失败(修复前命中 ``PA n=7 L7`` / ``PA n=11 L8`` /
+    ``CA n=12 L6`` / ``CA n=15 L7`` / ``CA n=19 L8`` / ``CA n=20 L8`` / ``CR n=19 L4``)。
+    """
+
+    #: 修复前抛 ``KeyError`` 的配置(offset 按 ``r_max`` 的比例给, 与验收脚本口径一致)
+    CRASHING = [
+        ("PA", 7, 7, 0.05),
+        ("PA", 11, 8, 0.015),
+        ("CA", 12, 6, 0.05),
+        ("CA", 15, 7, 0.05),
+        ("CA", 19, 8, 0.05),
+        ("CA", 20, 8, 0.05),
+        ("CR", 19, 4, 0.05),
+    ]
+
+    @staticmethod
+    def solver(star_type: str, n: int, level: int, factor: float) -> Interlacing:
+        paths, _ = rosette_paths(n, level, star_type)
+        r_max = max(float(np.linalg.norm(np.asarray(path)[:, :2], axis=1).max()) for path in paths)
+        return build(paths, factor * r_max)
+
+    @pytest.mark.parametrize(("star_type", "n", "level", "factor"), CRASHING)
+    def test_crashing_configs_now_solve(self, star_type, n, level, factor):
+        solver = self.solver(star_type, n, level, factor)  # 修复前这里抛 KeyError
+        assert len(solver.ribbons) > 0
+
+    @pytest.mark.parametrize(("star_type", "n", "level", "factor"), CRASHING)
+    def test_every_referenced_event_has_a_coordinate(self, star_type, n, level, factor):
+        assert dangling_event_references(self.solver(star_type, n, level, factor)) == []
+
+    def test_invariant_also_holds_for_overlapping_line_ends(self):
+        # 端点重合的正交线阵(非玫瑰线)同样要走重归属, 不变量必须成立
+        assert dangling_event_references(build(lattice_paths(4), 0.1)) == []
+
+    def test_reference_guard_detects_a_broken_table(self):
+        # 护栏本身要能查出"列表里引用了不存在的坐标"(否则它只是摆设)
+        solver = build(lattice_paths(3), 0.1)
+        seg_id = next(iter(solver.d_seg_intersects))
+        solver.d_intersections.pop(frozenset((seg_id, solver.d_seg_intersects[seg_id][0])))
+        assert dangling_event_references(solver) != []
 
 
 class TestClosedConfigurationFlags:

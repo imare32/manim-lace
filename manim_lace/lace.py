@@ -143,6 +143,69 @@ def _polygon_area(coords: np.ndarray) -> float:
     return float(0.5 * np.abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
 
 
+def _signed_area(coords: np.ndarray) -> float:
+    """Shoelace **有向**面积(逆时针为正, 忽略首尾重复点)。"""
+    pts = coords[:-1] if np.allclose(coords[0], coords[-1]) else coords
+    if len(pts) < 3:
+        return 0.0
+    x, y = pts[:, 0], pts[:, 1]
+    return float(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
+def _annulus_loops(ribbon: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """把环形丝带拆回"外环 + 内环"两条各自闭合的环; 不是环形丝带时返回 ``None``。
+
+    :func:`~manim_lace.interlacing.annulus_polygon` 把两条闭合环缝成**一条**轮廓:
+    外环(逆时针) + 狭缝 + 反向内环(顺时针)。狭缝是两条零宽度重合边 —— 填充时被非零绕数
+    规则抵消(只在环形带上着色), 但**描边会把它画成一条横跨带子的线**(缺陷 1 修复后
+    残留的视觉瑕疵)。拆成两个独立子路径后, Manim 的 cairo 后端对每个子路径分别
+    ``close_path`` 再描边, 狭缝线消失, 而填充结果完全一致(外环绕数 +1 / 内环 -1,
+    内区为 0, 仍是镂空)。
+
+    结构标记(由 ``annulus_polygon`` 的构造保证, 交织片段与开放路径条带不会满足):
+    外环闭合点与数组首点**逐位相同**, 其后是自身闭合的反向内环, 数组以首点收尾;
+    两环绕向相反且外环面积更大。找不到该结构时返回 ``None``, 按普通单轮廓多边形处理。
+
+    参数:
+        ribbon: :attr:`Interlacing.ribbons` 里的一条多边形, ``(N, 2)``。
+
+    返回:
+        ``(外环, 内环)``(均不含首尾重复点, 交给 :class:`~manim.Polygram` 闭合),
+        或 ``None``。
+    """
+    pts = np.asarray(ribbon, dtype=float)
+    if len(pts) < 8 or not np.array_equal(pts[0], pts[-1]):
+        return None
+    # 外环闭合点: 与首点逐位相同的内部顶点(annulus_polygon 里的 outer[:1])
+    for i in np.flatnonzero((pts[1:-1] == pts[0]).all(axis=1)) + 1:
+        outer, inner = pts[: i + 1], pts[i + 1 : -1]
+        if len(outer) < 4 or len(inner) < 4:
+            continue
+        if not (np.array_equal(outer[0], outer[-1]) and np.array_equal(inner[0], inner[-1])):
+            continue
+        area_outer, area_inner = _signed_area(outer), _signed_area(inner)
+        if area_outer <= 0.0 or area_inner >= 0.0:
+            continue  # 必须外逆内顺, 否则非零绕数下填不出孔洞
+        if area_outer <= -area_inner:
+            continue  # 外环面积必须更大
+        return outer[:-1], inner[:-1]
+    return None
+
+
+def _ribbon_mobject(ribbon: np.ndarray, poly_kwargs: dict[str, Any]) -> manim.VMobject:
+    """把一个丝带多边形建成 Manim 对象。
+
+    无自交闭合路径的环形丝带拆成"外环 + 内环"两个子路径(见 :func:`_annulus_loops`),
+    用 :class:`~manim.Polygram` 一次构造 —— ``Polygon`` 本就是单组 ``Polygram``,
+    因此逐条环的几何与描边和之前完全一致, 只是不再有狭缝描边; 其余丝带(交织片段 /
+    开放路径条带)仍是单轮廓 :class:`~manim.Polygon`, 与之前逐字节一致。
+    """
+    loops = _annulus_loops(ribbon)
+    if loops is None:
+        return manim.Polygon(*to_3d(ribbon), **poly_kwargs)
+    return manim.Polygram(*(to_3d(loop) for loop in loops), **poly_kwargs)
+
+
 class Lace(manim.VGroup):
     """把任意 Manim 路径转换为具有"编织交错"效果的丝带图案。
 
@@ -313,7 +376,7 @@ class Lace(manim.VGroup):
             if color is not None and "fill_color" not in self.kwargs:
                 poly_kwargs["fill_color"] = color
             poly_kwargs.update(self.kwargs)
-            self.ribbons.add(manim.Polygon(*to_3d(ribbon), **poly_kwargs))
+            self.ribbons.add(_ribbon_mobject(ribbon, poly_kwargs))
 
     def draw_path(self, coords: np.ndarray) -> manim.VMobject:
         """调试辅助: 把一组坐标画成黑色折线。
