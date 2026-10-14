@@ -4,7 +4,7 @@
 > 本文件只写**结论 + 证据指针**; 逐条实测数据与推导过程在各条目的证据文件里, 不要重复堆表格。
 > 相关文档: `DEFECTS.md`(缺陷台账)、`CHANGELOG.md`(按版本)、`AGENTS.md`(工程约定)、`README.md`(用法)。
 
-**更新于 2026-10-14** · 版本 `0.3.0` · `uv run pytest -q` → **466 passed** · `ruff check .` / `ruff format --check .` 全绿
+**更新于 2026-10-14** · 版本 `0.3.0` · `uv run pytest -q` → **471 passed** · `ruff check .` / `ruff format --check .` 全绿
 
 ---
 
@@ -12,12 +12,12 @@
 
 | 项 | 值 |
 | --- | --- |
-| 分支 / checkpoint | `master`;提交点 `f5bbffd`(工具入库)、`e639831`(缺陷 9/10 + 描边收尾)、`ea1fea3`(文档/工具/CI)、`7ede551`(tag `pre-step3`) |
-| 未提交 | 无(工作区干净);§2 的收尾已于 2026-10-14 完成: 探针清理 + 分 3 批提交(见 §2) |
+| 分支 / checkpoint | `master`;提交点 `53a9593`(按交叉身份切分)、`f5bbffd`(工具入库)、`e639831`(缺陷 9/10 + 描边收尾)、`ea1fea3`(文档/工具/CI)、`7ede551`(tag `pre-step3`) |
+| 未提交 | 无(工作区干净);本轮为缺陷 3 的密采样自交分支修复(核心 + 测试 + 文档), 见 §3 P0-5 |
 | 未入库 | `media/`(1358 文件 / 96.8 MB,含全部探针脚本、渲染图、验收页);基线快照 `media/_review/head_tree/` |
 
 ```bash
-uv run pytest -q                                  # 466 passed
+uv run pytest -q                                  # 471 passed
 uv run ruff check . && uv run ruff format --check .   # 全绿
 uv run python tools/matrix_digest.py media/_review/digest.txt   # 全矩阵指纹(改动前后 diff)
 ```
@@ -63,6 +63,7 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 | 1.18 | **缺陷 10 已修**: 落在端点的交点被固定参数容差丢掉(类型 B 的真因) | 见下 §1.18;全矩阵指纹"两态 deg=0" **0 行变化**、54 组已坏配置转为诚实降级 |
 | 1.19 | **缺陷 1 的描边收尾**: 环形丝带不再有狭缝描边 | 拆环成 `Polygram` 双 subpath;A/B **4/4 相同**、全矩阵指纹 0 行变化、461 passed |
 | 1.20 | **密采样曲线的可行编织配方**: 折线精度与丝带宽度匹配 | 步长 ≳ 4×offset;`N=16/20/32/40 @offset=0.05` 干净且 C/D/E/F 全过(渲染验证);示例场景 4 本来就是织的(11.1×offset);d5 用例(0.27×offset)保留降级 |
+| 1.21 | **缺陷 3 的密采样自交分支已修**: "按交叉身份"切分让密采样自交曲线真正织起来 | 见 §3 P0-5 的"阶段 1 第三步已完成";密采样利萨如 `r=7` 且 C/D/E/F 全过;A/B 4/4、全矩阵指纹 20 行变化全是原本降级的配置 |
 
 ### 1.14 复核(2026-10-14): 校验器口径 / 清洗尺度 / "两圆"更正
 
@@ -214,7 +215,8 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 
 ## 2. 正在做
 
-- **无待办** —— §2 的收尾已于 2026-10-14 完成(见下), 下一步是 §3 P0-5 阶段 1 第三步。
+- **本轮已完成**: §2 收尾(探针清理 26 个 + 3 批提交) → **§3 P0-5 阶段 1 第三步**(按"交叉身份"
+  切分, 让密采样自交曲线真正织起来) —— 见 §3 P0-5 的"阶段 1 第三步已完成"与 `CHANGELOG.md`。
 - **收尾内容**: ① 删除 `media/_review` 里**已被否决 / 已被定案取代**的归因类探针 **26 个**
   (清单见 §6「已删除」行; 结论全部保留在本文件 §4 与 `DEFECTS.md`, 探针只是当时的一次性推导脚本);
   ② 把工作区改动**分 3 批提交**: 工具入库(`tools/matrix_digest.py` + `tools/defect_report.py`) →
@@ -222,8 +224,8 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 - **原先计划的 ①~⑤ 五批未能实现**: 缺陷 1~8 已随 `5dc2df2` 落地, 剩下的缺陷 9/10 与阶段 0/1 的只读方法
   在 `interlacing.py` / `tests/test_lace.py` / `tests/test_weave.py` 里**互相缠绕**, 逐 hunk 切会产出
   跑不过测试的中间提交; 故按"**每批都能过 `pytest` + `ruff`**"的最小干净粒度切分(每批都跑 A/B)。
-- **下一步(§3 P0-5 阶段 1 第三步)**: 把"每路径一个 `flag` + 位置奇偶"换成**按交叉的过/欠赋值**
-  (对路段二着色)。启用范围与验收口径已于 2026-10-14 定案, 见 §3 P0-5 的「已定案」段。
+- **下一步**: §3 P0-5 剩余两项 —— ① 把 `holes` 接到同一套"按交叉身份"的表示(密采样利萨如现在
+  `h=0`); ② CR/PR/PO 一族的拐点/切触交叉(仍被分组护栏拦下)。
 
 ---
 
@@ -309,25 +311,37 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
     ⚠️ 但画面仍 `C×7/D/E`(交叉处双带同绘) —— 缺口落在 **`_set_ribbons` 的片段构造**(14 条片段里
     "压上/被压"的语义还没对上)。按约定**画面不过就保持降级** → 新路径**仍不接线**:
     零输出变化(指纹 `0311D9…` 与基线逐字节相同、466 passed、A/B 4 场景按构造不变)。
-  - **阶段 1 第三步(2026-10-14): 缺口已定案在"交替模型"而不是索引小 bug**。接线模拟显示归属已经全对
-    (`flag=True`、段内事件分布 `{(2,2): 995, (4,4): 12, (6,6): 1}` —— 28 个事件 = 12 单交叉段 + 1 双交叉段,
-    自交的四个角点分别落在两条分支各自的段上 ✓), 但仍 `C×7/D/E`。追到根: `_fix_path_flags` 的约束
-    系统**显式跳过自交**(`if partner == i: continue`), 而模型是"每条路径一个 `flag`, 第 `pos` 个交叉处
-    取值 `flag ^ (pos % 2)`" —— 对**单条自交闭合路径**, 同一个交叉的两次通过分别在第 `p`/`q` 个交叉处,
-    要求 `p % 2 != q % 2`, 这是**几何决定的、单一 flag 位无法调节**的约束 → 多数交叉两次都下压
-    → 双带同绘(正好对应 `C×7`)。
-    ⇒ 真正要做的是把"每路径一个 flag + 位置奇偶"换成**按交叉的过/欠赋值**(对"路段"做二着色),
-    即 §3 P1 里那条"非交替织法"课题; 这不是 `_set_ribbons` 的索引问题。
-  - **已定案(2026-10-14 拍板, 替换原先的"待确认")**:
-    1. **启用范围 = "只修坏的"** —— 新构造路径仅在现行实现会降级时启用(`_degraded_paths` / `rail_issues`
-       天然就是那个开关) → A/B 4/4 与指纹里 535 行健康配置**构造上**逐字节不变;
-    2. **验收 = 严格"宁缺勿滥"** —— 任何"由降级变编织"的配置必须 `check_picture` C/D/E/F **全过**,
-       否则**保持降级**(不允许"部分变好、其余静默画错");
-    3. **允许改写现有降级断言**(如 `test_crashing_configs_now_solve`)为"编织断言 + `check_picture` 断言",
-       但只对**真正通过第 2 条**的条目改写。
-  - **下一步**: 阶段 1 第三步 —— 用"**按交叉的过/欠赋值**(对路段二着色)"替换 `_fix_path_flags` 的交替模型
-    (每路径一个 `flag` + 位置奇偶), 让密采样自交曲线(以及 CR/PR/PO 一族的拐点交叉)真正织起来;
-    落地前后都按上面第 2 条的严格口径验证画面。
+  - **✅ 阶段 1 第三步已完成(2026-10-14): 结论更正 —— 缺口不在"交替模型无解", 而在"跨段配对"**。
+    用**与 D 检查同源**的口径复核(`media/_review/phase1_step3_diag.py`: `all_centerline_crossings` +
+    `crossing_pass_flags`)显示: **所有采样密度下, 7 个自交交叉的"两次通过在通过序列里的位置差恒为
+    奇数"**(9/7/5/9/7/5/7) ⇒ "沿曲线交替 + 每个交叉恰一方压上"**数学上总有解**, 交替模型没有问题;
+    真正的分界是"折线段长 ≳ 5×offset 才不降级"(`N=20`(8.3×)与 `N=32`(5.0×)不降级, `N≥40`(≤4.0×)
+    降级)。⇒ 原先那条"缺口定案在交替模型"**作废**(它是按 `_path_crossings` 的旧口径推的 —— 那个口径
+    把"每段内按索引两两分组"当成了通过序列, 而密采样下一次穿越的两个交点**跨 4~8 段**, 根本不在同一段)。
+  - **真正的根因(定位并修复)**: `_set_ribbons` 的逐段索引配对隐含前提"一次穿越的两个交点落在同一条
+    线段上"。密采样时它们沿轨相距约 `2*offset`(正好是对方丝带宽度), 实测段载荷出现 `(3,3)` 的**奇数段**;
+    契约自检只保证"每段左右计数相等", 抓不到跨段错位。追查中还发现两处配合缺陷: ①
+    `_commit_rail_reattribution` 会把**两条不同的边折叠到同一把新键**(坐标互相覆盖, 事件挂在"不在其上的
+    线段"上, 实测原点自交的两条分支共用候选段时命中); ② 按交叉归属会因"两条分支共用同一批候选段"
+    把不同交点归到同一段。
+  - **修法(已接线, 只修坏的)**: 新增 `_crossing_ribbon_cycles`(与"段"无关的表示: 穿越由
+    `_crossing_groups` 给出, 覆盖区间按弧长处理、**跨越闭合点时取补集**)、`_cluster_pass_records`
+    (按**对方轨道**配对 —— 密采样时对方**段号**不同, 不能按段号配)、`_outer_boundary_vertices`
+    (切口端头沿**对方偏移线折线**走, 否则端头直线斜穿中心线, 实测交叉附近"一侧双覆盖、另一侧破洞"
+    各一处); 在 `_check_rail_geometry` 判降级之后由 `_try_crossing_weave` 对降级路径**只读地**尝试一次
+    (失败即放弃、不改任何中间状态), 并对"片段退化为零面积 / 片段数与切刀数不符"兜底; 重归属补
+    "新键不折叠"护栏。
+  - **量到的边界**: 密采样利萨如(`dt=0.01/0.02/0.05 @offset=0.05`)由"降级 + `C×7/D/E`"变为
+    **7 条丝带 + C/D/E/F 全过**; A/B 4 场景逐字节一致; 全矩阵指纹 **20 行变化全部是原本降级的配置**
+    (健康配置 **0 行变化**), 其中 `PR n=6 L=3` 变编织后画面 A/C/D/E 不合格 → 被运行期兜底拦回降级。
+    证据: `media/_review/phase1_step3_{diag,probe,dump,reattr_check,verify}.py`、
+    `tests/test_weave.py::TestCrossingWeave`。
+  - **已定案(2026-10-14 拍板)**: (1) 启用范围 = "只修坏的"; (2) 验收 = 严格"宁缺勿滥"(由降级变编织的
+    必须 `check_picture` C/D/E/F 全过, 否则保持降级); (3) 允许把降级断言改写为"编织断言 +
+    `check_picture` 断言"。三条都已按此执行。
+  - **下一步(剩余两项)**: ① 把 `holes` 接到同一套"按交叉身份"的表示 —— 密采样利萨如现在 `h=0`
+    (孔洞不生成, 但不影响 C/D/E/F); ② CR/PR/PO 一族的拐点/切触交叉仍被分组护栏拦下(它们
+    "歧义/孤立 ≠ 0"), 属于"表示层把一次交叉的四个角点归拢"那条没走完的路。
 
 ### P1(覆盖与简化)
 
@@ -382,6 +396,7 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 | 23 | 放开缺陷 9 的**重归属护栏**(`_reservation_is_consistent` 恒真, 等价 `defect_report --variant no-guard`)让平滑利萨如"织起来" | ❌ 静默画错 | 护栏确实是拦路虎(offset ≤ 0.05 时逐位配对 **28/28** 全过、护栏判 `False`), 放开后也**不再降级**(2 条丝带); 但画面是**双带同绘**: C(交点被 2 条丝带覆盖 ×8)、D(过欠未交替)、E(**677/6115** 采样点被多条丝带重叠) —— 与 §4-19/§4-21 同一失败模式。必须先把"一次交叉的四个角点"归拢(按**交叉身份**配对), 不是放开护栏。证据 `media/_review/lissajous_relax_guard_probe.py` |
 | 24 | 靠**缩小 offset 或加密采样**让平滑利萨如编织 | ❌ 无效 | offset 0.2→0.01 坏段 60/64/56/50/32/18(**不收敛于 0**), 采样 dt 0.1→0.005 稳定在 40/56/56/56/56; offset=0.005 不降级是**欠分辨**巧合(带宽 0.01 < 段长 0.02), 画面仍 C/D/E |
 | 25 | ① 把"弧长逐位配对"换成**按交叉身份配对**(对方路径+轨道相同, 组内按段号就近); ② 把预演护栏改成"**只查键存在**"(不预扣) | ⚠️ 必要但**不足** | 契约确实恢复(`offset=0.05 dt=0.05`: 配对 28 对、护栏通过、降级 0、逐段不等 0); 且对其它配置**零影响**(逐段计数本来就相等的路径整条跳过, `N=40`/`N=24` 与基线逐项一致)。但画面仍"双带同绘"(C×4/D/E, 只切出 **2** 条丝带, 而粗配置是 7 条) → 缺口转移到 `_set_ribbons` 的片段构造(段内事件成对假设 `range(2, num_pairs-1, 2)` / 交替). 证据 `media/_review/lissajous_crossing_pair_probe.py`。**顺带查清护栏的真实缺陷**: 它的预演把"互为一对、共享同一把键"的两条记录当成两个独立搬运者(第一条 `discard` 后第二条就找不到键) → 只要有自交事件必然判 `False`, 与配对方式无关(`media/_review/lissajous_guard_diag.py`: 28 组共享键全是这种成对记录)。**配对判据三连否决**(均实测): ① "对方段号排序逐位" → 对内段差 100~266;② "几何最近邻" → 自交时两条分支在空间上同样近, 段差 200~422;③ "对方路径+轨道分组 + 自己段号就近" → 整条路径直接失败。**真因**(`media/_review/lissajous_crossing_dump.py`): 7 个自交点 = **5 个正常(4 角点) + 2 个相切自触(2 角点)**, 后者两条分支的角点两两重合、镜像记录缺失 → **与 CR/PR 一族的"两轨相切"完全同源(P0-1)**, 不是利萨如独有的几何 |
+| 26 | 端头按"**对方线段标识完全相同**"配对(本侧左右轨各取一条镜像记录) | ❌ 判据错 | 自交时对方丝带在原点这类位置**也会跨段**: 左轨记录连的是对方段 502、右轨连的是 506, 标识并不相同 → 根本配不出"一次穿越"。正确判据是按**对方轨道**(1 / 2)配对, 见 `_cluster_pass_records`; 与之配套, "一次穿越的两个交点在同一段上"这个隐含前提在密采样下同样不成立(段载荷出现 `(3,3)` 的奇数段) |
 
 > **判定的正确姿势**:判断"配对能不能成"要用**二分图最大匹配**(判定,不是启发式);判断"该修哪里"要先做
 > **事件三分类**(cross/self/corner)与**总数对照**, 再看逐段归属。**2026-10-14 追加**:动手改算法之前先确认
@@ -415,6 +430,7 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 | **缺陷 3 类型 B 钻取**(2026-10-14) —— **本批已删** | `mirror_probe.py`(逐轨列事件与弧长)、`odd_event_probe.py`(按几何聚类的"交叉团")、`gt_corners_probe.py`(理想 4 角点 ↔ 实际登记点, 含"多出来的 8 个事件")、`orphan_zoom.py`+`orphan_zoom.png`(局部放大)、`cross_centerline_probe.py` / `cross_centerline_matrix.py`(候选判据的影响面)、`drop_candidate_eval.py`(三种插入位置 + `check_picture` 验收) |
 | **缺陷 9 钻取**(2026-10-14) | `matrix_digest.py`(全矩阵指纹的探针版)、`dangling_probe.py`(逐阶段数悬挂引用)、`reattr_debug.py`(按事件/按线段两种标识改写的差异)、`defect9_repro.py`(测试口径的复现)、`changed_cases_check.py`(受影响配置的 `check_picture` 对照) |
 | **缺陷 10 钻取**(2026-10-14) | `vertex_crossing_layout.py`(拐点处两侧轨段与事件全貌)、`rail_sequence_align.py`(左右轨事件按弧长并排, 看配对从哪错开)、`tol_event_diff.py`(宽/严端点容差各自登记了什么)、`joint_crossing_probe.py`(接头交叉的分布)、`tol_audit.py` / `tol_wins_audit.py`(容差改动的影响面: 只改容差时 0/52 合格)、`guard_false_positive_audit.py`(新判据 0 误伤)、`changed_render.py`(改动前后渲染对照, 支持 `--strict`) |
+| **阶段 1 第三步钻取**(2026-10-14) | `phase1_step3_diag.py`(通过序列 ↔ 配对位置差, 与 D 检查同源)、`phase1_step3_probe.py`(接线后每个交叉的覆盖/flags/C 原文)、`phase1_step3_dump.py`(段载荷与片段包围盒)、`phase1_step3_reattr_check.py`(新键折叠检测 + 事件到所辖线段的距离)、`phase1_step3_verify.py`(新路径的生效范围与画面判定)、`digest_diff.py`(两份全矩阵指纹的新旧状态对比) |
 | **2026-10-14 复核** | `audit_bench` / `audit_stages`(耗时与阶段分解)、`audit_size`(规模与占比)、`audit_c_angle` / `audit_crossing_probe`(浅角假阳性)、`audit_g_exact` / `audit_g_cover` / `audit_g_e` / `audit_g_raster` / `audit_g_ribbons`(G 的分解差异与光栅口径)、`audit_clear_paths_fix` / `audit_dense_*` / `audit_merge_paths` / `audit_open_arc` / `audit_arc_events`(清洗、合并与角点事件诊断)、`audit_recheck` / `audit_curves_weave`(口径重扫与曲线织法)、`audit_two_rings*` / `audit_rings_*` / `audit_curve_scene*` / `audit_dense_scene` / `audit_zoom_scene`(渲染证据)、`check_rosette_free`(解耦检查) |
 | **已删除**(结论留 §4) | 归因类: `attribute_missing` / `reason_probe` / `miss_probe` / `where_missing` / `shift_probe` / `seam_count`;匹配类: `match_fail` / `match_debug` / `pair_shape` / `reject_reason`;事件三分类: `step4_*`;判别力: `step3_scoping` / `policy_compare` / `controlled`;对比拼图: `compare` / `step2_effect` / `step31_effect`;杂项: `diagnose` / `probe_input` / `overlap_detail` / `rail_signals` / `per_rail` / `corner_aware` / `render_lace_scenes` |
 | **2026-10-14 收尾再删** | **26 个文件**(23 个脚本 + 3 个附带产物),均为"已被否决的做法"或"已被定案取代"的一次性推导脚本: `why_curve_not_woven` / `mirror_probe`(+txt) / `odd_event_probe` / `gt_corners_probe` / `orphan_zoom`(+png) / `tangency_probe` / `cross_centerline_probe` / `cross_centerline_matrix`(+txt) / `drop_candidate_eval` / `lissajous_relax_guard_probe` / `lissajous_crossing_pair_probe` / `lissajous_guard_diag` / `lissajous_crossing_dump` / `phase1_group_dump` / `_patch_report` / `check_defects_parse` / `find_d6_case` / `pick_d4_case` / `show_card` / `v020_api_probe` / `validate_report_page` / `report_cases_check` / `report_meta_check` |
