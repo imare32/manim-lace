@@ -187,8 +187,11 @@ SECTIONS: tuple[Section, ...] = (
     Section("backend", "绘制通道对照", "同一份交叉与上下关系，三个后端", (
         Card("RibbonGallery", "RibbonGallery", "scene_gallery", "同一输入，三种绘制通道",
              "stroke 按中心线切口；ribbon(boolean) 把重叠区从下股丝带上布尔减掉；"
-             "ribbon(arrangement) 求出丝带边界的平面剖分，再按交叉把每个面归给一条股线。",
-             ("stroke / boolean / arrangement", "面积核算")),
+             "ribbon(arrangement) 求出丝带边界的平面剖分，再按交叉把每个面归给一条股线。"
+             "两股各用调色板一色：ribbon 通道的切口只有变成换色才看得见，同色会让两个 ribbon "
+             "面板塌成一块纯色剪影。三格不加缩放、按中心线对齐，圆环外包框逐格相差 1–2 像素，"
+             "因此在交叉点取样能直接核对三格画出的上下关系与求解器一致。",
+             ("stroke / boolean / arrangement", "面积核算", "两色辨切口")),
     )),
     Section("style", "美学策略（M6）", "manim_lace.style：纯装饰层，不动交叉与上下关系", (
         Card("PaletteGallery", "PaletteGallery", "scene_style", "调色板：同一编织，四套和色",

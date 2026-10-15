@@ -1,5 +1,127 @@
 # Changelog
 
+## Unreleased — 布尔后端：切口不再在丝带中间留下“洞”
+
+- Fix (Boolean backend): a cut that lands *inside* the under band without reaching its edges
+  used to be emitted as an occlusion **hole**. The over strand's local footprint is subtracted
+  from the under band, and near a miter corner the footprint can sit strictly inside it, so the
+  subtraction leaves the band connected *around* a hole instead of severing it. A hole cannot be
+  rendered as a gap — Manim fills an exterior ring solid — so the adapter paints it in the paper
+  colour, which only works while the piece covering the footprint is painted *later*. The painter
+  order cannot always arrange that: two strands that cross more than twice alternate their
+  over/under into a cycle no total order satisfies (the backend reports
+  ``REGION-DRAW-ORDER-CYCLE`` there). Measured on the gallery's rosette: the Boolean panel had a
+  **148 px background-coloured bite at (+0.81, +1.59)**, exactly the exposed
+  ``P0002#92.region0`` occlusion hole (0.031643 world², covered by ``P0000.region0`` at a *lower*
+  paint index). The minimal reproduction is small — n=10 level 1, 2 loops, 10 crossings, 7
+  regions, 1 hole — and per-crossing measurement shows that exactly one of the ten congruent
+  crossings leaves it.
+- The fix opens such a hole into a **notch on the piece's own boundary**:
+  ``regions._open_occlusion_holes`` splits the piece along that crossing's cut chord, so the fill
+  itself stops at the cut and the over strand's region — which always covers its own footprint —
+  is what shows through, whichever order the two are painted in. The split chord joins the
+  existing flush-seam bookkeeping, so it is never stroked and the fill is closed over it
+  (verified: no enclosed background component appears along it in the render).
+  ``source_contour`` holes are untouched — those are genuine gaps (the inside of a closed loop).
+- Measured after the fix: the simple 10-crossing rosette goes from 1 occlusion hole to 0 and from
+  7 to 10 regions (the offending piece splits into two equal halves of 0.581759, matching its
+  neighbours); the gallery rosette goes 158 → 159 regions with 0 holes and
+  ``band_union - union(exteriors) = 0.000000``; both ribbon panels of the **re-rendered card**
+  now have zero pixels inside the band union that no region paints (the Boolean panel had exactly
+  one such area before). The stroke panel is unchanged (19 tiny 1–27 px gaps, its own known
+  butt-cap character), and the dark pixels inside the ribbon panels are the card's intentional
+  2 px strand outlines, not seams.
+- The opened bite's own boundary is registered as a flush seam as well, so the piece never
+  strokes it: half of it lies on the *over* strand's side (which the strand on top outlines
+  itself) and the other half on the under strand's own side, which is merely hidden under that
+  strand rather than ended. Measured: the bite's ring has 2 edges on the over band's side and 2
+  on the under band's side; the under-side pair turns out not to be part of any piece's
+  exterior at all, and the over-side pair was being stroked twice. On the rendered card that
+  was a doubled 2 px black stroke on the indigo/purple boundary at the bite (measured: 60 px
+  of black over fill, arrangement panel 0 px) — now a single stroke, with the weave diagonal
+  still drawn by the over strand's own outline.
+- Tests: ``test_the_ribbon_panels_leave_no_occlusion_hole`` asserts for both ribbon backends that
+  no region carries an occlusion hole and that the union of the region exteriors covers the band
+  union exactly.
+
+## Unreleased — stroke 后端：闭合路径不再在自己的接缝处被劈成两段
+
+- Fix (stroke backend): a closed path whose seam falls *inside* a visible arc is now emitted as
+  **one wrapping piece** instead of two pieces butting at the seam. The seam is not a cut: when
+  nothing cuts the path there, the visible arc runs through arc 0 and the two halves are one and
+  the same piece. Splitting them painted two butt caps back to back, and because each cap is
+  perpendicular to its *own* local polyline chord rather than to the tangent, the pair left a
+  hairline wedge of background at the seam. Measured on the channel card's ring: the stroke
+  channel drew it as 2 pieces of 61 points meeting at (+1, 0) — exactly the crossing where the
+  ring passes *over* the bar — with end-segment directions +91.42° / +88.58°, i.e. two caps
+  2.84° apart; the wedge between them is 0.4 px wide 8 px from the seam and 1.5 px wide at
+  dx = +31, which is exactly the 1-px light line the render shows from dx 8 to 31. The ring is
+  now one piece of 121 points (arc 3.3679 … 9.1973 on a 6.2826-long loop) and the wedge is gone.
+- The wrap-around is the rule, not a special case: for a closed path the visible set is the
+  complement of the cuts *on the circle*, so exactly one visible arc can contain the seam and it
+  is emitted as a single piece through ``_slice_arc(path, last_start, length + first_end)`` — the
+  same construction the existing ``piece-seam`` branch already used for the mirror situation (a
+  cut that *covers* the seam). Both directions are pinned:
+  ``test_closed_path_seam_inside_a_visible_arc_stays_one_piece`` is new,
+  ``test_under_cut_wrapping_the_closed_seam_does_not_duplicate_geometry`` is unchanged.
+- Why the ribbon backends never showed it: they cut polygons, and a bite out of an annulus does
+  not disconnect it. The channel card's ring is one region there, its cut edges are exactly
+  y = ±0.2200 (angle +0.00° / +180.00°), and its cut end meets the bar's edge at a measured
+  distance of 0.000000.
+- Still present, and measured — not fixed here: in the stroke channel the *under* strand's cut
+  face is a butt cap perpendicular to the local chord, so it is not parallel to the strand on
+  top of it. At the channel card's left crossing (the ring goes under the bar) the cap is tilted
+  **12.71°** to the bar (piece ends at (−0.9742, ±0.2246), last-segment directions −102.71° /
+  −77.29°) — the cut sits ``offset/|sin θ| + overshoot·offset`` = 0.2266 from the crossing, and
+  a chord of the unit circle at that arc distance is tilted 0.2266 rad ≈ 13°. The ribbon
+  backends cut the same crossing exactly parallel to the bar.
+- Also still present: ``overshoot`` (0.03 × offset = 0.0066 ≈ 0.9 px, up to a 3 px crescent
+  where the ring's curved band edge pulls away from the bar's straight cap) is hard-coded in the
+  engine and not reachable from ``Lace``, so the under strand stops just short of the true
+  crossing and a thin crescent of paper remains at that junction.
+
+## Unreleased — 画廊三处示例修正：玫瑰线的白描边、玫瑰线的不交替、绘制通道卡看不清
+
+- Fix (rosette card): ``RosetteWeave`` no longer forces ``weave_mode="free"``. The three loops
+  have 70 crossings (20 of them self-crossings) and strict alternation solves **all** of them:
+  measured zero "same side on two consecutive visits" on every loop (60 such defects under
+  ``free``), every assignment carrying ``source="alternating"``, no relaxation, and no
+  ``TOPOLOGY-ALTERNATION-*`` diagnostic — the strict ``error`` strategy produces the identical
+  assignment, so nothing had to give. The stricter assignment also simplifies the cut: 165 →
+  158 visible pieces and 2 → 1 holes. The old wording — "a single path cannot resolve its own
+  over/under with alternation constraints" — was simply wrong: a self-crossing is an ordinary
+  transverse event, as the pentagram card has shown since the default changed.
+- Not fixed, and deliberately not claimed: the *boolean* backend still reports
+  ``REGION-DRAW-ORDER-CYCLE`` + ``REGION-OVERLAPPING-SECTIONS`` on this dense input, and it
+  reports them under ``free`` and under ``alternating`` alike — they come from the geometry,
+  not from the assignment. The same input is diagnostic-free in the arrangement backend (90
+  pieces) and in the stroke channel (70 pieces, after the seam-split fix in the section above —
+  it was 73 before, one extra piece per closed loop); the gallery note prints whichever each
+  card really has.
+- Fix (rosette card): the ribbon panels are now stroked in black (``stroke_color=BLACK``,
+  ``stroke_width_px=2.0``) and their holes are painted in the paper colour. The facade's
+  default stroke colour is white, so on the card's white paper every strand edge was drawn in
+  paper colour and the weave read as a soft blur; the outline is what makes the cuts legible.
+- Fix (channel card): ``RibbonGallery`` used one colour for both strands *and* a black
+  background with ``hole_color=BLACK``, so the two ribbon panels rendered as a single flat
+  silhouette — the card compared nothing. The strands now take two colours from a palette
+  (``natsu``), the paper is white, the ribbon pieces keep a black hairline, and each panel
+  carries a one-line caption naming its mechanism.
+- Fix (both comparison cards): the panels are no longer scaled. ``Mobject.scale()`` leaves
+  stroke widths alone, so scaling fattened the stroke panel's strands (whose width *is* a
+  stroke) while the ribbon bands shrank — the three panels were no longer the same input.
+  Measured after the fix: the ring's outer bbox differs by 1–2 px between the three panels,
+  and the band half-width in the render is 29 px = ``offset`` 0.22 exactly, in all three.
+  Panels are arranged on the laces alone and captions are attached afterwards, so a wider
+  caption cannot push its panel sideways.
+- Verification: sampling the rendered crossing pixels of all three panels reproduces the
+  solver's assignment exactly (right crossing: ring over; left crossing: line over) — the
+  weave alternates and the three channels agree, pixel for pixel at the crossings.
+- Docs: the rosette section of ``README.md`` and the ``build_star``/``RosetteWeave``
+  docstrings were corrected (the pentagram's strict alternation *is* solvable; "40 处自交" was
+  really 20; the rosette panel is no longer described as falling back to a non-alternating
+  assignment).
+
 ## Unreleased — ribbon 环去掉布尔折返尖刺（端点处的"小胡须"）
 
 - Fix: ribbon rings no longer keep the zero-area *folds* a polygon boolean leaves behind when

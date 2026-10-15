@@ -294,6 +294,23 @@ def render_stroke_geometry(
                 },
                 hints=("减小 min_piece_length 可保留这些极短片段。",),
             ))
+        if (
+            path.closed
+            and len(keep) >= 2
+            and keep[0][0] <= seam_tol
+            and keep[-1][1] >= length - seam_tol
+        ):
+            # The seam falls inside a visible arc, so [0, first_end] and
+            # [last_start, length] are the two halves of one cyclic piece and not two
+            # pieces. Emitting them separately is wrong twice over: the path is not cut
+            # at the seam at all, and the two butt caps placed back to back there are
+            # tilted by the local polyline chords, leaving a hairline wedge of
+            # background where the path is in fact whole (most visible when the seam
+            # sits on a crossing, e.g. a circle that starts at +x under a horizontal
+            # line). One wrapping piece paints the same arc with no seam at all.
+            _, first_end = keep[0]
+            last_start, _ = keep[-1]
+            keep = [(last_start, length + first_end), *keep[1:-1]]
         for idx, (start, end) in enumerate(keep):
             points = _slice_arc(path, start, end)
             pieces.append(StrokePiece(

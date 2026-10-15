@@ -160,11 +160,12 @@ def _fit_frame(composed: Mobject, *, margin: float = 1.0) -> Mobject:
 def build_star() -> Lace:
     """A real pentagram ``{5/2}``: one closed path that crosses itself five times.
 
-    A single path cannot be over and under itself, and five self-crossings are an odd
-    number, so strict alternation has no solution; the solver says so and falls back to
-    a declared non-alternating assignment. Each of the two passes is a *different
-    section* of the same ribbon, so the under pass is cut by the local overlap of the
-    two offset bands exactly like a cross-path crossing — the weave is decided by
+    A self-crossing is an ordinary transverse event here: the path visits each of the
+    five crossings twice, so travelling the strand gives 10 passes and the strict
+    alternation constraint has a solution (measured: every visit alternates, all five
+    assignments carry ``source='alternating'``, no relaxation). Each pass belongs to a
+    different section of the same ribbon, so the under pass is cut by the local overlap
+    of the two offset bands exactly like a cross-path crossing — the weave is decided by
     geometry, not by paint order.
     """
     return Lace(_star_source(), offset=0.12, **_RIBBON_STYLE)
@@ -253,20 +254,43 @@ def build_chain() -> Lace:
     return Lace(source, offset=0.13, **_RIBBON_STYLE)
 
 
+#: Palette for the backend comparison card. Two clearly different strand colours are
+#: load-bearing there: ribbon mode removes the under strand's footprint from the
+#: geometry, and that cut is visible *only* as a colour change (see `build_backend_trio`).
+_BACKEND_PALETTE = "natsu"
+
+
 def build_backend_trio() -> tuple[tuple[str, Lace], ...]:
-    """The same two strands through all three backends (for ``RibbonGallery``)."""
+    """The same two strands through all three backends (for ``RibbonGallery``).
+
+    The two strands deliberately get different colours. Ribbon mode cuts the under
+    strand where the over strand passes, so the weave shows up as one colour
+    interrupting another; with a shared colour both ribbon panels collapse into a
+    single silhouette and the card stops comparing anything. ``stroke_color`` stays
+    black for the ribbon panels (a hairline border that makes the cuts readable);
+    stroke mode ignores it and takes its strand colour from the palette.
+    """
     source = _two_strand_source()
+    fill = dict(palette=_BACKEND_PALETTE, hole_color=WHITE, fill_opacity=1.0)
     return (
-        ("stroke", Lace(source, offset=0.22, render="stroke", stroke_color=TEAL)),
+        ("stroke", Lace(source, offset=0.22, render="stroke", **fill)),
         ("boolean", Lace(
-            source, offset=0.22, render="ribbon", stroke_color=TEAL,
-            fill_color=TEAL, hole_color=BLACK,
+            source, offset=0.22, render="ribbon",
+            stroke_color=BLACK, stroke_width_px=2.0, **fill,
         )),
         ("arrangement", Lace(
             source, offset=0.22, render="ribbon", ribbon_backend="arrangement",
-            stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
+            stroke_color=BLACK, stroke_width_px=2.0, **fill,
         )),
     )
+
+
+#: One mechanism line per channel, printed under the panel label on the card.
+CHANNEL_CAPTIONS: dict[str, str] = {
+    "stroke": "中心线切口，靠遮挡读上下",
+    "boolean": "下股减掉重叠区",
+    "arrangement": "平面剖分，按交叉归面",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -329,28 +353,44 @@ class CapStyleGallery(Scene):
         self.wait()
 
 
-class RibbonGallery(Scene):
-    """The three backends side by side for the same two strands."""
+class RibbonGallery(_WhiteScene):
+    """The three backends side by side for the same two strands.
+
+    White paper rather than the default black: the ribbon channel paints each
+    strand's fill and a hairline border, and only against the page does the border
+    read as an edge. Each panel carries the mechanism it uses, because the three
+    are supposed to *agree* on the weave and differ only in how they get there.
+    """
 
     def construct(self):
         self.add(
-            Text("stroke / ribbon (boolean) / ribbon (arrangement)", font_size=24).to_edge(UP)
+            Text("同一份交叉与上下关系，三个绘制通道", font_size=24, color=BLACK).to_edge(UP)
         )
-        panels = VGroup()
-        for label, lace in build_backend_trio():
-            lace.scale(0.7).shift(DOWN * 0.2)
+        trio = build_backend_trio()
+        # The laces are arranged on their own and not scaled: their geometry is identical,
+        # so they land congruent and the three weaves can be compared position by position.
+        # ``Mobject.scale()`` leaves stroke widths alone, so scaling here would fatten the
+        # stroke panel's strands (whose width *is* a stroke) while the ribbon bands shrank —
+        # the panels would no longer be the same input. Captions are attached afterwards,
+        # because a wider caption must not push its panel sideways either.
+        laces = VGroup(*[lace.shift(DOWN * 0.2) for _, lace in trio])
+        laces.arrange(RIGHT, buff=1.0)
+        captions = VGroup()
+        for (label, lace), arranged in zip(trio, laces, strict=True):
             print(label, "diagnostics:", [diagnostic.code for diagnostic in lace.diagnostics])
-            panels.add(VGroup(lace, Text(label, font_size=20).next_to(lace, DOWN, buff=0.3)))
-        panels.arrange(RIGHT, buff=0.9)
+            captions.add(VGroup(
+                Text(label, font_size=20, color=BLACK),
+                Text(CHANNEL_CAPTIONS[label], font_size=14, color=GREY_B),
+            ).arrange(DOWN, buff=0.08).next_to(arranged, DOWN, buff=0.3))
         self.play(*[
             animation
-            for panel in panels
+            for lace in laces
             for animation in (
-                Create(panel[0].ribbons),
-                *_outline_animations(panel[0]),
+                Create(lace.ribbons),
+                *_outline_animations(lace),
             )
         ], run_time=1.0)
-        self.play(FadeIn(VGroup(*[panel[1] for panel in panels])), run_time=0.4)
+        self.play(FadeIn(captions), run_time=0.4)
         self.wait()
 
 

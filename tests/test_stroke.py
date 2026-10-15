@@ -99,6 +99,40 @@ def test_under_cut_wrapping_the_closed_seam_does_not_duplicate_geometry():
     assert sum(end - start for start, end in spans) == pytest.approx(length, abs=1e-6)
 
 
+def test_closed_path_seam_inside_a_visible_arc_stays_one_piece():
+    # The circle starts at (+1, 0), exactly where the horizontal line crosses it. When
+    # the circle is *over* there, nothing cuts it at its own seam: its visible arc runs
+    # through the seam and must come out as one piece. Emitting the two halves
+    # separately butts two butt caps together at the seam, and since each cap is
+    # perpendicular to its own local chord the pair leaves a hairline wedge of
+    # background exactly where the path is whole.
+    theta = np.linspace(0, 2 * np.pi, 129)
+    circle = np.column_stack((np.cos(theta), np.sin(theta)))
+    horizontal = np.array([[-1.5, 0.0], [1.5, 0.0]])
+    result = LaceEngine(
+        [circle, horizontal],
+        offset=0.08,
+        weave_mode="manual",
+        manual_over={"X0000": "a", "X0001": "b"},
+    ).solve()
+    seam_crossing = next(c for c in result.crossings if min(abs(c.s_a), abs(c.s_b)) < 1e-9)
+    assert seam_crossing.crossing_id == "X0000"
+    assignment = result.topology.assignment_for("X0000")
+    assert assignment is not None and assignment.over_side == "a"
+    length = result.paths[0].length
+    pieces = [p for p in result.pieces if p.path_id == "P0000"]
+    assert len(pieces) == 1
+    piece = pieces[0]
+    # One wrapping span: it starts after the real cut and ends past the seam.
+    assert piece.arc_start > 0.0
+    assert piece.arc_end > length
+    seam = result.paths[0].points[0]
+    interior = np.flatnonzero(np.all(np.isclose(piece.points, seam, atol=1e-9), axis=1))
+    assert interior.size == 1
+    assert 0 < interior[0] < len(piece.points) - 1  # interior: not a joint between pieces
+    _assert_pieces_disjoint_and_bounded(result)
+
+
 def test_open_path_fully_cut_reports_diagnostic_without_phantom_pieces():
     result = LaceEngine(
         [np.array([[-1.0, 0.0], [1.0, 0.0]]), np.array([[0.0, -1.0], [0.0, 1.0]])],

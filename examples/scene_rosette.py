@@ -263,44 +263,69 @@ class RosetteConstruction(_RosetteScene):
         self.wait()
 
 
+def build_rosette_weave_trio() -> tuple[tuple[str, Lace], ...]:
+    """Two merged rosettes through all three drawing channels (for ``RosetteWeave``).
+
+    Kept out of the scene so the card's weave can be pinned by a test: the three
+    channels must get the *same* assignments (default alternation), and the ribbon
+    panels must stroke their bands in a colour that is visible on the white paper —
+    the facade's default stroke is white, which draws every strand edge in paper
+    colour and leaves the weave looking soft.
+
+    Returns:
+        ``(channel, lace)`` pairs in card order: stroke, boolean, arrangement.
+    """
+    loops = rosette_loops(10, 1, "PA") + rosette_loops(10, 2, "PA")
+    print(f"weave source: {len(loops)} loops, {sum(len(loop) for loop in loops)} points")
+    palette = get_palette(_PALETTE)
+    source = _loops_as_mobjects(loops, color=palette.color(0), width=2.0)
+    ribbon = dict(palette=_PALETTE, stroke_color=BLACK, stroke_width_px=2.0,
+                  fill_opacity=1.0, hole_color=WHITE)
+    # 0.08 is a ribbon half-width wide enough to read as a band while every one of
+    # the 70 crossings stays a plain transverse event (0.02 is a hairline).
+    return (
+        # No explicit width in stroke mode: the facade's default is ``200 * offset``,
+        # i.e. the full ribbon width, which is what makes the three panels comparable.
+        ("stroke", Lace(source, offset=0.08, render="stroke", palette=_PALETTE)),
+        ("boolean", Lace(source, offset=0.08, render="ribbon", **ribbon)),
+        ("arrangement", Lace(
+            source, offset=0.08, render="ribbon", ribbon_backend="arrangement", **ribbon,
+        )),
+    )
+
+
 class RosetteWeave(_RosetteScene):
     """Two rosettes' continuous loops woven by ``manim_lace`` in all three channels.
 
-    The merged loops are closed self-crossing strands, so the lace engine can treat
-    them like any other input: like every self-crossing path they cannot be over and
-    under themselves, which the ribbon backend reports instead of hiding.
+    The merged loops are closed self-crossing strands, so the lace engine treats them
+    like any other input: every crossing is an ordinary transverse event, including
+    the 20 self-crossings, and default alternation solves all 70 of them with no
+    relaxation (measured: zero same-side-in-a-row visits on every loop, and the strict
+    ``conflict_strategy="error"`` produces the identical assignment). The ribbon panels
+    carry a black hairline border because the facade's default stroke colour is white —
+    invisible on this card's white paper, which left every strand edge looking soft.
     """
 
     def construct(self):
-        loops = rosette_loops(10, 1, "PA") + rosette_loops(10, 2, "PA")
-        print(f"weave source: {len(loops)} loops, {sum(len(loop) for loop in loops)} points")
-        palette = get_palette(_PALETTE)
-        source = _loops_as_mobjects(loops, color=palette.color(0), width=2.0)
-        # 0.08 is a ribbon half-width wide enough to read as a band while every one of
-        # the 70 crossings stays a plain transverse event (0.02 is a hairline).
-        variants = (
-            # No explicit width in stroke mode: the facade's default is ``200 * offset``,
-            # i.e. the full ribbon width, which is what makes the three panels comparable.
-            ("stroke", Lace(source, offset=0.08, render="stroke", weave_mode="free",
-                            palette=_PALETTE)),
-            ("boolean", Lace(source, offset=0.08, render="ribbon", weave_mode="free",
-                             palette=_PALETTE, stroke_width_px=2.0, fill_opacity=1.0)),
-            ("arrangement", Lace(source, offset=0.08, render="ribbon", ribbon_backend="arrangement",
-                                 weave_mode="free", palette=_PALETTE, stroke_width_px=2.0,
-                                 fill_opacity=1.0)),
-        )
-        panels = VGroup()  # noqa: F405
+        variants = build_rosette_weave_trio()
+        laces = VGroup()  # noqa: F405
+        labels = VGroup()  # noqa: F405
         for backend, lace in variants:
             print(
                 f"weave {backend}: {len(lace.crossings)} crossings, "
                 f"{len(lace.result.pieces)} visible, {[d.code for d in lace.diagnostics]}"
             )
-            lace.scale(0.8)
-            panels.add(VGroup(  # noqa: F405
-                lace,
-                Text(backend, font_size=20, color=BLACK).next_to(lace, DOWN, buff=0.15),  # noqa: F405
-            ))
-        self.add(_fit_frame(panels.arrange(RIGHT, buff=0.4)))  # noqa: F405
+            laces.add(lace)
+            # Attached after the laces are arranged, so the three panels stay congruent:
+            # a wider label must not push its panel sideways. The laces are not scaled
+            # either: ``Mobject.scale()`` leaves stroke widths untouched, which would
+            # fatten the stroke panel's strands (their width *is* a stroke) while the
+            # ribbon bands shrank.
+            labels.add(Text(backend, font_size=20, color=BLACK))  # noqa: F405
+        laces.arrange(RIGHT, buff=0.6)
+        for label, lace in zip(labels, laces, strict=True):
+            label.next_to(lace, DOWN, buff=0.15)
+        self.add(_fit_frame(VGroup(laces, labels)))  # noqa: F405
         self.wait()
 
 
@@ -372,9 +397,9 @@ GALLERY: tuple[tuple[str, RosetteEntry], ...] = (
     ("RosetteWeave", RosetteEntry(
         key="RosetteWeave", title="把玫瑰线交给编织器",
         blurb="合并后的折线是闭合自交股线，于是可以直接喂给 manim_lace：两朵玫瑰线"
-              "（level 1 与 level 2）在三个绘制通道里编织。单路径没法用交替约束解决"
-              "自己压自己，但 ribbon 后端会把被压的那一遍按偏移带局部交叠切掉："
-              "70 个交叉（其中 40 处是自交）全部由几何切口决定，不再依赖绘制顺序。",
+              "（level 1 与 level 2）在三个绘制通道里编织。三条股线共 70 个交叉（其中 20 处"
+              "是自交），默认交替模式对它们全部有解、一处都不用放宽——自交在这里就是普通的"
+              "横穿事件，ribbon 后端按偏移带把被压的那一遍切掉。",
         tags=("stroke / boolean / arrangement", "跨模块"),
     )),
     ("RosetteLimits", RosetteEntry(

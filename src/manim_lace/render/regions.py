@@ -165,6 +165,133 @@ def _cut_lines(
     return lines
 
 
+def _open_occlusion_holes(
+    geometry: Any,
+    *,
+    path: PolylinePath,
+    crossings: list[CrossingEvent],
+    source_hole_areas: list[float],
+    offset: float,
+) -> tuple[list[Any], list[tuple[np.ndarray, np.ndarray]]]:
+    """Split a piece along the cut chord of every *occlusion* hole it still carries.
+
+    An occlusion hole is the over strand's footprint inside this band: the region's
+    exterior ring still encloses it, and Manim fills an exterior ring solid, so the
+    adapter has to paint the hole in the background colour to show the cut. That only
+    works while the piece covering the footprint is painted *later* — and the painter
+    order cannot always arrange it, because two strands that cross more than twice
+    alternate their over/under into a cycle the order has to break. Where it breaks, the
+    hole paints over the strand that is on top and bites a background-coloured notch out
+    of the pattern.
+
+    Splitting the piece along the crossing's cut chord removes the need for that paint:
+    the hole becomes a notch on the piece's own boundary, so the fill itself stops at the
+    cut, and the over strand's region — which always covers its own footprint — is what
+    shows through, whichever order the two are painted in. The split chord is returned so
+    the caller can mark it flush (a seam, not a strand boundary).
+
+    ``source_contour`` holes are left alone: they are genuine gaps in the strand (the
+    inside of a closed loop) and the region really is an annulus there.
+    """
+    _line, _point, Polygon, union, _make_valid, _orient = _require_shapely()
+    chords: list[tuple[np.ndarray, np.ndarray]] = []
+    pieces = [polygon for polygon in _polygons(geometry) if polygon.geom_type == "Polygon"]
+    while True:
+        opened: list[Any] = []
+        resplit = False
+        for polygon in pieces:
+            occlusions = [
+                ring for ring, role in zip(
+                    polygon.interiors,
+                    _hole_roles(polygon, source_hole_areas),
+                    strict=True,
+                )
+                if role == "occlusion"
+            ]
+            if not occlusions:
+                opened.append(polygon)
+                continue
+            split_pieces: list[Any] = [polygon]
+            for ring in occlusions:
+                # The whole boundary of the bite is a seam in the same sense as the split
+                # chord, so nothing may be stroked along it either. Half of it lies on the
+                # *over* strand's side — the strand on top draws that silhouette itself — and
+                # the other half lies on the under strand's own side, which is simply hidden
+                # under the strand above it, not ended. Left strokeable, those hidden-side
+                # edges poke a black line about half a band width into the ribbon (they used
+                # to be part of an interior ring, which is never stroked).
+                ring_points = np.asarray(ring.coords, dtype=float)
+                for start, end in zip(ring_points[:-1], ring_points[1:], strict=True):
+                    chords.append((start, end))
+                next_pieces: list[Any] = []
+                for piece in split_pieces:
+                    next_pieces.extend(_split_along_cut(
+                        piece, ring=ring, path=path, crossings=crossings,
+                        offset=offset, chords=chords, polygon_class=Polygon,
+                    ))
+                split_pieces = next_pieces
+            opened.extend(split_pieces)
+            resplit = True
+        pieces = opened
+        if not resplit:
+            break
+    if not pieces:
+        return [geometry], chords
+    # Deliberately *not* merged into one geometry: the pieces must stay separate, or the
+    # shared chord is dissolved back into the interior and the hole comes straight back.
+    return pieces, chords
+
+
+def _split_along_cut(
+    polygon: Any,
+    *,
+    ring: Any,
+    path: PolylinePath,
+    crossings: list[CrossingEvent],
+    offset: float,
+    chords: list[tuple[np.ndarray, np.ndarray]],
+    polygon_class: Any,
+) -> list[Any]:
+    """One occlusion hole: cut ``polygon`` along that crossing's cut chord."""
+    hole = polygon_class(ring)
+    centre = np.array([hole.centroid.x, hole.centroid.y])
+    candidates = [
+        crossing for crossing in crossings
+        if crossing.path_a == path.path_id or crossing.path_b == path.path_id
+    ]
+    if not candidates:
+        return [polygon]
+    crossing = min(
+        candidates,
+        key=lambda item: float(np.sum((np.array(item.point) - centre) ** 2)),
+    )
+    arc = crossing.s_a if crossing.path_a == path.path_id else crossing.s_b
+    point, tangent = _arc_frame(path, float(arc))
+    normal = np.array([-tangent[1], tangent[0]])
+    # The half-planes and the chord have to cover the piece, not just the strand width:
+    # the cut chord of a miter corner is wider than 2 * offset, and ``_on_cut`` only marks
+    # an edge flush when the whole edge lies inside the chord.
+    bounds = polygon.bounds
+    diagonal = float(np.hypot(bounds[2] - bounds[0], bounds[3] - bounds[1]))
+    span = 2.0 * max(diagonal, 4.0 * offset, 1.0)
+    chords.append((point - normal * span, point + normal * span))
+    halves: list[Any] = []
+    for sign in (1.0, -1.0):
+        step = tangent * span * sign
+        halves.append(polygon_class([
+            point - normal * span, point + normal * span,
+            point + normal * span + step, point - normal * span + step,
+        ]))
+    result: list[Any] = []
+    for half in halves:
+        cut = polygon.intersection(half)
+        result.extend(
+            part for part in _polygons(cut)
+            if part.geom_type == "Polygon" and part.area > 1e-12
+        )
+    return result or [polygon]
+
+
 def _on_cut(
     first: np.ndarray,
     second: np.ndarray,
@@ -1064,6 +1191,7 @@ def render_region_geometry(
     regions: list[RibbonRegion] = []
     owners: set[str] = set()
     hole_count_total = 0
+    hole_chords: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
     for path in paths:
         group = strips.get(path.path_id)
         if group:
@@ -1080,7 +1208,19 @@ def render_region_geometry(
             band = visible_band.get(path.path_id)
             parts = [(path.path_id, band)] if band is not None and not band.is_empty else []
         for node, geometry in parts:
-            for index, polygon in enumerate(_polygons(geometry)):
+            pieces, chords = _open_occlusion_holes(
+                geometry,
+                path=path,
+                crossings=[
+                    crossing for crossing in weavable
+                    if path.path_id in (crossing.path_a, crossing.path_b)
+                ],
+                source_hole_areas=source_hole_areas.get(path.path_id, []),
+                offset=offset,
+            )
+            if chords:
+                hole_chords.setdefault(path.path_id, []).extend(chords)
+            for index, polygon in enumerate(pieces):
                 polygon = orient(polygon, 1.0)
                 holes = [
                     RegionRing(points=_ring_points(ring), role=role)
@@ -1159,9 +1299,12 @@ def render_region_geometry(
             },
             hints=("检查是否有三条以上丝带在同一区域重叠；必要时减小 offset 或改回描边后端。",),
         ))
-    flush_edge_count = mark_flush_edges(
-        regions, cuts=_cut_lines(paths, strips, offset=offset)
-    )
+    cuts = _cut_lines(paths, strips, offset=offset)
+    for path_id, chords in hole_chords.items():
+        # The chords that opened an occlusion hole are seams too: the strand runs straight
+        # through them, so they must not be stroked and the fill must be closed over them.
+        cuts.setdefault(path_id, []).extend(chords)
+    flush_edge_count = mark_flush_edges(regions, cuts=cuts)
     return RegionRenderResult(
         regions=regions,
         diagnostics=diagnostics,
