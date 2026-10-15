@@ -13,7 +13,7 @@
 | 项 | 值 |
 | --- | --- |
 | 分支 / checkpoint | `master`;提交点 `59fcfa8`(布局重构)、`53a9593`(按交叉身份切分)、`f5bbffd`(工具入库)、`e639831`(缺陷 9/10 + 描边收尾)、`ea1fea3`(文档/工具/CI)、`7ede551`(tag `pre-step3`) |
-| 未提交 | 无(工作区干净);§3 P0-5 的"阶段 1 第三步"与随后的布局重构均已提交 |
+| 未提交 | 无(工作区干净);§3 P0-6 的"中心线 + stroke"通道原型已验证并记录(见 §1.22 / §6), 正式接入进行中 |
 | 未入库 | `media/`(1358 文件 / 96.8 MB,含全部探针脚本、渲染图、验收页);基线快照 `media/_review/head_tree/` |
 
 ```bash
@@ -64,6 +64,7 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 | 1.19 | **缺陷 1 的描边收尾**: 环形丝带不再有狭缝描边 | 拆环成 `Polygram` 双 subpath;A/B **4/4 相同**、全矩阵指纹 0 行变化、461 passed |
 | 1.20 | **密采样曲线的可行编织配方**: 折线精度与丝带宽度匹配 | 步长 ≳ 4×offset;`N=16/20/32/40 @offset=0.05` 干净且 C/D/E/F 全过(渲染验证);示例场景 4 本来就是织的(11.1×offset);d5 用例(0.27×offset)保留降级 |
 | 1.21 | **缺陷 3 的密采样自交分支已修**: "按交叉身份"切分让密采样自交曲线真正织起来 | 见 §3 P0-5 的"阶段 1 第三步已完成";密采样利萨如 `r=7` 且 C/D/E/F 全过;A/B 4/4、全矩阵指纹 20 行变化全是原本降级的配置 |
+| 1.22 | **曲线输入的第二条通道(中心线 + stroke)原型已验证** | 见 §3 P0-6;`X 形两线` 6/6、`两圆相交` 11/11、`密采样利萨如 dt=0.01` 35/36(点采样判据);不需要偏移线求交 / miter / 四角点 / 孔洞;代价 = 必须不透明、A/B 底线不适用(只能作并存通道) |
 
 ### 1.14 复核(2026-10-14): 校验器口径 / 清洗尺度 / "两圆"更正
 
@@ -367,6 +368,28 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
   - **下一步**: ① 上面的表示层改造("一次穿越 = 一个整体事件")能同时解决 holes 与 CR/PR/PO 一族;
     ② 先用"最近锚点 + 近邻比"重做护栏, 把"歧义"这一档救回来(CR 只差 4 条, 最值得先试);
     ③ PO/CA 这类"交叉比丝带还密"的配置可能仍只能保持降级。
+- **6. 曲线输入的第二条通道: "中心线 + `stroke_width` + 顺序"(2026-10-15 原型已验证, 待接入)**。
+  现状里所有难点都出在"丝带是一个**区域(polygon)**": 区域要被对方切开 → 需要"一次交叉的四个角点"
+  (偏移线求交 + miter)→ 于是要有配对 / 挖区间 / 封口(缺陷 3、跨段错位、拐点退化), 还要显式构造
+  孔洞(`_set_holes`)。换成"路径 + stroke"之后这些**全部消失**:
+  - **事件** = 中心线交叉的弧长参数(不需要偏移线求交, 也不需要 miter);
+  - **断口** = 交点两侧 `offset / |sinθ|`, 解析可得; 浅角处把 `sinθ` 钳到 `0.2`(即**故意少切**),
+    剩下的伸入区靠"压上方后画"盖住;
+  - **过/欠** = 沿用交替二着色(自交交叉的两次通过在通过序列里的位置差恒为奇数 ⇒ 自洽;
+    路径之间用 BFS; 奇环无解 —— 与 polygon 通道同一限制);
+  - **孔洞** = 不需要构造: 没被 stroke 盖住的地方自然是背景;
+  - **绘制顺序不是必需的**(切口本身就保证可见性); 顺序只在掩盖断口边缘残差时有用, 且约束可能成环。
+  验收证据(`media/_review/proto_stroke_weave.py`; 判据 C1 交叉点=压上方 / C2 压上方在交叉两侧可见 /
+  C3 被压方在断口外恢复 / C4 中心线处处有丝带): `X 形两线` **6/6**、`两圆相交` **11/11**、
+  `密采样利萨如 dt=0.01 @offset=0.05` **35/36**(唯一失败是 1 像素级接缝)、
+  `两条密采样利萨如`(53 交叉)**交替无解**(奇环, 与 polygon 通道一致)。渲染对照图在
+  `media/proto_stroke/images/`。
+  **代价(接入时必须一并处理)**: ① 必须**不透明** —— 切口只保证"谁断开"这个拓扑, 断口端头是
+  "垂直切断"而真实覆盖边界是斜的, 端头残差靠"不透明 + 顺序"兜住; 半透明下不但露混色, 还要注意
+  整套"覆盖关系"判定(E/C/D)本来就是按不透明定义的; ② **A/B 底线不适用**(像素输出与 polygon
+  通道不同)⇒ 只能作为**并存通道**(默认仍是 polygon); ③ 浅角交叉残留 `~offset²·cotθ` 的三角;
+  ④ 断口不能吃掉本方**作为压上方**的交叉区(两条交叉沿轨距离 < `2 × half` 时) —— 接入要加护栏;
+  ⑤ 原型求交是 O(n²) 纯 Python, 接入时复用现有扫描线。
 
 ### P1(覆盖与简化)
 
@@ -459,6 +482,7 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 | **2026-10-14 复核** | `audit_bench` / `audit_stages`(耗时与阶段分解)、`audit_size`(规模与占比)、`audit_c_angle` / `audit_crossing_probe`(浅角假阳性)、`audit_g_exact` / `audit_g_cover` / `audit_g_e` / `audit_g_raster` / `audit_g_ribbons`(G 的分解差异与光栅口径)、`audit_clear_paths_fix` / `audit_dense_*` / `audit_merge_paths` / `audit_open_arc` / `audit_arc_events`(清洗、合并与角点事件诊断)、`audit_recheck` / `audit_curves_weave`(口径重扫与曲线织法)、`audit_two_rings*` / `audit_rings_*` / `audit_curve_scene*` / `audit_dense_scene` / `audit_zoom_scene`(渲染证据)、`check_rosette_free`(解耦检查) |
 | **已删除**(结论留 §4) | 归因类: `attribute_missing` / `reason_probe` / `miss_probe` / `where_missing` / `shift_probe` / `seam_count`;匹配类: `match_fail` / `match_debug` / `pair_shape` / `reject_reason`;事件三分类: `step4_*`;判别力: `step3_scoping` / `policy_compare` / `controlled`;对比拼图: `compare` / `step2_effect` / `step31_effect`;杂项: `diagnose` / `probe_input` / `overlap_detail` / `rail_signals` / `per_rail` / `corner_aware` / `render_lace_scenes` |
 | **2026-10-14 收尾再删** | **26 个文件**(23 个脚本 + 3 个附带产物),均为"已被否决的做法"或"已被定案取代"的一次性推导脚本: `why_curve_not_woven` / `mirror_probe`(+txt) / `odd_event_probe` / `gt_corners_probe` / `orphan_zoom`(+png) / `tangency_probe` / `cross_centerline_probe` / `cross_centerline_matrix`(+txt) / `drop_candidate_eval` / `lissajous_relax_guard_probe` / `lissajous_crossing_pair_probe` / `lissajous_guard_diag` / `lissajous_crossing_dump` / `phase1_group_dump` / `_patch_report` / `check_defects_parse` / `find_d6_case` / `pick_d4_case` / `show_card` / `v020_api_probe` / `validate_report_page` / `report_cases_check` / `report_meta_check` |
+| **第二条通道原型**(2026-10-15) | `proto_stroke_weave.py`("中心线 + `stroke_width` + 顺序"的编织原型: 交替二着色 / 断口 `offset/|sinθ|` / 按参数切片 / 拓扑序 / 光栅判据 C1~C4, 产出 `media/proto_stroke/images/*.png` 与 polygon 版并排对照)、`phase1_guard_audit.py`(启用护栏体检: 每条轨记录落到几个交叉锚点内 —— 量出 CR/PR/PO 卡在"歧义"而非"孤立") |
 
 复现任一实验: `uv run python media/_review/<脚本>.py`(仓库根目录执行)。
 
