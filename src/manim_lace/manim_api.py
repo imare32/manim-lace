@@ -14,6 +14,7 @@ from manim import (  # type: ignore[import-not-found]
     ORANGE,
     RED,
     WHITE,
+    YELLOW,
     CapStyleType,
     Create,
     Dot,
@@ -27,9 +28,21 @@ from manim import (  # type: ignore[import-not-found]
 )
 
 from .adapters.manim import extract_paths
-from .animation.plan import build_animation_plan
+from .animation.plan import AnimationPlan, build_animation_plan
 from .engine import LaceEngine
 from .model import EventPolicy, LaceResult, PolylinePath
+from .render.pixels import px_to_stroke_width
+from .style import (
+    BorderSpec,
+    DensityPolicy,
+    Palette,
+    StylePlan,
+    StylePolicy,
+    apply_style,
+    build_border,
+    pattern_bounds,
+    simplify_for_density,
+)
 
 
 class Lace(VGroup):
@@ -53,11 +66,18 @@ class Lace(VGroup):
         manual_over: dict[str, str] | None = None,
         stroke_color: Any = WHITE,
         stroke_width: float | None = None,
+        stroke_width_px: float | None = None,
         stroke_opacity: float = 1.0,
         fill_color: Any = None,
         fill_opacity: float = 1.0,
         hole_color: Any = BLACK,
         draw_holes: bool = True,
+        palette: str | Palette | None = None,
+        style_policy: StylePolicy | None = None,
+        border: BorderSpec | None = None,
+        border_color: Any = None,
+        paper: bool = False,
+        density_policy: DensityPolicy | None = None,
         sample_error: float = 1e-3,
         min_sin: float = 0.2,
         min_piece_length: float = 1e-7,
@@ -66,9 +86,12 @@ class Lace(VGroup):
         event_policy: EventPolicy | dict[str, str] | str | None = None,
         conflict_strategy: str = "error",
         cap_style: str = "butt",
+        cover_allowance: float = 0.0,
         join: str = "miter",
         miter_limit: float = 5.0,
         ribbon_backend: str = "boolean",
+        pixel_height: int = 720,
+        frame_height: float = 4.0,
         **extra: Any,
     ) -> None:
         super().__init__()
@@ -76,9 +99,13 @@ class Lace(VGroup):
             raise TypeError(f"unsupported Lace options in starter kit: {sorted(extra)}")
         if render not in ("stroke", "ribbon"):
             raise ValueError("render must be 'stroke' or 'ribbon'")
+        if palette is not None and style_policy is not None:
+            raise ValueError("pass either palette or style_policy, not both")
         self.target_mobject = target_mobject
         self.offset = float(offset)
         self.render_mode = render
+        self._pixel_height = pixel_height
+        self._frame_height = frame_height
         self.paths: list[PolylinePath] = extract_paths(target_mobject, max_error=sample_error)
         self.engine = LaceEngine(
             self.paths,
@@ -93,6 +120,7 @@ class Lace(VGroup):
             event_policy=event_policy,
             conflict_strategy=conflict_strategy,  # type: ignore[arg-type]
             cap_style=cap_style,  # type: ignore[arg-type]
+            cover_allowance=cover_allowance,
             join=join,  # type: ignore[arg-type]
             miter_limit=miter_limit,
             ribbon_backend=ribbon_backend,  # type: ignore[arg-type]
@@ -105,11 +133,18 @@ class Lace(VGroup):
         self._attach_rendered({
             "stroke_color": stroke_color,
             "stroke_width": stroke_width,
+            "stroke_width_px": stroke_width_px,
             "stroke_opacity": stroke_opacity,
             "fill_color": fill_color,
             "fill_opacity": fill_opacity,
             "hole_color": hole_color,
             "draw_holes": draw_holes,
+            "palette": palette,
+            "style_policy": style_policy,
+            "border": border,
+            "border_color": border_color,
+            "paper": paper,
+            "density_policy": density_policy,
         })
 
     def _attach_rendered(self, style: dict[str, Any]) -> None:
@@ -119,11 +154,14 @@ class Lace(VGroup):
         ])
         for mob in self.source_paths:
             mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
-        stroke_width = style["stroke_width"]
-        width = stroke_width if stroke_width is not None else max(1.0, 200.0 * self.offset)
+        width = self._stroke_width(style)
+        self._resolve_aesthetics(style)
+        drawn = (
+            self.density.kept(self.result) if self.density is not None else list(self.result.pieces)
+        )
         if self.render_mode == "ribbon":
             self.ribbons, self.holes = _region_groups(
-                self.result.pieces,
+                drawn,
                 fill_color=style["fill_color"] if style["fill_color"] is not None else style["stroke_color"],
                 fill_opacity=style["fill_opacity"],
                 stroke_color=style["stroke_color"],
@@ -131,14 +169,96 @@ class Lace(VGroup):
                 stroke_opacity=style["stroke_opacity"],
                 hole_color=style["hole_color"],
                 draw_holes=style["draw_holes"],
+                plan=self.style_plan,
             )
         else:
             self.holes = VGroup()
             self.ribbons = _ribbon_group(
-                self.result.pieces, color=style["stroke_color"], width=width,
+                drawn, color=style["stroke_color"], width=width,
                 opacity=style["stroke_opacity"], cap_style=self.engine.cap_style,
+                plan=self.style_plan,
             )
-        self.add(self.ribbons, self.holes)
+        self.paper_layer = self._build_paper(style) if style.get("paper") else None
+        self.border_layer = self._build_border_layer(style)
+        layers = [
+            layer
+            for layer in (self.paper_layer, self.ribbons, self.holes, self.border_layer)
+            if layer is not None
+        ]
+        self.add(*layers)
+
+    def _stroke_width(self, style: dict[str, Any]) -> float:
+        """The Manim stroke width of the strands, honouring ``stroke_width_px``."""
+        if style.get("stroke_width_px") is not None:
+            return px_to_stroke_width(
+                style["stroke_width_px"],
+                pixel_height=self._pixel_height,
+                frame_height=self._frame_height,
+            )
+        if style.get("stroke_width") is not None:
+            return float(style["stroke_width"])
+        return max(1.0, 200.0 * self.offset)
+
+    def _resolve_aesthetics(self, style: dict[str, Any]) -> None:
+        """Resolve the M6 layer: palette/policy, density simplification and frame.
+
+        All of it is decoration: the result's crossings, assignments and geometry
+        are already final and are not touched here (SPEC FR-062). The only extra
+        geometry a policy can ask for — the paper rectangle and the border — is a
+        separate layer, never a re-solve.
+        """
+        policy = style.get("style_policy")
+        palette = style.get("palette")
+        if policy is not None and not isinstance(policy, StylePolicy):
+            raise ValueError(f"style_policy must be a StylePolicy; got {type(policy).__name__}")
+        if policy is not None and palette is not None:
+            raise ValueError("pass either palette or style_policy, not both")
+        if policy is None and palette is not None:
+            policy = StylePolicy(palette=palette)
+        self.style: StylePolicy | None = policy
+        self.style_plan: StylePlan | None = apply_style(self.result, policy) if policy else None
+        density_policy = style.get("density_policy")
+        if density_policy is not None and not isinstance(density_policy, DensityPolicy):
+            raise ValueError(f"density_policy must be a DensityPolicy; got {type(density_policy).__name__}")
+        self.density = (
+            simplify_for_density(self.result, density_policy) if density_policy is not None else None
+        )
+        border = style.get("border")
+        if border is not None and not isinstance(border, BorderSpec):
+            raise ValueError(f"border must be a BorderSpec; got {type(border).__name__}")
+        self.border_geometry = build_border(self.result, border) if border is not None else None
+        self.style_diagnostics = [
+            *(self.style_plan.diagnostics if self.style_plan is not None else ()),
+            *(self.density.diagnostics if self.density is not None else ()),
+        ]
+        self.diagnostics = [*self.result.diagnostics, *self.style_diagnostics]
+
+    def _build_paper(self, style: dict[str, Any]) -> Any:
+        """A filled rectangle behind the pattern, in the policy's paper colour."""
+        color = WHITE
+        if self.style is not None and self.style.has_paper and self.style_plan is not None:
+            color = self.style_plan.background
+        margin = 0.25
+        if self.border_geometry is not None:
+            margin = self.border_geometry.spec.margin + self.border_geometry.spec.thickness
+        return _paper_group(self.result, color=color, margin=margin)
+
+    def _build_border_layer(self, style: dict[str, Any]) -> Any:
+        """Stroke the frame centerlines; colour from the palette unless overridden."""
+        if self.border_geometry is None:
+            return None
+        color = style.get("border_color")
+        if color is None and self.style is not None and self.style.palette is not None:
+            color = self.style.palette.color(self.border_geometry.color_index)
+        if color is None:
+            color = style["stroke_color"]
+        return _border_group(
+            self.border_geometry.centerlines,
+            color=color,
+            # BorderSpec.thickness is a world-space thickness and Manim's stroke_width
+            # is 100x that (the same convention as the 200*offset strand heuristic).
+            width=100.0 * self.border_geometry.spec.thickness,
+        )
 
     @classmethod
     def _from_engine(cls, engine: LaceEngine, *, render: str, style: dict[str, Any]) -> Lace:
@@ -148,6 +268,8 @@ class Lace(VGroup):
         obj.target_mobject = None
         obj.offset = engine.offset
         obj.render_mode = render
+        obj._pixel_height = style.get("pixel_height", 720)
+        obj._frame_height = style.get("frame_height", 4.0)
         obj.paths = engine.paths
         obj.engine = engine
         obj.result = engine.solve()
@@ -192,18 +314,56 @@ class Lace(VGroup):
     def as_mobject(self) -> Lace:
         return self
 
-    def build_animation(self, mode: str = "overview", *, show_sampling: bool = False, show_crossing_ids: bool = True) -> Any:
+    def build_animation(
+        self,
+        mode: str = "overview",
+        *,
+        show_sampling: bool = False,
+        show_crossing_ids: bool = True,
+        durations: dict[str, float] | None = None,
+        stage_modes: dict[str, tuple[str, ...]] | None = None,
+    ) -> Any:
         """Compose a Manim Succession from actual solver data and trace events.
 
-        Modes: overview, algorithm, construction, debug. This first adapter is
+        Modes: overview, algorithm, construction, debug, custom. This first adapter is
         intentionally simple; users may create custom scenes from ``self.trace``.
+
+        Parameters
+        ----------
+        mode:
+            One of :data:`~manim_lace.animation.ANIMATION_MODES`.
+        show_sampling:
+            Also fade in sample points on the source paths.
+        show_crossing_ids:
+            Show crossing ID labels at each crossing.
+        durations:
+            Override per-stage durations (seconds). Keys are stage names
+            (``input``, ``crossings``, ``topology``, ``construction``,
+            ``diagnostics``, ``complete``). Unspecified stages use
+            :data:`~manim_lace.animation.DEFAULT_STAGE_DURATIONS`.
+        stage_modes:
+            Override which modes a stage appears in.
+
+        ``algorithm`` and ``debug`` mode also overlay a short read-out of the
+        fine-grained trace (``sampling.subdivision`` while the paths are shown,
+        ``region.face_walk`` while the regions are built), taken verbatim from the
+        events the engine emitted. ``overview``, ``construction`` and ``custom``
+        stay quiet about them.
         """
-        plan = build_animation_plan(self.result, mode=mode)  # type: ignore[arg-type]
+        plan = build_animation_plan(
+            self.result,
+            mode=mode,  # type: ignore[arg-type]
+            durations=durations,
+            stage_modes=stage_modes,
+        )
         animations = []
         stage_names = {stage.name for stage in plan.stages}
+        # Build a lookup so every animation gets its duration from the plan.
+        stage_dur = {stage.name: stage.duration for stage in plan.stages}
         source_layer = self.source_paths.copy()
         if "input" in stage_names:
-            animations.append(Create(source_layer, run_time=1.2))
+            d = stage_dur["input"]
+            animations.append(Create(source_layer, run_time=d))
             if show_sampling or mode in {"algorithm", "debug"}:
                 dots = VGroup()
                 for path in self.paths:
@@ -211,27 +371,32 @@ class Lace(VGroup):
                     for point in path.points[::stride]:
                         dots.add(Dot([point[0], point[1], 0], radius=0.018, color=BLUE))
                 if len(dots):
-                    animations.append(FadeIn(dots, run_time=0.6))
-                    animations.append(FadeOut(dots, run_time=0.3))
+                    animations.append(FadeIn(dots, run_time=d * 0.4))
+                    animations.append(FadeOut(dots, run_time=d * 0.2))
+            animations.extend(
+                self._trace_note(plan, "input", "sampling.subdivision", mode=mode, run_time=d)
+            )
         if "crossings" in stage_names:
+            d = stage_dur["crossings"]
             marks = VGroup(*[
                 Dot([event.point[0], event.point[1], 0], radius=0.055,
                     color=ORANGE if event.kind == "transverse" else BLUE)
                 for event in self.crossings
             ])
             if len(marks):
-                animations.append(FadeIn(marks, run_time=0.5))
+                animations.append(FadeIn(marks, run_time=d * 0.35))
                 if show_crossing_ids or mode in {"algorithm", "debug"}:
                     labels = VGroup(*[
                         Text(event.crossing_id, font_size=14).next_to(
                             [event.point[0], event.point[1], 0], direction=np.array([0.1, 0.1, 0.0])
                         ) for event in self.crossings
                     ])
-                    animations.append(FadeIn(labels, run_time=0.4))
-                    animations.append(Wait(0.4))
-                    animations.append(FadeOut(labels, run_time=0.2))
-                animations.append(FadeOut(marks, run_time=0.25))
+                    animations.append(FadeIn(labels, run_time=d * 0.25))
+                    animations.append(Wait(d * 0.3))
+                    animations.append(FadeOut(labels, run_time=d * 0.15))
+                animations.append(FadeOut(marks, run_time=d * 0.2))
         if "topology" in stage_names and mode in {"algorithm", "debug"}:
+            d = stage_dur.get("topology", 1.0)
             texts = VGroup()
             for event in self.crossings:
                 assignment = self.result.topology.assignment_for(event.crossing_id)
@@ -241,8 +406,13 @@ class Lace(VGroup):
                     text.move_to([event.point[0], event.point[1] + 0.25, 0])
                     texts.add(text)
             if len(texts):
-                animations.extend([FadeIn(texts, run_time=0.5), Wait(0.5), FadeOut(texts, run_time=0.25)])
+                animations.extend([
+                    FadeIn(texts, run_time=d * 0.35),
+                    Wait(d * 0.35),
+                    FadeOut(texts, run_time=d * 0.2),
+                ])
         if "diagnostics" in stage_names and self.result.diagnostics:
+            d = stage_dur.get("diagnostics", 1.0)
             lines = [f"{item.code}: {item.message}" for item in self.result.diagnostics[:5]]
             if len(self.result.diagnostics) > 5:
                 lines.append(f"… 另有 {len(self.result.diagnostics) - 5} 条诊断")
@@ -251,16 +421,69 @@ class Lace(VGroup):
                 for line in lines
             ]).arrange(DOWN, aligned_edge=LEFT, buff=0.08).to_edge(DOWN)
             animations.extend([
-                FadeIn(diagnostic_group, run_time=0.4),
-                Wait(0.8),
-                FadeOut(diagnostic_group, run_time=0.25),
+                FadeIn(diagnostic_group, run_time=d * 0.3),
+                Wait(d * 0.6),
+                FadeOut(diagnostic_group, run_time=d * 0.2),
             ])
         if "construction" in stage_names:
-            animations.append(FadeOut(source_layer, run_time=0.4))
-            animations.append(Create(self.ribbons.copy(), run_time=1.5))
+            d = stage_dur["construction"]
+            animations.append(FadeOut(source_layer, run_time=d * 0.25))
+            animations.append(Create(self.ribbons.copy(), run_time=d))
+            animations.extend(
+                self._trace_note(plan, "construction", "region.face_walk", mode=mode, run_time=d)
+            )
         if "complete" in stage_names:
-            animations.append(Wait(0.5))
+            animations.append(Wait(stage_dur.get("complete", 1.0) * 0.5))
         return Succession(*animations) if animations else Wait(0.1)
+
+    def _trace_note(
+        self,
+        plan: AnimationPlan,
+        stage_name: str,
+        event_type: str,
+        *,
+        mode: str,
+        run_time: float,
+    ) -> list[Any]:
+        """A short, real read-out of a fine-grained trace event (SPEC M5).
+
+        Only ``algorithm`` and ``debug`` show it, and every number comes from the
+        event the engine emitted: the note never restates a count the algorithm did
+        not actually produce.
+        """
+        if mode not in {"algorithm", "debug"}:
+            return []
+        events = [
+            event
+            for stage in plan.stages if stage.name == stage_name
+            for event in stage.events if event.event_type == event_type
+        ]
+        if not events:
+            return []
+        lines: list[str] = []
+        for event in events[:3]:
+            data = event.data
+            if event_type == "sampling.subdivision":
+                lines.append(
+                    f"细分 {data.get('path_id', '?')}：{data.get('node_count', 0)} 个递归节点"
+                    f"（细分 {data.get('split_count', 0)}／接受 {data.get('accepted_count', 0)}），"
+                    f"最深 {data.get('max_depth_reached', 0)} 层"
+                )
+            else:
+                lines.append(
+                    f"面域遍历（{data.get('backend', '?')}）：{data.get('node_count', 0)} 个节点，"
+                    f"{data.get('crossing_count', 0)} 个交叉，归给 {data.get('owner_count', 0)} 条股线"
+                )
+        if len(events) > 3:
+            lines.append(f"… 另有 {len(events) - 3} 条记录")
+        note = VGroup(*[
+            Text(line[:96], font_size=14, color=YELLOW) for line in lines
+        ]).arrange(DOWN, aligned_edge=LEFT, buff=0.08).to_corner(LEFT + DOWN, buff=0.4)
+        return [
+            FadeIn(note, run_time=run_time * 0.3),
+            Wait(run_time * 0.4),
+            FadeOut(note, run_time=run_time * 0.2),
+        ]
 
 
 def _pop_render(kwargs: dict[str, Any]) -> str:
@@ -276,12 +499,49 @@ def _pop_style(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {
         "stroke_color": kwargs.pop("stroke_color", WHITE),
         "stroke_width": kwargs.pop("stroke_width", None),
+        "stroke_width_px": kwargs.pop("stroke_width_px", None),
         "stroke_opacity": kwargs.pop("stroke_opacity", 1.0),
         "fill_color": kwargs.pop("fill_color", None),
         "fill_opacity": kwargs.pop("fill_opacity", 1.0),
         "hole_color": kwargs.pop("hole_color", BLACK),
         "draw_holes": kwargs.pop("draw_holes", True),
+        "palette": kwargs.pop("palette", None),
+        "style_policy": kwargs.pop("style_policy", None),
+        "border": kwargs.pop("border", None),
+        "border_color": kwargs.pop("border_color", None),
+        "paper": kwargs.pop("paper", False),
+        "density_policy": kwargs.pop("density_policy", None),
+        "pixel_height": kwargs.pop("pixel_height", 720),
+        "frame_height": kwargs.pop("frame_height", 4.0),
     }
+
+
+def _object_id(item: Any) -> str:
+    """The stable ID of a stroke piece or a ribbon region."""
+    identifier = getattr(item, "piece_id", None) or getattr(item, "region_id", None)
+    if identifier is None:
+        raise ValueError(f"unsupported piece object without piece_id/region_id: {type(item).__name__}")
+    return str(identifier)
+
+
+def _paint_order(pieces: list[Any], plan: StylePlan | None) -> list[Any]:
+    """The pieces in the order they should be painted.
+
+    Without a plan this is the geometry layer's own order (under strands first).
+    With a plan it is the plan's order, which may have been re-declared by the
+    style policy — that decision, and its visual consequence, is already reported
+    through ``STYLE-DRAW-ORDER-OVERRIDE``.
+    """
+    if plan is None:
+        return sorted(
+            pieces,
+            key=lambda item: (getattr(item, "draw_index", 0), _object_id(item)),
+        )
+    positions = {object_id: index for index, object_id in enumerate(plan.order)}
+    return sorted(
+        pieces,
+        key=lambda item: (positions.get(_object_id(item), len(positions)), _object_id(item)),
+    )
 
 
 def _region_groups(
@@ -294,19 +554,31 @@ def _region_groups(
     stroke_opacity: float,
     hole_color: Any,
     draw_holes: bool,
+    plan: StylePlan | None = None,
 ) -> tuple[VGroup, VGroup]:
     """Turn ribbon regions into a filled VGroup plus a separate hole VGroup.
 
     Manim has no even-odd fill, so a hole is painted as its own polygon on top of the
     ribbon. Ring roles stay available on the geometry side for anything more exact.
+
+    A style plan, when given, supplies per-region colours and opacity instead of the
+    uniform ones.
     """
-    ordered = sorted(regions, key=lambda region: (region.draw_index, region.region_id))
+    ordered = _paint_order(regions, plan)
     ribbons = VGroup()
     holes = VGroup()
     for index, region in enumerate(ordered):
+        assignment = plan.assignment_for(_object_id(region)) if plan is not None else None
         mob = _polyline_to_vmobject(region.exterior.points, closed=True)
-        mob.set_fill(fill_color, opacity=fill_opacity)
-        mob.set_stroke(stroke_color, width=stroke_width, opacity=stroke_opacity)
+        mob.set_fill(
+            assignment.paint_color if assignment is not None else fill_color,
+            opacity=assignment.fill_opacity if assignment is not None else fill_opacity,
+        )
+        mob.set_stroke(
+            stroke_color,
+            width=stroke_width,
+            opacity=assignment.opacity if assignment is not None else stroke_opacity,
+        )
         # Overlapping sections of a self-crossing path are resolved by this order.
         mob.z_index = index
         ribbons.add(mob)
@@ -318,6 +590,34 @@ def _region_groups(
                 hole_mob.z_index = index
                 holes.add(hole_mob)
     return ribbons, holes
+
+
+def _paper_group(result: LaceResult, *, color: Any, margin: float) -> VGroup:
+    """A filled rectangle behind the pattern, in the policy's paper colour."""
+    min_x, min_y, max_x, max_y = pattern_bounds(result)
+    points = np.array([
+        [min_x - margin, min_y - margin],
+        [max_x + margin, min_y - margin],
+        [max_x + margin, max_y + margin],
+        [min_x - margin, max_y + margin],
+    ])
+    mob = _polyline_to_vmobject(points, closed=True)
+    mob.set_fill(color, opacity=1.0)
+    mob.set_stroke(width=0)
+    mob.z_index = -1
+    return VGroup(mob)
+
+
+def _border_group(centerlines: tuple[np.ndarray, ...], *, color: Any, width: float) -> VGroup:
+    """Stroke the border centerlines (closed rings) as one VGroup."""
+    group = VGroup()
+    for index, ring in enumerate(centerlines):
+        mob = _polyline_to_vmobject(ring, closed=True)
+        mob.set_stroke(color, width=width, opacity=1.0)
+        mob.set_fill(opacity=0)
+        mob.z_index = index
+        group.add(mob)
+    return group
 
 
 def _polyline_to_vmobject(points: np.ndarray, *, closed: bool = False) -> VMobject:
@@ -338,18 +638,30 @@ _MANIM_CAP_STYLES = {
 
 
 def _ribbon_group(
-    pieces: list[Any], *, color: Any, width: float, opacity: float, cap_style: str
+    pieces: list[Any],
+    *,
+    color: Any,
+    width: float,
+    opacity: float,
+    cap_style: str,
+    plan: StylePlan | None = None,
 ) -> VGroup:
     """One VMobject per piece, in the renderer's draw order, with the cap style set.
 
     The order of the group members is the painter order computed by the geometry
     layer (under paths first), so an imperfect cut end stays covered by the path that
-    is over it. ``z_index`` repeats that order for scenes that re-sort mobjects.
+    is over it. ``z_index`` repeats that order for scenes that re-sort mobjects. A
+    style plan, when given, supplies the per-piece colour and opacity.
     """
     group = VGroup()
-    for index, piece in enumerate(sorted(pieces, key=lambda item: (item.draw_index, item.piece_id))):
+    for index, piece in enumerate(_paint_order(pieces, plan)):
+        assignment = plan.assignment_for(_object_id(piece)) if plan is not None else None
         mob = _polyline_to_vmobject(piece.points, closed=piece.closed)
-        mob.set_stroke(color, width=width, opacity=opacity)
+        mob.set_stroke(
+            assignment.color if assignment is not None else color,
+            width=width,
+            opacity=assignment.opacity if assignment is not None else opacity,
+        )
         mob.set_cap_style(_MANIM_CAP_STYLES[cap_style])
         mob.z_index = index
         group.add(mob)

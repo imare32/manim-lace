@@ -12,8 +12,9 @@ path without a probe keeps the sampled-polyline estimate unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
@@ -23,6 +24,7 @@ from .index import SegmentCandidateIndex, all_pairs, neighbourhood_clusters
 from .refine import refine_crossing
 
 CandidateStrategy = Literal["grid", "brute_force"]
+CandidateTracer = Callable[[int, int, str, dict[str, Any]], None]
 
 __all__ = [
     "CandidateStrategy",
@@ -250,6 +252,7 @@ def detect_crossings(
     candidate_strategy: CandidateStrategy = "grid",
     refine: bool = True,
     policy: EventPolicy | None = None,
+    candidate_tracer: CandidateTracer | None = None,
 ) -> CrossingDetectionResult:
     """Find path/path and non-adjacent self-intersections.
 
@@ -348,7 +351,19 @@ def detect_crossings(
             angle_tol=angle_tol,
         )
         if hit is None:
+            if candidate_tracer is not None:
+                candidate_tracer(first, second, "no_hit", {
+                    "path_i": path_first, "path_j": path_second,
+                    "segment_i": segment_indices[first], "segment_j": segment_indices[second],
+                })
             continue
+        if candidate_tracer is not None:
+            candidate_tracer(first, second, "hit", {
+                "path_i": path_first, "path_j": path_second,
+                "segment_i": segment_indices[first], "segment_j": segment_indices[second],
+                "kind": hit[4],
+                "point": (float(hit[2][0]), float(hit[2][1])),
+            })
         u, v, point, sin_angle, kind = hit
         seg_i, seg_j = segment_indices[first], segment_indices[second]
         if kind == "overlap":

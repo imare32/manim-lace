@@ -173,3 +173,125 @@ def test_manim_crossings_refine_onto_the_real_bezier_curves():
         assert coarse_gap > 1e-5
         assert fine_gap < 1e-9
         assert coarse_gap > 1e3 * fine_gap
+
+
+def test_build_animation_respects_custom_durations():
+    """Per-stage durations override the defaults and reach the Manim animations."""
+    from manim import Circle, Line, VGroup
+    from manim.animation.composition import Succession
+
+    from manim_lace import Lace
+    from manim_lace.animation import DEFAULT_STAGE_DURATIONS
+
+    source = VGroup(
+        Circle(radius=1),
+        Line(np.array([-2.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0])),
+    )
+    lace = Lace(source, offset=0.15)
+    # Override a single stage duration and verify it propagates.
+    custom_input = 3.5
+    anim = lace.build_animation(mode="overview", durations={"input": custom_input})
+    assert isinstance(anim, Succession)
+    # The first animation in the succession is Create(source_layer) with run_time
+    # equal to the overridden duration.
+    first_anim = anim.animations[0]
+    assert first_anim.run_time == pytest.approx(custom_input)
+    # The default duration should differ from our override.
+    assert DEFAULT_STAGE_DURATIONS["input"] != custom_input
+
+
+def test_build_animation_stage_modes_override():
+    """A stage hidden by stage_modes override does not appear in the succession."""
+    from manim import Circle, Line, VGroup
+
+    from manim_lace import Lace
+
+    source = VGroup(
+        Circle(radius=1),
+        Line(np.array([-2.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0])),
+    )
+    lace = Lace(source, offset=0.15)
+    # In overview mode, "crossings" normally appears. Remove it.
+    anim = lace.build_animation(
+        mode="overview",
+        stage_modes={"crossings": ("algorithm", "debug")},
+    )
+    # The succession's animations should not include crossing-related FadeIn
+    # of marks (those are the ones with Orange/BLUE dots). We check by verifying
+    # the total run_time is shorter than with crossings included.
+    default_anim = lace.build_animation(mode="overview")
+    assert anim.run_time < default_anim.run_time
+
+
+def test_build_animation_custom_mode_keeps_all_stages():
+    """Custom mode includes every stage with events, regardless of stage_modes."""
+    from manim import Circle, Line, VGroup
+
+    from manim_lace import Lace
+
+    source = VGroup(
+        Circle(radius=1),
+        Line(np.array([-2.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0])),
+    )
+    lace = Lace(source, offset=0.15)
+    # Even with a stage_modes override, custom mode ignores it.
+    anim = lace.build_animation(
+        mode="custom",
+        stage_modes={"crossings": ()},
+    )
+    # Custom mode should produce a non-empty animation.
+    assert len(anim.animations) > 0
+
+
+def _animation_texts(animation) -> list[str]:
+    """Every text drawn by an animation, including its nested ones."""
+    texts: list[str] = []
+    for item in getattr(animation, "animations", []):
+        mobject = getattr(item, "mobject", None)
+        if mobject is None:
+            continue
+        texts.extend(
+            str(child.text) for child in mobject.get_family() if hasattr(child, "text")
+        )
+    return texts
+
+
+def test_algorithm_mode_reads_out_the_real_subdivision():
+    from manim_lace import Lace
+
+    lace = Lace.from_parametric(
+        lambda t: (np.cos(t), np.sin(t)), (0.0, 2.0 * np.pi),
+        offset=0.1, max_error=1e-4, max_step=0.2,
+    )
+    summary = next(
+        event for event in lace.result.trace if event.event_type == "sampling.subdivision"
+    ).data
+    assert summary["split_count"] > 0
+    texts = _animation_texts(lace.build_animation(mode="algorithm"))
+    note = next((text for text in texts if "递归节点" in text), None)
+    assert note is not None
+    # The numbers on screen are the ones the sampler reported, not a retelling.
+    assert str(summary["node_count"]) in note
+    assert str(summary["split_count"]) in note
+    assert not any("递归节点" in text for text in _animation_texts(lace.build_animation(mode="overview")))
+
+
+def test_ribbon_algorithm_mode_reads_out_the_face_walk():
+    pytest.importorskip("shapely")
+    from manim import Circle, Line, VGroup
+
+    from manim_lace import Lace
+
+    source = VGroup(
+        Circle(radius=1),
+        Line(np.array([-1.6, 0.0, 0.0]), np.array([1.6, 0.0, 0.0])),
+    )
+    lace = Lace(source, offset=0.15, render="ribbon")
+    walk = next(
+        event for event in lace.result.trace if event.event_type == "region.face_walk"
+    ).data
+    texts = _animation_texts(lace.build_animation(mode="algorithm"))
+    note = next((text for text in texts if "面域遍历" in text), None)
+    assert note is not None
+    assert walk["backend"] in note
+    assert str(walk["owner_count"]) in note

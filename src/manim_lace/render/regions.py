@@ -29,6 +29,7 @@ import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
 from ..model import CapStyle, CrossingEvent, JoinStyle, PolylinePath, WeaveTopology
+from ..tracing import BoundedRecords
 from .order import paint_order
 
 __all__ = [
@@ -103,6 +104,14 @@ class RegionRenderResult:
     larger wherever sections of one self-crossing path overlap. The invariant to check
     is ``painted_area == union_area`` (the ribbon that was built), and
     ``union_area == band_area`` for everything that was not divided into sections.
+
+    ``face_walk`` describes the traversal that produced these regions (the M5
+    fine-grained trace). Both backends use the same key scheme
+    (``backend``, ``node_kind``, ``node_count``, ``band_count``, ``section_count``,
+    ``crossing_count``, ``owner_count``, ``congested``, ``removed_area`` and the
+    bounded ``steps`` list), and each adds the counters its own walk produced:
+    ``region_polygon_count`` plus the cut accounting for the Boolean backend,
+    ``face_count`` plus the face and ownership counters for the arrangement one.
     """
 
     regions: list[RibbonRegion]
@@ -112,6 +121,7 @@ class RegionRenderResult:
     union_area: float = 0.0
     painted_area: float = 0.0
     region_area_sum: float = 0.0
+    face_walk: dict[str, Any] = field(default_factory=dict)
 
     @property
     def covered_area(self) -> float:
@@ -602,9 +612,19 @@ def render_region_geometry(
         strip.strip_id: strip.band for group in strips.values() for strip in group
     }
     removed_area = 0.0
+    walk = BoundedRecords()
+    missing_assignment_count = 0
+    self_crossing_count = 0
+    empty_band_count = 0
+    lens_miss_count = 0
+    cut_count = 0
+    section_cut_count = 0
     for crossing in weavable:
         assignment = topology.assignment_for(crossing.crossing_id)
         if assignment is None:
+            missing_assignment_count += 1
+            walk.add({"kind": "skip", "reason": "missing_assignment",
+                      "crossing_id": crossing.crossing_id})
             diagnostics.append(Diagnostic(
                 code="REGION-MISSING-ASSIGNMENT",
                 severity=Severity.WARNING,
@@ -619,24 +639,44 @@ def render_region_geometry(
             # already overlap at the crossing. Painting the over section after the under
             # one shows the same result as cutting, without removing area that belongs
             # to the strand on top.
+            self_crossing_count += 1
+            walk.add({"kind": "skip", "reason": "self_crossing_order",
+                      "crossing_id": crossing.crossing_id})
             continue
         under_id = crossing.path_a if assignment.under_side == "a" else crossing.path_b
         over_id = crossing.path_b if assignment.under_side == "a" else crossing.path_a
         current = visible_band.get(under_id)
         over_band = bands.get(over_id)
         if current is None or over_band is None or current.is_empty:
+            empty_band_count += 1
+            walk.add({"kind": "skip", "reason": "empty_under_band",
+                      "crossing_id": crossing.crossing_id, "under": under_id})
             continue
         lens = _local_lens(current, over_band, crossing.point, Point)
         if lens is None:
+            lens_miss_count += 1
+            walk.add({"kind": "skip", "reason": "no_local_overlap",
+                      "crossing_id": crossing.crossing_id, "under": under_id, "over": over_id})
             continue
         if under_id in strips:
             # A divided path is cut section by section; the lens is local, so the
             # bounding boxes keep this to the one or two sections it touches.
-            removed_area += _subtract_from_strips(strips[under_id], visible_strip, lens)
+            removed = _subtract_from_strips(strips[under_id], visible_strip, lens)
+            removed_area += removed
+            cut_count += 1
+            section_cut_count += 1
+            walk.add({"kind": "weave", "crossing_id": crossing.crossing_id,
+                      "under": under_id, "over": over_id, "target": "section",
+                      "lens_area": float(lens.area), "removed_area": float(removed)})
             continue
         before = float(current.area)
         visible_band[under_id] = current.difference(lens)
-        removed_area += before - float(visible_band[under_id].area)
+        removed = before - float(visible_band[under_id].area)
+        removed_area += removed
+        cut_count += 1
+        walk.add({"kind": "weave", "crossing_id": crossing.crossing_id,
+                  "under": under_id, "over": over_id, "target": "band",
+                  "lens_area": float(lens.area), "removed_area": float(removed)})
 
     path_position = {path.path_id: index for index, path in enumerate(paths)}
     node_of: dict[str, str] = {}
@@ -723,6 +763,8 @@ def render_region_geometry(
         if path_id not in strips and not band.is_empty
     )
     regions: list[RibbonRegion] = []
+    owners: set[str] = set()
+    hole_count_total = 0
     for path in paths:
         if strips.get(path.path_id):
             parts = [
@@ -744,6 +786,8 @@ def render_region_geometry(
                     )
                 ]
                 label = path.path_id if node == path.path_id else node
+                owners.add(node)
+                hole_count_total += len(holes)
                 regions.append(RibbonRegion(
                     region_id=f"{label}.region{index}",
                     path_id=path.path_id,
@@ -794,6 +838,30 @@ def render_region_geometry(
         union_area=union_area,
         painted_area=painted_area,
         region_area_sum=region_area_sum,
+        face_walk={
+            "backend": "boolean",
+            # This backend walks path bands (and the sections of a self-crossing path),
+            # not the faces of a planar arrangement: ``node_kind`` says which it is.
+            "node_kind": "band",
+            "node_count": len(order_nodes),
+            "band_count": len(bands),
+            "section_count": sum(len(group) for group in strips.values()),
+            "crossing_count": len(weavable),
+            "cut_count": cut_count,
+            "section_cut_count": section_cut_count,
+            "missing_assignment_count": missing_assignment_count,
+            "self_crossing_count": self_crossing_count,
+            "empty_band_count": empty_band_count,
+            "lens_miss_count": lens_miss_count,
+            "congested": bool(congested),
+            "hole_count": hole_count_total,
+            # This backend's traversal unit is a band (or a section), so it counts the
+            # region polygons it produced rather than arrangement faces.
+            "region_polygon_count": len(regions),
+            "owner_count": len(owners),
+            "removed_area": float(removed_area),
+            **walk.as_payload("steps"),
+        },
     )
 
 

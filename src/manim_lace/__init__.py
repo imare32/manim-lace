@@ -9,8 +9,9 @@ visible to static tools.
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any
 
+from .animation.plan import ANIMATION_MODES, DEFAULT_STAGE_DURATIONS, DEFAULT_STAGE_MODES
 from .diagnostics import Diagnostic, InputPathError, LaceError, Severity, WeaveConflictError
-from .engine import LaceEngine
+from .engine import LaceEngine, TraceCollector
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import (
     CapStyle,
@@ -27,6 +28,27 @@ from .model import (
     TraceEvent,
     WeaveAssignment,
     WeaveTopology,
+)
+from .render.pixels import px_to_stroke_width, px_to_units, stroke_width_to_px
+from .style import (
+    PALETTES,
+    BorderSpec,
+    CapTreatment,
+    DensityPolicy,
+    Palette,
+    StyleGroup,
+    StylePlan,
+    StylePolicy,
+    analyze_density,
+    apply_style,
+    build_border,
+    build_groups,
+    get_palette,
+    get_swatch,
+    palette_names,
+    register_palette,
+    simplify_for_density,
+    stroke_piece_outline,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - type checkers and IDEs only
@@ -51,10 +73,16 @@ def _manim_available() -> bool:
 _MANIM_AVAILABLE = _manim_available()
 
 __all__ = [
+    "ANIMATION_MODES",
+    "BorderSpec",
     "CapStyle",
+    "CapTreatment",
     "ConflictStrategy",
     "CrossingEvent",
     "CrossingStats",
+    "DEFAULT_STAGE_DURATIONS",
+    "DEFAULT_STAGE_MODES",
+    "DensityPolicy",
     "Diagnostic",
     "EventPolicy",
     "InputPathError",
@@ -63,17 +91,36 @@ __all__ = [
     "LaceEngine",
     "LaceError",
     "LaceResult",
+    "PALETTES",
+    "Palette",
     "Pass",
     "PathSource",
     "PolylinePath",
     "RibbonBackend",
     "Severity",
+    "StyleGroup",
+    "StylePlan",
+    "StylePolicy",
+    "TraceCollector",
     "TraceEvent",
     "WeaveAssignment",
     "WeaveConflictError",
     "WeaveTopology",
+    "analyze_density",
+    "apply_style",
+    "build_border",
+    "build_groups",
+    "get_palette",
+    "get_swatch",
+    "palette_names",
+    "px_to_stroke_width",
+    "px_to_units",
+    "register_palette",
     "sample_graph",
     "sample_parametric",
+    "simplify_for_density",
+    "stroke_piece_outline",
+    "stroke_width_to_px",
 ]
 if not _MANIM_AVAILABLE:
     # Keep __all__ truthful so that ``from manim_lace import *`` still works; the name

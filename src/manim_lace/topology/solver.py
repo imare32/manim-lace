@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from ..diagnostics import Diagnostic, Severity
 from ..model import ConflictStrategy, CrossingEvent, Pass, WeaveAssignment, WeaveTopology
 
 WeaveMode = Literal["alternating", "free", "manual"]
+TopologyTracer = Callable[[str, dict[str, Any]], None]
 
 #: Over side used when a crossing has to be relaxed and the user gave no side.
 RELAXED_OVER_SIDE: Literal["a", "b"] = "a"
@@ -134,6 +136,8 @@ def _propagate(
     path_ids: list[str],
     adjacency: dict[str, list[tuple[str, int, str]]],
     seeds: list[tuple[str, int]],
+    *,
+    tracer: TopologyTracer | None = None,
 ) -> tuple[dict[str, int], list[tuple[str, str, str]]]:
     """Assign one parity flag per path and collect the edges that contradict them."""
     flags: dict[str, int] = {}
@@ -143,6 +147,8 @@ def _propagate(
         if start in flags:
             continue
         flags[start] = value
+        if tracer is not None:
+            tracer("seed", {"path_id": start, "flag": value})
         queue = deque([start])
         while queue:
             current = queue.popleft()
@@ -151,9 +157,19 @@ def _propagate(
                 if other not in flags:
                     flags[other] = expected
                     queue.append(other)
+                    if tracer is not None:
+                        tracer("propagate", {
+                            "from": current, "to": other, "flag": expected,
+                            "crossing_id": crossing_id, "parity": parity,
+                        })
                 elif flags[other] != expected and crossing_id not in rejected_ids:
                     rejected_ids.add(crossing_id)
                     rejected.append((current, other, crossing_id))
+                    if tracer is not None:
+                        tracer("reject", {
+                            "from": current, "to": other, "crossing_id": crossing_id,
+                            "expected": expected, "actual": flags[other],
+                        })
     return flags, rejected
 
 
@@ -271,6 +287,7 @@ def solve_weave(
     mode: WeaveMode = "alternating",
     manual: dict[str, Literal["a", "b"]] | None = None,
     conflict_strategy: ConflictStrategy = "error",
+    topology_tracer: TopologyTracer | None = None,
 ) -> WeaveTopology:
     """Solve over/under identities independently of rendering.
 
@@ -353,7 +370,7 @@ def solve_weave(
     dropped_manual: list[str] = []
     if conflict_strategy == "manual":
         pins, dropped_manual = _manual_pins(transverse, positions, manual)
-    flags, rejected = _propagate(path_ids, adjacency, _seed_order(path_ids, pins))
+    flags, rejected = _propagate(path_ids, adjacency, _seed_order(path_ids, pins), tracer=topology_tracer)
     witnesses = _witnesses(adjacency, edges_by_id, rejected, self_conflicts, positions)
 
     if witnesses and conflict_strategy == "error":

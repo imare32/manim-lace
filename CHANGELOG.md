@@ -1,5 +1,184 @@
 # Changelog
 
+## Unreleased — fine-grained traces (M5 done)
+
+- Add `manim_lace.tracing` with `BoundedRecords`: a trace payload that counts every
+  record exactly while keeping a bounded, order-preserving prefix
+  (`DEFAULT_TRACE_RECORD_LIMIT` = 64), emitted as `<key>` / `<key>_count` /
+  `<key>_truncated` so a shortened list never looks complete. Every fine-grained
+  payload now uses that scheme.
+- Trace the adaptive subdivision (`sampling.subdivision`, stage `input`):
+  `sample_parametric` and `sample_graph` accept a `subdivision_tracer`, which
+  receives one summary per sampled source curve with the effective
+  `max_error`/`max_step`/`max_depth`, exact counters (`interval_count`,
+  `node_count`, `split_count`, `accepted_count`, `budget_capped_count`,
+  `singular_count`, `max_depth_reached`, `dropped_interval_count`, `part_count`,
+  `sample_count`) and a bounded `decisions` list of
+  `{kind, reason, t0, t1, depth, error}`. Every recursion node ends in exactly one
+  of split/accept/depth-cap/drop, so the counters add up; `sample_graph` adds
+  `jump_split_path_count` when its optional jump splitting ran afterwards.
+  Tracing does not change the samples.
+- `LaceEngine` accepts `sampling_trace=` (the summaries of the paths it was given)
+  and emits one `sampling.subdivision` event per summary before the
+  `path.normalized` events; `LaceEngine.from_parametric` / `from_graph` fill it in
+  automatically, so `Lace.from_parametric(...).result.trace` describes the
+  subdivision that really happened instead of an inferred story. Passing paths as
+  plain coordinates still produces no such event.
+- Trace the face walk (`region.face_walk`, stage `construction`):
+  `RegionRenderResult.face_walk` and the new `region.face_walk` event describe how
+  the regions were produced. The Boolean backend records its weave and skip steps
+  per crossing (with `under`, `over`, `lens_area`, `removed_area` or a `reason`)
+  plus `cut_count`, `section_cut_count`, `missing_assignment_count`,
+  `self_crossing_count`, `empty_band_count`, `lens_miss_count`, `hole_count` and
+  `region_polygon_count`. The arrangement backend records every cell's ownership
+  decision (`single` / `lens` / `conflicting-lens` / `off-crossing` / `uncovered`)
+  and every dropped sliver, plus `raw_face_count`, `face_count`,
+  `collapsed_count`, `subtraction_count`, `single_owner_count`,
+  `lens_decided_count`, `conflicting_count`, `off_crossing_count`,
+  `uncovered_count` and `sliver_count`. Both use the same key scheme for
+  `backend`, `node_kind`, `node_count`, `band_count`, `section_count`,
+  `crossing_count`, `owner_count`, `congested` and `removed_area`, so the same
+  input can be compared across backends (`_cells` now returns its walk stats).
+- `Lace.build_animation(mode="algorithm"/"debug")` overlays a short read-out of
+  those events (real node counts, split counts, deepest level, backend and owner
+  count); `overview`, `construction` and `custom` stay quiet about them.
+- Add `examples/scene_weave.py::SamplingTraceDemo`, which samples a curve through
+  `Lace.from_parametric` and shows the fine-grained read-out.
+- Docs: `docs/ALGORITHM_TRACE.md` documents both payloads (including what is still
+  aggregated, i.e. the refinement iterations), `docs/ROADMAP.md` closes M5,
+  `README.md` gains a "fine-grained events" example.
+- Tests: `tests/test_trace_payloads.py` (bounded payloads, subdivision counters
+  and identities, depth cap, singularity drops, jump splits, the event in the
+  trace and its JSON round-trip, both face-walk payloads and the backend
+  comparison) plus two Manim-facing assertions in `tests/test_optional_manim.py`.
+
+## Unreleased — aesthetic policies (M6 done)
+
+- Add the `manim_lace.style` package (M6), renderer-neutral and decoration-only:
+  palettes, grouping, borders, cut-end treatments and density-aware
+  simplification.
+- Add `style/palette.py`: a 56-colour card of traditional Japanese colours
+  (name, kana reading, hex) plus seven named palettes (`haru` 春, `natsu` 夏,
+  `aki` 秋, `fuyu` 冬, `matsuri` 祭, `wabi` 侘, `ayame` 菖蒲) with Chinese/romaji/
+  English aliases and a `register_palette` hook for plugins. Palettes are ordered
+  dark → light so the paper-like colour comes last and cycling hands out the
+  visible colours first. `strand_colors` supports `cycle`, `even` and `shuffle`
+  (`shuffle` takes a seed, so a random palette stays reproducible, SPEC FR-063).
+  The swatch values are public traditional Japanese colour names; the grouping
+  into palettes is inspired by Teruko Sakurai's *Japanese Color Harmony
+  Dictionary*, whose own swatch pages and combinations are not reproduced.
+  `render/palettes.py` (the earlier stub) is now a re-export shim.
+- Add `style/grouping.py` and `style/policy.py`: `build_groups` partitions the
+  visible geometry by `path`, `piece`, `layer` or `degree`, and `StylePolicy` +
+  `apply_style` resolve that into a `StylePlan` with one `StyleAssignment` per
+  piece/region. Styling is provably decorative: tests freeze crossings,
+  assignments and piece coordinates across four different policies (SPEC FR-062,
+  AT-018). A draw order that is not the geometry layer's own is reported as
+  `STYLE-DRAW-ORDER-OVERRIDE` rather than applied silently.
+- Add `style/border.py`: `BorderSpec`/`build_border` frame the *visible* geometry
+  (cut-away pieces do not enlarge it) with `square`/`round`/`bevel` corners,
+  concentric bands, an inset and a palette colour index. Rings are closed and
+  counter-clockwise; a frame that would land inside the pattern, or a corner
+  radius that does not fit, raises `ValueError` instead of being approximated.
+- Add cut-end treatments: the stroke backend accepts `cover_allowance`, which
+  shortens every under-pass cut by `cover_allowance * offset` per side so the
+  lower strand tucks under the upper one (`RENDER-COVER-ALLOWANCE`; ribbon mode
+  reports `RENDER-COVER-ALLOWANCE-IGNORED`). The allowance may only eat slack the
+  cut already has, so `0 <= cover_allowance <= overshoot` is validated in
+  `LaceEngine` construction and in `render_stroke_geometry`. `style/caps.py` adds
+  `stroke_piece_outline`: the real paint polygon of a piece (butt/square/round
+  caps, miter joins with a limit, and the hole ring of an uncut closed
+  centerline), so the end shape is checked geometry instead of a renderer
+  assumption. `CapTreatment` bundles cap style, allowance and arc sampling.
+- Add `style/density.py`: `analyze_density` measures crowding (grid cell counts,
+  hotspots, and connected clusters of crossings within a scale-derived radius),
+  and `simplify_for_density` hides visible slivers shorter than the threshold
+  *inside a dense cluster only*. Crossings, assignments and `result.pieces` are
+  untouched; hidden piece IDs, the threshold and the cluster scale go into
+  `RENDER-DENSITY-SIMPLIFIED`, the region backend reports
+  `RENDER-DENSITY-SKIPPED` instead of quietly doing nothing, and a sparse pattern
+  emits no diagnostic at all.
+- Wire the policies into the Manim facade: `Lace` now accepts `palette`,
+  `style_policy`, `border`, `border_color`, `paper`, `density_policy` and
+  `cover_allowance`, colours every piece/region from the plan, draws the paper
+  rectangle behind the weave (z-index -1) and the frame around it (stroke width
+  `100 × BorderSpec.thickness`, the same world-unit convention as the
+  `200 * offset` strand heuristic), and keeps `result.pieces` as the honest,
+  un-simplified geometry while `lace.density` reports what was hidden.
+  `palette` and `style_policy` are mutually exclusive.
+- Export the M6 API from the package root (`PALETTES`, `Palette`, `get_palette`,
+  `get_swatch`, `palette_names`, `register_palette`, `StylePolicy`, `StylePlan`,
+  `StyleGroup`, `build_groups`, `apply_style`, `BorderSpec`, `build_border`,
+  `CapTreatment`, `stroke_piece_outline`, `DensityPolicy`, `analyze_density`,
+  `simplify_for_density`).
+- Add `examples/scene_style.py` with `PaletteGallery`, `BorderGallery`,
+  `CutEndGallery` (including the drawn piece outlines) and `DensityGallery`.
+- Tests: `tests/test_style_palette.py`, `tests/test_style_policy.py`,
+  `tests/test_style_geometry.py` and `tests/test_optional_style_manim.py`
+  (95 new tests, 336 total).
+
+## Unreleased — M1 + M5 done, gallery scenes, Manim CE 0.22.0 only
+
+- Add `render/pixels.py` with `px_to_stroke_width`, `stroke_width_to_px`, and
+  `px_to_units`: converts between desired output-pixel thickness and Manim's
+  frame-relative `stroke_width`, so a caller can say "2 pixel thick lines" and
+  get the right `stroke_width` for 480p/720p/1080p output. The formula is
+  `pixel_thickness ≈ 0.01 × stroke_width × (pixel_height / frame_height)`, and
+  the inverse undoes it exactly. Preset constants (`FRAME_HEIGHT_*`,
+  `PIXEL_HEIGHT_*`) cover the standard Manim quality levels. The `Lace` facade
+  gains `stroke_width_px`, `pixel_height`, and `frame_height` parameters: when
+  `stroke_width_px` is given it overrides `stroke_width` through the converter,
+  so the visual thickness is correct regardless of the frame or resolution. This
+  closes the last M1 bullet ("pixel-aligned stroke widths").
+- Add fine-grained trace events (M5): the engine now records every candidate
+  pair that survived the bounding-box rejection and entered the exact segment
+  test, and every constraint-propagation step (seed, propagate, reject) from the
+  topology solver. Two new trace event types appear in `result.trace`:
+  `crossing.candidate_pairs` (with `pair_count`, `hit_count`, and a per-pair
+  `status` list) and `topology.propagation` (with `seed_count`,
+  `propagation_count`, `rejection_count`, and a per-step `kind` list). Both are
+  emitted only when there is data to report, so existing traces that had no
+  crossings or used `free`/`manual` mode are unchanged.
+- Add `verify_coordinate_consistency` (`animation/verify.py`, M5): checks that
+  every crossing ID in the trace's `crossing.detected` events matches a crossing
+  in `result.crossings`, and that the point recorded in the trace data matches
+  the crossing's canonical point to within tolerance. Returns a
+  `CoordConsistency` report with `consistent`, `crossing_ids_in_trace`,
+  `crossing_ids_in_result`, and a `mismatches` list. This verifies the M5
+  milestone item "animation highlights are at the same coordinates and IDs as
+  final geometry."
+- Make the animation plan configurable (M5): `build_animation_plan` now accepts
+  `durations` and `stage_modes` keyword arguments to override per-stage durations
+  and mode membership without editing the source. The defaults are exported as
+  `DEFAULT_STAGE_DURATIONS` and `DEFAULT_STAGE_MODES` (both dicts) from
+  `manim_lace.animation` and the package root. The previous signature
+  (`build_animation_plan(result, mode)`) still works unchanged.
+- Make the Manim adapter respect plan durations (M5 done): `Lace.build_animation`
+  now accepts `durations` and `stage_modes` parameters (forwarded to
+  `build_animation_plan`) and derives every animation's `run_time` from the
+  plan's per-stage duration instead of using hardcoded values. The previous
+  signature (`build_animation(mode)`) still works unchanged. Tests verify that
+  custom durations propagate to the first animation, that stage-mode overrides
+  change the total succession length, and that `custom` mode ignores overrides.
+- Export `px_to_stroke_width`, `px_to_units`, `stroke_width_to_px`,
+  `TraceCollector`, `ANIMATION_MODES`, `DEFAULT_STAGE_DURATIONS`,
+  `DEFAULT_STAGE_MODES` from the package `__all__`. Add `render/pixels.py` to
+  the `render` package exports.
+- Add 9 new ribbon-backend gallery scenes to `examples/scene_gallery.py`
+  (CircleLine / SineLine / Trefoil / Star / Spiral / Grid / Cross / Infinity
+  / Chain). All use a white background with black ribbons and holes — the
+  canonical "lace on paper" look. The original 3 demonstration scenes
+  (CapStyleGallery, DrawOrderGallery, RibbonGallery) keep their colourful
+  styles unchanged.
+- Add `examples/gallery.html`, a static gallery page that showcases 9
+  pre-rendered lace patterns in a responsive grid layout, with per-tile
+  Chinese descriptions, click-to-zoom lightbox, and a footer showing the
+  render command. `examples/gallery/` holds the 9 reference PNGs (one per
+  class) at 2160p.
+- Drop support for Manim CE `0.19`–`0.21`. The project now targets only
+  Manim CE `0.22.0`; `pyproject.toml` pins `manim==0.22.0` and the M1 version
+  matrix item is closed as out of scope.
+
 ## Unreleased — planar-arrangement region backend and the backend comparison (M4 done)
 
 - Add the second region implementation, `ribbon_backend='arrangement'`

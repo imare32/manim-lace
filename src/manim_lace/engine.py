@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from .animation.trace import TraceRecorder
+from .diagnostics import Diagnostic, Severity
 from .geometry.intersections import CandidateStrategy, detect_crossings
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import (
@@ -24,7 +25,27 @@ from .model import (
 from .render.arrangement import render_arrangement_regions
 from .render.regions import render_region_geometry
 from .render.stroke import render_stroke_geometry
+from .style.caps import validate_cover_allowance
 from .topology.solver import WeaveMode, solve_weave
+
+
+class TraceCollector:
+    """Collects fine-grained trace callbacks into a list of (kind, data) tuples.
+
+    The engine creates one of these per ``solve()`` call and passes it to the
+    detector and topology solver so their internal steps can be emitted as
+    trace events after the aggregate ones.
+    """
+
+    def __init__(self) -> None:
+        self.candidate_events: list[tuple[int, int, str, dict[str, Any]]] = []
+        self.topology_events: list[tuple[str, dict[str, Any]]] = []
+
+    def candidate_callback(self, first: int, second: int, status: str, data: dict[str, Any]) -> None:
+        self.candidate_events.append((first, second, status, data))
+
+    def topology_callback(self, kind: str, data: dict[str, Any]) -> None:
+        self.topology_events.append((kind, data))
 
 
 class LaceEngine:
@@ -74,6 +95,13 @@ class LaceEngine:
         pieces also get a deterministic ``draw_index`` that puts every under path
         before the paths over it. In ``ribbon`` mode the cap is real geometry
         instead of a compensated gap.
+    cover_allowance:
+        Stroke backend only: shorten every under-pass cut by ``cover_allowance *
+        offset`` on both sides, so the end of the lower strand tucks further under
+        the strand above it (a cut-end treatment, SPEC §9). It may only eat the
+        slack the cut already has, i.e. ``0 <= cover_allowance <= overshoot``;
+        more is rejected at construction rather than drawn. Reported as
+        ``RENDER-COVER-ALLOWANCE``.
     join, miter_limit:
         ``ribbon`` mode only: how the offset outline connects at polyline vertices
         (``miter``, ``bevel`` or ``round``) and the limit that clips a miter spike
@@ -85,6 +113,14 @@ class LaceEngine:
         ribbon boundaries and assigns every face to one owner, so regions never overlap
         and coincident crossings still conserve area. Differences between them are
         reported by each backend's own diagnostics.
+    sampling_trace:
+        The subdivision summaries produced when these paths were sampled (one dict per
+        sampled source curve, as handed to
+        :func:`manim_lace.geometry.sampling.sample_parametric`'s
+        ``subdivision_tracer``). ``from_parametric`` / ``from_graph`` fill this in
+        themselves; pass it explicitly when you sampled first, so ``solve()`` can emit
+        ``sampling.subdivision`` events for the real subdivision that happened instead
+        of guessing one from the sample points.
     """
 
     def __init__(
@@ -105,9 +141,11 @@ class LaceEngine:
         event_policy: EventPolicy | dict[str, str] | str | None = None,
         conflict_strategy: ConflictStrategy = "error",
         cap_style: CapStyle = "butt",
+        cover_allowance: float = 0.0,
         join: JoinStyle = "miter",
         miter_limit: float = 5.0,
         ribbon_backend: RibbonBackend = "boolean",
+        sampling_trace: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         # Every knob is validated here so that an invalid configuration fails at
         # construction instead of halfway through solve().
@@ -147,6 +185,16 @@ class LaceEngine:
             raise ValueError("miter_limit must be positive and finite")
         if ribbon_backend not in ("boolean", "arrangement"):
             raise ValueError("ribbon_backend must be 'boolean' or 'arrangement'")
+        sampling_summaries = list(sampling_trace or ())
+        for summary in sampling_summaries:
+            if not isinstance(summary, dict):
+                raise ValueError(
+                    "sampling_trace must hold subdivision summaries (dicts); "
+                    f"got {type(summary).__name__}: {summary!r}"
+                )
+        # The subdivision happened before this engine existed: carry its real summary
+        # instead of trying to reconstruct one from the sample points.
+        self.sampling_trace: list[dict[str, Any]] = sampling_summaries
         self.paths = self._normalize_paths(paths)
         self.offset = float(offset)
         self.weave_mode = weave_mode
@@ -162,6 +210,10 @@ class LaceEngine:
         self.event_policy = resolved_policy
         self.conflict_strategy: ConflictStrategy = conflict_strategy
         self.cap_style: CapStyle = cap_style
+        # The cut-end cover allowance is a geometry knob, so it is validated against
+        # the same overshoot the cut is built from; too large a value would put the
+        # visible end past the true crossing.
+        self.cover_allowance = validate_cover_allowance(cover_allowance, overshoot)
         self.join: JoinStyle = join
         self.miter_limit = float(miter_limit)
         self.ribbon_backend: RibbonBackend = ribbon_backend
@@ -209,11 +261,13 @@ class LaceEngine:
         closed: bool = False,
         **kwargs: object,
     ) -> LaceEngine:
+        summaries: list[dict[str, Any]] = []
         paths = sample_parametric(
             func, t_range, max_error=max_error, max_step=max_step,
             breakpoints=breakpoints, closed=closed,
+            subdivision_tracer=summaries.append,
         )
-        return cls(paths, offset=offset, **kwargs)
+        return cls(paths, offset=offset, sampling_trace=summaries, **kwargs)
 
     @classmethod
     def from_graph(
@@ -228,14 +282,45 @@ class LaceEngine:
         jump_threshold: float | None = None,
         **kwargs: object,
     ) -> LaceEngine:
+        summaries: list[dict[str, Any]] = []
         paths = sample_graph(
             func, x_range, max_error=max_error, max_step=max_step,
             breakpoints=breakpoints, jump_threshold=jump_threshold,
+            subdivision_tracer=summaries.append,
         )
-        return cls(paths, offset=offset, **kwargs)
+        return cls(paths, offset=offset, sampling_trace=summaries, **kwargs)
+
+    def trace_sampled_path_ids(self, summary: dict[str, Any]) -> tuple[str, ...]:
+        """The paths a subdivision summary produced, in path order.
+
+        ``sample_parametric`` names its output after the requested base id
+        (``P0000``, ``P0000.01``, and ``P0000.split0`` after a jump split), so the
+        produced paths are the ones whose id is the base id or starts with it.
+        """
+        base = str(summary.get("path_id", ""))
+        matched = tuple(
+            path.path_id for path in self.paths
+            if path.path_id == base or path.path_id.startswith(f"{base}.")
+        )
+        return matched or ((base,) if base else ())
 
     def solve(self) -> LaceResult:
         trace = TraceRecorder()
+        for summary in self.sampling_trace:
+            trace.emit(
+                "input", "sampling.subdivision",
+                (
+                    f"自适应细分 {summary.get('path_id', '?')}："
+                    f"{summary.get('interval_count', 0)} 个初始区间，"
+                    f"{summary.get('node_count', 0)} 个递归节点"
+                    f"（细分 {summary.get('split_count', 0)}、接受 {summary.get('accepted_count', 0)}、"
+                    f"触顶 {summary.get('budget_capped_count', 0)}、丢弃 {summary.get('singular_count', 0)}），"
+                    f"最深 {summary.get('max_depth_reached', 0)} 层，"
+                    f"保留 {summary.get('sample_count', 0)} 个采样点。"
+                ),
+                object_ids=self.trace_sampled_path_ids(summary),
+                data=dict(summary),
+            )
         for path in self.paths:
             trace.emit(
                 "input", "path.normalized", f"规范化路径 {path.path_id}，包含 {len(path.points)} 个采样点。",
@@ -243,6 +328,7 @@ class LaceEngine:
                 data={"point_count": len(path.points), "closed": path.closed, "length": path.length,
                       "sampling_error": path.sampling_error},
             )
+        collector = TraceCollector()
         detected = detect_crossings(
             self.paths,
             position_tol=self.position_tol,
@@ -250,6 +336,7 @@ class LaceEngine:
             candidate_strategy=self.candidate_strategy,
             refine=self.refine,
             policy=self.event_policy,
+            candidate_tracer=collector.candidate_callback,
         )
         if detected.stats is not None:
             trace.emit(
@@ -283,6 +370,7 @@ class LaceEngine:
             mode=self.weave_mode,
             manual=self.manual_over,  # type: ignore[arg-type]
             conflict_strategy=self.conflict_strategy,
+            topology_tracer=collector.topology_callback,
         )
         for crossing_id, assignment in sorted(topology.assignments.items()):
             trace.emit(
@@ -298,8 +386,55 @@ class LaceEngine:
                 data={"code": diagnostic.code, "severity": diagnostic.severity.value,
                       "details": diagnostic.details, "hints": diagnostic.hints},
             )
+        # Fine-grained candidate-pair trace (M5): one event per candidate pair that
+        # survived the bounding-box rejection and entered the exact segment test.
+        if collector.candidate_events:
+            hits = sum(1 for _, _, status, _ in collector.candidate_events if status == "hit")
+            trace.emit(
+                "crossings", "crossing.candidate_pairs",
+                f"逐候选对判定：{len(collector.candidate_events)} 对进入精确判定，其中 {hits} 对命中。",
+                data={
+                    "pair_count": len(collector.candidate_events),
+                    "hit_count": hits,
+                    "pairs": [
+                        {"segment_a": d.get("segment_i"), "segment_b": d.get("segment_j"),
+                         "status": s}
+                        for _, _, s, d in collector.candidate_events
+                    ],
+                },
+            )
+        # Fine-grained constraint-propagation trace (M5): seed, propagate, reject steps.
+        if collector.topology_events:
+            seeds = sum(1 for kind, _ in collector.topology_events if kind == "seed")
+            propagations = sum(1 for kind, _ in collector.topology_events if kind == "propagate")
+            rejections = sum(1 for kind, _ in collector.topology_events if kind == "reject")
+            trace.emit(
+                "topology", "topology.propagation",
+                f"约束传播：{seeds} 个种子，{propagations} 次传播，{rejections} 次拒绝。",
+                data={
+                    "seed_count": seeds,
+                    "propagation_count": propagations,
+                    "rejection_count": rejections,
+                    "steps": [
+                        {"kind": kind, **data} for kind, data in collector.topology_events
+                    ],
+                },
+            )
         if self.render_mode == "ribbon":
             output, render_diagnostics = self._render_regions(detected.crossings, topology, trace)
+            extra_diagnostics: list[Diagnostic] = []
+            if self.cover_allowance > 0:
+                extra_diagnostics.append(Diagnostic(
+                    code="RENDER-COVER-ALLOWANCE-IGNORED",
+                    severity=Severity.INFO,
+                    message=(
+                        f"ribbon 后端的切口是真实区域几何，cover_allowance="
+                        f"{self.cover_allowance:g} 未生效（它只作用于 stroke 后端）。"
+                    ),
+                    details={"cover_allowance": self.cover_allowance, "render_mode": "ribbon"},
+                    hints=("ribbon 模式请直接调整 offset 与 join/miter_limit。",),
+                ))
+            render_diagnostics = [*render_diagnostics, *extra_diagnostics]
             complete_message = "编织区域求解完成。"
             complete_data = {
                 "path_count": len(self.paths),
@@ -311,6 +446,7 @@ class LaceEngine:
                 self.paths, detected.crossings, topology,
                 offset=self.offset, min_sin=self.min_sin, overshoot=self.overshoot,
                 min_piece_length=self.min_piece_length, cap_style=self.cap_style,
+                cover_allowance=self.cover_allowance,
             )
             for piece in rendered.ordered_pieces():
                 trace.emit(
@@ -364,6 +500,18 @@ class LaceEngine:
             offset=self.offset, cap_style=self.cap_style,
             join=self.join, miter_limit=self.miter_limit,
         )
+        # Fine-grained face-walk trace (M5): the traversal that produced the regions,
+        # before the per-region polygons it ended up with.
+        if regions.face_walk:
+            walk = regions.face_walk
+            trace.emit(
+                "construction", "region.face_walk",
+                (
+                    f"面域遍历（{walk.get('backend', '?')}）：{walk.get('node_count', 0)} 个节点，"
+                    f"{walk.get('crossing_count', 0)} 个交叉参与，归给 {walk.get('owner_count', 0)} 条股线。"
+                ),
+                data=dict(walk),
+            )
         for region in regions.ordered_regions():
             trace.emit(
                 "construction", "region.polygon", f"生成区域 {region.region_id}。",

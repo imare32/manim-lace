@@ -33,6 +33,7 @@ import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
 from ..model import CapStyle, CrossingEvent, JoinStyle, PolylinePath, WeaveTopology
+from ..tracing import BoundedRecords
 from .order import paint_order
 from .regions import (
     _JOIN_STYLES,
@@ -80,7 +81,7 @@ def _arm_strip(
 
 def _cells(
     geometries: dict[str, Any], line_class: Any, polygonize: Any, unary_union: Any, tolerance: float
-) -> tuple[list[Any], list[Any]]:
+) -> tuple[list[Any], list[Any], dict[str, Any]]:
     """Faces of the arrangement of the given ribbon boundaries.
 
     Every geometry contributes its rings, and section boundaries are included next to the
@@ -91,6 +92,11 @@ def _cells(
     construction: a face is reduced here to the part that is not covered by the smaller
     faces inside it, which turns an annulus back into a face with a hole. Faces smaller
     than ``tolerance`` are slivers and are returned separately.
+
+    The third return value counts what this walk did, for the fine-grained trace:
+    ``raw_face_count`` faces came out of ``polygonize``, ``sliver_count`` of them were too
+    small to keep, ``collapsed_count`` became empty after subtracting the smaller faces
+    nested inside them, and ``subtraction_count`` differences were actually computed.
     """
     boundaries = []
     for geometry in geometries.values():
@@ -98,14 +104,24 @@ def _cells(
             boundaries.append(line_class(polygon.exterior.coords))
             for ring in polygon.interiors:
                 boundaries.append(line_class(ring.coords))
+    stats: dict[str, Any] = {
+        "raw_face_count": 0,
+        "sliver_count": 0,
+        "sliver_area": 0.0,
+        "collapsed_count": 0,
+        "subtraction_count": 0,
+    }
     if not boundaries:
-        return [], []
+        return [], [], stats
     faces = sorted(polygonize(unary_union(boundaries)), key=lambda face: -face.area)
+    stats["raw_face_count"] = len(faces)
     cells: list[Any] = []
     slivers: list[Any] = []
     for index, face in enumerate(faces):
         if face.area <= tolerance:
             slivers.append(face)
+            stats["sliver_count"] += 1
+            stats["sliver_area"] += float(face.area)
             continue
         cell = face
         for smaller in faces[index + 1:]:
@@ -115,10 +131,12 @@ def _cells(
                 continue
             if cell.contains(smaller.representative_point()):
                 cell = cell.difference(smaller)
+                stats["subtraction_count"] += 1
         if cell.is_empty or cell.area <= tolerance:
+            stats["collapsed_count"] += 1
             continue
         cells.append(cell)
-    return cells, slivers
+    return cells, slivers, stats
 
 
 def _boxes_meet(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
@@ -201,7 +219,9 @@ def render_arrangement_regions(
     # A cyclic over/under relation has no consistent painter order, but this backend does
     # not need one: every face belongs to exactly one owner, so nothing depends on the
     # draw order. The layer numbers stay available for renderers that want them.
-    layers, _congested = paint_order([path.path_id for path in paths], path_edges)
+    # Congestion is reported but, unlike in the Boolean backend, it cannot change the
+    # result here: ownership is decided per face instead of by paint order.
+    layers, congested = paint_order([path.path_id for path in paths], path_edges)
 
     # The lens of a crossing is the local footprint of the over ribbon; a face inside it
     # is owned by the strand on top, which is exactly what the assignment says.
@@ -245,11 +265,15 @@ def render_arrangement_regions(
 
     union_area = float(unary_union(list(bands.values())).area) if bands else 0.0
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-18)
-    cells, slivers = _cells(node_band, LineString, polygonize, unary_union, tolerance)
+    cells, slivers, cell_stats = _cells(node_band, LineString, polygonize, unary_union, tolerance)
 
+    walk = BoundedRecords()
     owners: dict[str, list[Any]] = {}
     conflicting = 0
     off_crossing = 0
+    uncovered = 0
+    single_owner_count = 0
+    lens_decided_count = 0
     for cell in cells:
         probe = cell.representative_point()
         covering = [
@@ -257,9 +281,14 @@ def render_arrangement_regions(
             if band.contains(probe) or band.covers(probe) or band.distance(probe) <= tolerance
         ]
         if not covering:
-            continue  # a face of the arrangement that no ribbon covers
+            uncovered += 1  # a face of the arrangement that no ribbon covers
+            walk.add({"kind": "face", "decision": "uncovered", "owner": None,
+                      "area": float(cell.area), "covering_count": 0})
+            continue
+        decision = "single"
         if len(covering) == 1:
             owner = covering[0]
+            single_owner_count += 1
         else:
             decisions: list[str] = []
             for crossing in weavable:
@@ -272,14 +301,22 @@ def render_arrangement_regions(
                 distinct = sorted(set(decisions))
                 # Two sections of the same path are the same strand for this decision:
                 # only genuinely different paths make the face contradictory.
-                if len({node_path[node] for node in distinct}) > 1:
+                contradictory = len({node_path[node] for node in distinct}) > 1
+                if contradictory:
                     conflicting += 1
                 owner = min(distinct, key=lambda node: (-layers[node_path[node]], node))
+                decision = "conflicting-lens" if contradictory else "lens"
+                lens_decided_count += 1
             else:
                 if len({node_path[node] for node in covering}) > 1:
                     off_crossing += 1
                 owner = min(covering, key=lambda node: (-layers[node_path[node]], node))
+                decision = "off-crossing"
+        walk.add({"kind": "face", "decision": decision, "owner": owner,
+                  "area": float(cell.area), "covering_count": len(covering)})
         owners.setdefault(owner, []).append(cell)
+    for face in slivers:
+        walk.add({"kind": "sliver", "decision": "dropped", "owner": None, "area": float(face.area)})
 
     regions: list[RibbonRegion] = []
     for node_id, faces in owners.items():
@@ -374,4 +411,24 @@ def render_arrangement_regions(
         union_area=union_area,
         painted_area=painted_area,
         region_area_sum=region_area_sum,
+        face_walk={
+            "backend": "arrangement",
+            # The walk visits the faces of the planar arrangement, not path bands.
+            "node_kind": "face",
+            "node_count": len(node_band),
+            "band_count": len(bands),
+            "section_count": sum(len(group) for group in sections.values()),
+            "crossing_count": len(weavable),
+            "congested": bool(congested),
+            "face_count": sum(len(faces) for faces in owners.values()),
+            "owner_count": len(owners),
+            "removed_area": float(hidden_area),
+            "single_owner_count": single_owner_count,
+            "lens_decided_count": lens_decided_count,
+            "conflicting_count": conflicting,
+            "off_crossing_count": off_crossing,
+            "uncovered_count": uncovered,
+            **cell_stats,
+            **walk.as_payload("steps"),
+        },
     )

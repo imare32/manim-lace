@@ -2,6 +2,7 @@
 
 from .arrangement import render_arrangement_regions
 from .order import paint_order
+from .pixels import px_to_stroke_width, px_to_units, stroke_width_to_px
 from .regions import (
     RegionRenderResult,
     RegionRing,
@@ -19,7 +20,10 @@ __all__ = [
     "StrokePiece",
     "StrokeRenderResult",
     "paint_order",
+    "px_to_stroke_width",
+    "px_to_units",
     "render_arrangement_regions",
     "render_region_geometry",
     "render_stroke_geometry",
+    "stroke_width_to_px",
 ]

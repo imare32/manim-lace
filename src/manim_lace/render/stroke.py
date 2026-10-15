@@ -13,6 +13,7 @@ import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
 from ..model import CapStyle, CrossingEvent, PolylinePath, WeaveTopology
+from ..style.caps import trim_cut_half_length, validate_cover_allowance
 from .order import paint_order
 
 
@@ -130,6 +131,7 @@ def render_stroke_geometry(
     overshoot: float = 0.03,
     min_piece_length: float = 1e-7,
     cap_style: CapStyle = "butt",
+    cover_allowance: float = 0.0,
 ) -> StrokeRenderResult:
     """Build visible centerline pieces from crossing events and assignments.
 
@@ -142,7 +144,13 @@ def render_stroke_geometry(
     ``round`` or ``square`` caps the paint protrudes half the ribbon width beyond the
     centerline endpoint, so the gap is widened by ``offset`` to keep the over path
     visible. That keeps the piece geometry honest about what the renderer will draw;
-    the exact cap outline is still an approximation, not a boolean region.
+    for the exact cap outline use ``style.caps.stroke_piece_outline``.
+
+    ``cover_allowance`` is the cut-end "cover allowance": each cut is shortened by
+    ``cover_allowance * offset`` on both sides so the end of the lower strand tucks
+    further under the strand on top of it. It may only eat the slack the cut
+    already has (``overshoot``), so the visible end never reaches past the true
+    crossing; the trimming happens before the cut is clamped and wrapped.
 
     Guarantees for the emitted pieces of one path: their arc intervals never
     overlap, never cross the removed cut intervals, and a piece is never longer
@@ -159,6 +167,7 @@ def render_stroke_geometry(
         raise ValueError("min_piece_length must be finite and non-negative")
     if cap_style not in ("butt", "round", "square"):
         raise ValueError("cap_style must be 'butt', 'round' or 'square'")
+    cover_allowance = validate_cover_allowance(cover_allowance, overshoot)
     path_index_by_id = {p.path_id: i for i, p in enumerate(paths)}
     cuts: dict[str, list[tuple[float, float]]] = {p.path_id: [] for p in paths}
     over_edges: list[tuple[str, str]] = []
@@ -191,6 +200,9 @@ def render_stroke_geometry(
         if cap_style != "butt":
             # A round or square cap paints half the width past the endpoint.
             radius += offset
+        # Trimmed before the cut is clamped to the path ends and wrapped at the seam,
+        # because the clamp depends on the untrimmed value.
+        radius = trim_cut_half_length(radius, allowance=cover_allowance, offset=offset)
         start, end = arc - radius, arc + radius
         if path.closed and path.length > 0:
             if 2 * radius >= path.length:
@@ -301,9 +313,28 @@ def render_stroke_geometry(
             severity=Severity.INFO,
             message=(
                 f"cap_style='{cap_style}' 会让可见端头沿切向多出半个线宽，"
-                f"断口已额外加宽 {offset:g}；端头轮廓仍是视觉近似。"
+                f"断口已额外加宽 {offset:g}；端头轮廓可由 style.caps.stroke_piece_outline 得到。"
             ),
             hints=("改用 cap_style='butt' 可让断口严格停在切口位置。",),
+        ))
+    if cover_allowance > 0:
+        diagnostics.append(Diagnostic(
+            code="RENDER-COVER-ALLOWANCE",
+            severity=Severity.INFO,
+            message=(
+                f"端头覆盖余量 cover_allowance={cover_allowance:g}：每个断口两侧各缩短 "
+                f"{cover_allowance * offset:g}（= {cover_allowance:g} × offset），"
+                f"可见端头退到上方丝带之下（上限 overshoot={overshoot:g}）。"
+            ),
+            details={
+                "cover_allowance": cover_allowance,
+                "overshoot": overshoot,
+                "trim_per_side": cover_allowance * offset,
+            },
+            hints=(
+                "允许值不超过 overshoot，保证端头不会越过真实交叉点。",
+                "这属于几何风格参数：它改变切口，但不改变交叉与上下关系。",
+            ),
         ))
     layers, congested = paint_order([path.path_id for path in paths], over_edges)
     exact_edges = [edge for edge in congested if edge not in approximate_edges]
