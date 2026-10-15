@@ -305,7 +305,7 @@ lace.density            # 密度报告与 kept/dropped 列表；result.pieces �
 
 ## 状态画廊：一眼看清目前做到哪
 
-`examples/gallery.html` 是把当前代码"摊开给你看"的页面：每个图案都由本仓库实机渲染，**卡片上的每个数字都读自同一次求解真实产生的对象**，不是手写的。
+`media/gallery/index.html` 是把当前代码"摊开给你看"的页面：每个图案都由本仓库实机渲染，**卡片上的每个数字都读自同一次求解真实产生的对象**，不是手写的。页面与所有媒体都落在 `media/` 下（Manim 自己的生成物目录，仓库不跟踪），所以重跑脚本不会在 `examples/` 留下任何未跟踪文件。
 
 ```bash
 python examples/build_gallery.py                 # 渲染全部媒体 + 重写页面
@@ -437,9 +437,8 @@ benchmarks/bench_crossings.py  # 计时 + 网格/暴力等价校验
 examples/scene_weave.py        # 基础编织场景
 examples/scene_gallery.py      # 端帽策略、绘制顺序与 9 个编织图案（含 GalleryEntry 注册表）
 examples/scene_style.py        # 配色、边框、切口端与密度简化画廊（M6）
-examples/build_gallery.py      # 渲染上述场景并生成 examples/gallery.html 状态画廊
-examples/gallery/              # 生成物：静帧与两段动画视频（未入库）
-examples/gallery.html          # 生成物：状态画廊页面（未入库）
+examples/build_gallery.py      # 渲染上述场景并生成 media/gallery/index.html 状态画廊
+media/gallery/                 # 生成物：状态画廊页面 + 静帧 + 两段动画视频（media/ 不入库）
 ```
 
 运行基准（会打印剪枝比、耗时与事件指纹，并在两套候选策略不一致时返回非零退出码）：

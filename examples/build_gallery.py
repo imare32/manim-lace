@@ -1,4 +1,4 @@
-"""Render the showcase gallery and write ``examples/gallery.html`` from real data.
+"""Render the showcase gallery into ``media/gallery/`` from real data.
 
 Usage:
 
@@ -20,6 +20,10 @@ Everything on the page comes from the current checkout:
 Data collection is separated from rendering: ``--no-render`` still re-runs every
 scene (with its animations stubbed out) so the page keeps real numbers while the
 images stay as they are on disk.
+
+The output lives under ``media/`` (the same generated-data directory Manim uses and
+the repository ignores), so re-running this script never leaves untracked files in
+``examples/``. Open ``media/gallery/index.html`` to look at the result.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 EXAMPLES = Path(__file__).resolve().parent
+ROOT = EXAMPLES.parent
 if str(EXAMPLES) not in sys.path:
     sys.path.insert(0, str(EXAMPLES))
 
@@ -49,8 +54,10 @@ import manim_lace  # noqa: E402
 from manim_lace import Lace  # noqa: E402
 from manim_lace.style import palette as palette_module  # noqa: E402
 
-MEDIA = EXAMPLES / "gallery"
-SCRATCH = EXAMPLES / "_gallery_build"
+#: Generated output lives next to Manim's own renders, which the repository ignores.
+MEDIA = ROOT / "media" / "gallery"
+PAGE = MEDIA / "index.html"
+SCRATCH = ROOT / "media" / "_gallery_build"
 
 #: Records every ``Lace`` the showcase builds, so the page can describe the real objects.
 _CAPTURED: list[Lace] = []
@@ -311,7 +318,7 @@ _QUALITY = {"l": "low_quality", "m": "medium_quality", "h": "high_quality", "k":
 
 
 def _render(card: Card, quality: str) -> None:
-    """Render the card's media with the current code and copy it into ``examples/gallery``."""
+    """Render the card's media with the current code and copy it into ``media/gallery``."""
     scene_class = getattr(_module(card), card.scene)
     video = card.media == "video"
     options = {
@@ -574,9 +581,9 @@ _SCRIPT = """
 def _card_html(item: Collected) -> str:
     card = item.card
     if card.media == "video":
-        media = f'<video src="gallery/{card.key}.mp4" controls preload="metadata" muted></video>'
+        media = f'<video src="{card.key}.mp4" controls preload="metadata" muted></video>'
     else:
-        media = f'<img src="gallery/{card.key}.png" alt="{html.escape(card.title)}">'
+        media = f'<img src="{card.key}.png" alt="{html.escape(card.title)}">'
     tags = list(card.tags)
     metrics = item.metrics
     if metrics.get("laces"):
@@ -655,6 +662,7 @@ def write_page(collected: list[Collected], *, quality: str, rendered_now: bool) 
 </main>
 <footer>
   <p>由 <a href="https://github.com/ManimCommunity/Manim">Manim CE {manim.__version__}</a> + <strong>manim-lace</strong> 渲染生成</p>
+  <p>本页与所有媒体都是生成物，位于 <code>media/gallery/</code>（该目录不入库）</p>
   <p>重新生成：<code>python examples/build_gallery.py</code> ·
      只重算数据：<code>python examples/build_gallery.py --no-render</code> ·
      单图：<code>manim -s -qh examples/scene_gallery.py &lt;ClassName&gt;</code></p>
@@ -668,7 +676,8 @@ def write_page(collected: list[Collected], *, quality: str, rendered_now: bool) 
 </body>
 </html>
 """
-    target = EXAMPLES / "gallery.html"
+    target = PAGE
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(page, encoding="utf-8")
     return target
 
@@ -679,7 +688,7 @@ def write_page(collected: list[Collected], *, quality: str, rendered_now: bool) 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build examples/gallery.html from the current code")
+    parser = argparse.ArgumentParser(description="Build media/gallery/index.html from the current code")
     parser.add_argument("-q", "--quality", choices=tuple(_QUALITY), default="h",
                         help="still quality preset l/m/h/k (default h; videos are always low)")
     parser.add_argument("--no-render", action="store_true",
@@ -708,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     finally:
         Lace.__init__ = _ORIGINAL_INIT  # type: ignore[method-assign]
+        Lace._from_engine = classmethod(_ORIGINAL_FROM_ENGINE)  # type: ignore[method-assign]
         shutil.rmtree(SCRATCH, ignore_errors=True)
     target = write_page(collected, quality=args.quality, rendered_now=not args.no_render)
     print(f"[gallery] 写入 {target}（{len(collected)} 张卡片）")
