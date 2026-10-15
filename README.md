@@ -303,6 +303,20 @@ lace.density            # 密度报告与 kept/dropped 列表；result.pieces �
 
 几条口径：样式**不能**改变交叉与上下关系（FR-062 / AT-018）；`palette` 与 `style_policy` 互斥；**覆盖余量 `cover_allowance` 是几何参数**（它确实改变切口），只允许吃掉切口本来就有的余量 `overshoot`，上限在构造时校验；密度简化只隐藏"落在密集簇内、且短于阈值"的可见片段，并在 `RENDER-DENSITY-SIMPLIFIED` 中逐条列出被隐藏的片段 ID。示例场景见 `examples/scene_style.py`（`PaletteGallery` / `BorderGallery` / `CutEndGallery` / `DensityGallery`）。
 
+## 状态画廊：一眼看清目前做到哪
+
+`examples/gallery.html` 是把当前代码"摊开给你看"的页面：每个图案都由本仓库实机渲染，**卡片上的每个数字都读自同一次求解真实产生的对象**，不是手写的。
+
+```bash
+python examples/build_gallery.py                 # 渲染全部媒体 + 重写页面
+python examples/build_gallery.py --no-render     # 只重算数据与页面，复用已有媒体
+python examples/build_gallery.py -q l            # 更小更快的渲染
+```
+
+它覆盖四块：编织图案（ribbon 后端 9 例）、绘制通道对照（stroke / boolean / arrangement 同输入，附面积核算表）、美学策略（调色板、边框、切口端、密度简化）、算法轨迹（两段动画视频 + 真实事件表 + `sampling.subdivision` 的完整载荷）。末尾还有一张"诊断与诚实降级"表，列出本次渲染实际触发的诊断码、级别、说明与出现在哪张卡片上。
+
+实现方式：脚本用探针记录每个场景 `construct` 期间真正创建的 `Lace`（`play`/`wait`/`add` 被替换为空操作，因此数据采集与渲染是两件事），所以交叉数、可见区域数、面积核算、诊断、配色选择、密度省略数、trace 事件统计全部来自对象本身；编织图案的文案取自 `scene_gallery.GALLERY` 里的 `GalleryEntry`，与场景共用同一处定义。这也是它立刻暴露出两处**内容不实**的原因：四圆格栅原本是四个外切圆（0 交叉），五角星原本不自交——现在两者都是真的编织。
+
 ## 运行测试、lint 与基准
 
 ```bash
@@ -421,8 +435,11 @@ src/manim_lace/
   animation/verify.py      # 动画坐标与最终几何一致性验证
 benchmarks/bench_crossings.py  # 计时 + 网格/暴力等价校验
 examples/scene_weave.py        # 基础编织场景
-examples/scene_gallery.py      # 端帽策略与绘制顺序画廊
+examples/scene_gallery.py      # 端帽策略、绘制顺序与 9 个编织图案（含 GalleryEntry 注册表）
 examples/scene_style.py        # 配色、边框、切口端与密度简化画廊（M6）
+examples/build_gallery.py      # 渲染上述场景并生成 examples/gallery.html 状态画廊
+examples/gallery/              # 生成物：静帧与两段动画视频（未入库）
+examples/gallery.html          # 生成物：状态画廊页面（未入库）
 ```
 
 运行基准（会打印剪枝比、耗时与事件指纹，并在两套候选策略不一致时返回非零退出码）：

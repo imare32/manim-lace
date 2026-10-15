@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 状态画廊生成器与场景修正
+
+- Add `examples/build_gallery.py`: renders every showcase scene with the current
+  checkout and writes `examples/gallery.html` from the objects those scenes really
+  build. A probe records the `Lace` instances created while `construct` runs (with
+  `play`/`wait`/`add` stubbed out, so collecting data is independent of rendering),
+  which is where every number on the page comes from: crossings, visible
+  regions/pieces, area accounting, diagnostics, palette choices, density
+  simplification counts and trace-event statistics. The page also carries the
+  palette card read from `manim_lace.style.palette`, a real `sampling.subdivision`
+  payload, a table of the trace event types that were emitted, and a "diagnostics
+  and honest degradation" table listing what the rendered patterns actually raised.
+  Flags: `--no-render` (refresh the data only), `--skip-videos`, `--only <Scenes>`,
+  `-q l|m|h|k`.
+- Add `examples/scene_gallery.py::GALLERY`: each showcase weave is now described
+  once by a `GalleryEntry` (title, blurb, tags, builder, framing) that both the
+  scene class and the gallery page use, so a pattern is never described in two
+  places and its prose cannot drift from its geometry. `RibbonGallery` shares
+  `build_backend_trio()` with the page's accounting table.
+- Fix two showcase patterns that the new measured page exposed as not doing what
+  their prose claimed: `GridGallery` used four exactly *tangent* circles (zero
+  crossings) and now uses really overlapping ones (centres 1.5 apart, radius 0.9,
+  eight crossings), and `StarGallery` used a simple ten-sided star that does not
+  self-intersect at all and is now a real pentagram (`{5/2}`, five self-crossings,
+  cut into sections and resolved by paint order — reported as
+  `REGION-DRAW-ORDER-CYCLE` / `REGION-OVERLAPPING-SECTIONS`). The sine and spiral
+  blurbs no longer state crossing counts that the code does not produce.
+- Rendered media lives in `examples/gallery/` and the page in
+  `examples/gallery.html`; neither is committed (like `media/`).
+
 ## Unreleased — fine-grained traces (M5 done)
 
 - Add `manim_lace.tracing` with `BoundedRecords`: a trace payload that counts every

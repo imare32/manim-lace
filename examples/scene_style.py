@@ -167,7 +167,14 @@ class CutEndGallery(_PaperScene):
 
 
 class DensityGallery(_PaperScene):
-    """The same dense weave unsimplified (left) and simplified (right)."""
+    """The same dense weave: what would be drawn, and what the policy omits.
+
+    The left panel draws every visible piece and marks the ones the policy would
+    hide in red (taken from ``DensitySimplification.dropped_ids``, so the marks are
+    the real decision); the right panel draws what the policy actually keeps. Three
+    0.05-long slivers inside the cluster is a small difference, which is exactly why
+    it is marked instead of being left to the eye.
+    """
 
     def construct(self):
         offset = 0.05
@@ -184,20 +191,32 @@ class DensityGallery(_PaperScene):
             density_policy=policy, stroke_width_px=4.0,
             pixel_height=1080, frame_height=6.0,
         )
+        dropped = set(simplified.density.dropped_ids)
+        marked = VGroup(*[  # noqa: F405
+            VMobject()  # noqa: F405
+            .set_points_as_corners(
+                np.column_stack((piece.points, np.zeros(len(piece.points))))
+            )
+            .set_stroke(RED, width=5.0, opacity=0.9)  # noqa: F405
+            for piece in plain.result.pieces
+            if piece.piece_id in dropped
+        ])
         note = Text(  # noqa: F405
-            f"RENDER-DENSITY-SIMPLIFIED: 省略 {simplified.density.dropped_count} 个极短片段",
+            f"RENDER-DENSITY-SIMPLIFIED: 省略 {simplified.density.dropped_count} 个极短片段"
+            f"（红色 = 将被省略，阈值 {simplified.density.threshold:.3f}）",
             font_size=18,
             color=BLACK,  # noqa: F405
         )
+        left = VGroup(plain, marked).scale(3.0)  # noqa: F405
+        right = simplified.scale(3.0)
         panels = VGroup(  # noqa: F405
             VGroup(  # noqa: F405
-                plain, Text("未简化", font_size=20, color=BLACK).next_to(plain, DOWN, buff=0.15)  # noqa: F405
+                left, Text("全部片段（红=将被省略）", font_size=20, color=BLACK).next_to(left, DOWN, buff=0.15)  # noqa: F405
             ),
             VGroup(  # noqa: F405
-                simplified,
-                Text("密度简化", font_size=20, color=BLACK).next_to(simplified, DOWN, buff=0.15),  # noqa: F405
+                right, Text("密度简化后", font_size=20, color=BLACK).next_to(right, DOWN, buff=0.15),  # noqa: F405
             ),
-        ).arrange(RIGHT, buff=0.8).scale(2.2)
-        note.next_to(panels, DOWN, buff=0.35)
+        ).arrange(RIGHT, buff=1.0)
+        note.next_to(panels, DOWN, buff=0.45)
         self.add(panels, note)  # noqa: F405
         self.wait()
