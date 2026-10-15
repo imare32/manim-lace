@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -13,11 +14,13 @@ from .model import (
     CapStyle,
     ConflictStrategy,
     EventPolicy,
+    JoinStyle,
     LaceResult,
     PathSource,
     PolylinePath,
     normalize_event_policy,
 )
+from .render.regions import render_region_geometry
 from .render.stroke import render_stroke_geometry
 from .topology.solver import WeaveMode, solve_weave
 
@@ -35,9 +38,9 @@ class LaceEngine:
         ``alternating`` (constraint solver), ``free`` (per-crossing defaults), or
         ``manual`` (all transverse crossings need an explicit side assignment).
     render_mode:
-        The starter kit currently implements ``stroke`` geometry only. ``ribbon``
-        is an explicit extension point and raises until a genuine region backend is
-        added.
+        ``stroke`` (cut centerlines, the default) or ``ribbon`` (area-based regions
+        built with a validated Boolean engine, which needs the optional ``geometry``
+        extra). Both consume the same crossings and topology.
     min_piece_length:
         Visible centerline pieces shorter than this arc length are dropped and
         reported through a ``RENDER-PIECE-DROPPED`` diagnostic.
@@ -67,7 +70,12 @@ class LaceEngine:
         geometry stops exactly at the cut), ``round`` or ``square`` (the paint
         protrudes half the ribbon width, so the cut is widened by ``offset``). The
         pieces also get a deterministic ``draw_index`` that puts every under path
-        before the paths over it.
+        before the paths over it. In ``ribbon`` mode the cap is real geometry
+        instead of a compensated gap.
+    join, miter_limit:
+        ``ribbon`` mode only: how the offset outline connects at polyline vertices
+        (``miter``, ``bevel`` or ``round``) and the limit that clips a miter spike
+        (SPEC FR-053).
     """
 
     def __init__(
@@ -88,6 +96,8 @@ class LaceEngine:
         event_policy: EventPolicy | dict[str, str] | str | None = None,
         conflict_strategy: ConflictStrategy = "error",
         cap_style: CapStyle = "butt",
+        join: JoinStyle = "miter",
+        miter_limit: float = 5.0,
     ) -> None:
         # Every knob is validated here so that an invalid configuration fails at
         # construction instead of halfway through solve().
@@ -121,11 +131,10 @@ class LaceEngine:
         }
         if invalid_manual:
             raise ValueError(f"manual_over values must be 'a' or 'b': {invalid_manual}")
-        if render_mode == "ribbon":
-            raise NotImplementedError(
-                "render_mode='ribbon' is reserved for the future region backend. "
-                "This starter kit currently implements the stroke geometry backend."
-            )
+        if join not in ("miter", "bevel", "round"):
+            raise ValueError("join must be 'miter', 'bevel' or 'round'")
+        if not np.isfinite(miter_limit) or miter_limit <= 0:
+            raise ValueError("miter_limit must be positive and finite")
         self.paths = self._normalize_paths(paths)
         self.offset = float(offset)
         self.weave_mode = weave_mode
@@ -141,6 +150,8 @@ class LaceEngine:
         self.event_policy = resolved_policy
         self.conflict_strategy: ConflictStrategy = conflict_strategy
         self.cap_style: CapStyle = cap_style
+        self.join: JoinStyle = join
+        self.miter_limit = float(miter_limit)
         self.result: LaceResult | None = None
 
     @staticmethod
@@ -274,38 +285,87 @@ class LaceEngine:
                 data={"code": diagnostic.code, "severity": diagnostic.severity.value,
                       "details": diagnostic.details, "hints": diagnostic.hints},
             )
-        rendered = render_stroke_geometry(
-            self.paths, detected.crossings, topology,
-            offset=self.offset, min_sin=self.min_sin, overshoot=self.overshoot,
-            min_piece_length=self.min_piece_length, cap_style=self.cap_style,
-        )
-        for piece in rendered.ordered_pieces():
-            trace.emit(
-                "construction", "stroke.piece", f"生成描边片段 {piece.piece_id}。",
-                object_ids=(piece.piece_id, piece.path_id),
-                data={"point_count": len(piece.points), "arc_start": piece.arc_start,
-                      "arc_end": piece.arc_end, "closed": piece.closed,
-                      "draw_index": piece.draw_index},
+        if self.render_mode == "ribbon":
+            output, render_diagnostics = self._render_regions(detected.crossings, topology, trace)
+            complete_message = "编织区域求解完成。"
+            complete_data = {
+                "path_count": len(self.paths),
+                "crossing_count": len(detected.crossings),
+                "region_count": len(output),
+            }
+        else:
+            rendered = render_stroke_geometry(
+                self.paths, detected.crossings, topology,
+                offset=self.offset, min_sin=self.min_sin, overshoot=self.overshoot,
+                min_piece_length=self.min_piece_length, cap_style=self.cap_style,
             )
-        for diagnostic in rendered.diagnostics:
-            trace.emit("diagnostics", "diagnostic", diagnostic.message,
-                       object_ids=tuple(diagnostic.path_ids),
-                       data={"code": diagnostic.code, "severity": diagnostic.severity.value,
-                             "hints": diagnostic.hints})
+            for piece in rendered.ordered_pieces():
+                trace.emit(
+                    "construction", "stroke.piece", f"生成描边片段 {piece.piece_id}。",
+                    object_ids=(piece.piece_id, piece.path_id),
+                    data={"point_count": len(piece.points), "arc_start": piece.arc_start,
+                          "arc_end": piece.arc_end, "closed": piece.closed,
+                          "draw_index": piece.draw_index},
+                )
+            for diagnostic in rendered.diagnostics:
+                trace.emit("diagnostics", "diagnostic", diagnostic.message,
+                           object_ids=tuple(diagnostic.path_ids),
+                           data={"code": diagnostic.code, "severity": diagnostic.severity.value,
+                                 "hints": diagnostic.hints})
+            output = rendered.pieces
+            render_diagnostics = rendered.diagnostics
+            complete_message = "编织几何求解完成。"
+            complete_data = {
+                "path_count": len(self.paths),
+                "crossing_count": len(detected.crossings),
+                "piece_count": len(output),
+            }
         trace.emit(
-            "complete", "result.complete", "编织几何求解完成。",
-            object_ids=tuple(p.piece_id for p in rendered.pieces),
-            data={"path_count": len(self.paths), "crossing_count": len(detected.crossings),
-                  "piece_count": len(rendered.pieces)},
+            "complete", "result.complete", complete_message,
+            object_ids=tuple(item.piece_id if hasattr(item, "piece_id") else item.region_id
+                            for item in output),
+            data=complete_data,
         )
         self.result = LaceResult(
             paths=self.paths,
             crossings=detected.crossings,
             topology=topology,
-            pieces=rendered.pieces,
-            diagnostics=[*detected.diagnostics, *topology.diagnostics, *rendered.diagnostics],
+            pieces=output,
+            diagnostics=[*detected.diagnostics, *topology.diagnostics, *render_diagnostics],
             trace=trace.events,
             render_mode=self.render_mode,
             detection_stats=detected.stats,
         )
         return self.result
+
+    def _render_regions(
+        self, crossings: list[Any], topology: Any, trace: TraceRecorder
+    ) -> tuple[list[Any], list[Any]]:
+        """Build area-based regions and trace them (``render_mode='ribbon'``)."""
+        regions = render_region_geometry(
+            self.paths, crossings, topology,
+            offset=self.offset, cap_style=self.cap_style,
+            join=self.join, miter_limit=self.miter_limit,
+        )
+        for region in regions.regions:
+            trace.emit(
+                "construction", "region.polygon", f"生成区域 {region.region_id}。",
+                object_ids=(region.region_id, region.path_id),
+                data={
+                    "area": region.area,
+                    "hole_count": len(region.holes),
+                    "hole_roles": [hole.role for hole in region.holes],
+                    "point_count": len(region.exterior.points),
+                },
+            )
+        for diagnostic in regions.diagnostics:
+            trace.emit("diagnostics", "diagnostic", diagnostic.message,
+                       object_ids=tuple(diagnostic.path_ids),
+                       data={"code": diagnostic.code, "severity": diagnostic.severity.value,
+                             "details": diagnostic.details, "hints": diagnostic.hints})
+        trace.emit(
+            "construction", "region.accounting", "区域面积核对完成。",
+            data={"removed_area": regions.removed_area, "band_area": regions.band_area,
+                  "union_area": regions.union_area, "covered_area": regions.covered_area},
+        )
+        return list(regions.regions), list(regions.diagnostics)

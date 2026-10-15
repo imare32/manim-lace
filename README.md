@@ -29,7 +29,7 @@
 | Manim `Lace` VGroup 封装 | 已提供，并在 Manim CE `0.22.0` 上实机渲染通过（`examples/scene_weave.py`） |
 | 基于算法轨迹的动画计划 | 已实现 renderer-neutral trace plan；Manim 动画适配器为初始版本，实机渲染已跑通 |
 | 可视化线宽 | 采用 `max(1.0, 200.0 * offset)` 的启发式映射；Manim 的 `stroke_width` 随画幅变化，尚未做严格的像素对齐换算 |
-| 实体 Ribbon、多边形面域与孔洞 | 明确未实现，留下接口与设计要求 |
+| 实体 Ribbon、多边形面域与孔洞 | 已实现原型：`render_mode="ribbon"` 用受验证的布尔几何（Shapely，可选 `geometry` extra）构造实体面域——每条路径一条偏移带，在交叉处按"被压带 ∩ 上方带"的**该交叉局部**交集精确切除（无半径猜测、无浅角钳制），输出带 role 的闭合环（外环逆时针、孔洞顺时针）与面积核对；自交（两次经过共用一条带）如实报 `REGION-SELF-CROSSING-UNSUPPORTED` |
 | 隐式方程直接等值线提取 | 未实现；可先传入 Manim `ImplicitFunction` 的矢量对象 |
 | 鲁棒多线共点分解 | 未实现；当前只能识别并诊断多线共点，不做唯一穿插顺序推断 |
 
@@ -52,10 +52,10 @@ python -m pip install -e '.[dev]'
 python -m pip install -e '.[manim,dev]'
 ```
 
-如之后采用 Shapely 作为区域布尔运算后端：
+区域（实体丝带）后端使用 Shapely 做布尔几何；它已包含在开发依赖里，也可以单独安装：
 
 ```bash
-python -m pip install -e '.[geometry,dev]'
+python -m pip install -e '.[geometry]'
 ```
 
 `Lace` 是**惰性**模块属性：没装 Manim 也能 `import manim_lace`，此时它不在 `__all__` 里，首次访问才报带安装提示的 `ImportError`；`TYPE_CHECKING` 声明与静态 `__all__` 字面量保证类型检查器和 IDE 仍能解析该名字（契约由 `tests/test_package_api.py` 冻结）。
@@ -173,6 +173,18 @@ class WeaveDemo(Scene):
 
 `Lace` 是可加入 `Scene` 的 `VGroup`。适配器依据 Manim CE 的 `VMobject.get_subpaths()` / 四点三次贝塞尔结构开发（参见 [Manim 官方 VMobject 文档](https://docs.manim.community/en/stable/reference/manim.mobject.types.vectorized_mobject.VMobject.html)）。
 
+同一个输入换成有面积的区域后端（需要 `pip install 'manim-lace[geometry]'`）：
+
+```python
+ribbon = Lace(
+    source, offset=0.12, render="ribbon",
+    stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
+)
+scene.add(ribbon.ribbons, ribbon.holes)   # 孔洞是独立图层，便于按背景色处理
+for region in ribbon.result.pieces:        # RibbonRegion：外环 + 带 role 的孔洞环
+    print(region.region_id, round(region.area, 4), [hole.role for hole in region.holes])
+```
+
 **实测状态**：本仓库 `.venv` 中安装的是 Manim CE `0.22.0`，上面这条命令已实机渲染通过（输出 `media/videos/scene_weave/480p15/WeaveDemo.mp4`），`tests/test_optional_manim.py` 的 VMobject→路径提取也真实执行而非跳过。尚未验证的是跨版本兼容矩阵（`pyproject.toml` 声明 `>=0.19,<0.23`）与视觉线宽的像素对齐。
 
 `build_animation(mode=...)` 支持 `overview` / `algorithm` / `construction` / `debug` / `custom`，阶段划分来自 `result.trace` 记录的真实算法阶段（见 `docs/ALGORITHM_TRACE.md`）；未知模式会抛 `ValueError`，不会静默给出一段空动画。
@@ -204,10 +216,11 @@ python benchmarks/bench_crossings.py --repeat 3
 - 当前 `stroke` 后端针对不透明二维描边的视觉呈现。半透明叠色、浅角遮挡端头的精确几何与真实区域裁剪不在保证范围内。
 - `cap_style`（默认 `"butt"`）描述可见端头怎么画：`"butt"` 的几何严格停在切口处；`"round"`/`"square"` 会沿切向多画半个线宽，因此断口会额外加宽 `offset` 并报 `RENDER-CAP-EXTENSION`（info）。端头轮廓本身不建模，由描边渲染器决定。
 - 每个片段都带确定性 `draw_index`：按"被压路径先画"的路径分层（最长路分层）排序，环按路径顺序确定性打破。两条股线交叉偶数次时"谁先画"必然成环，这是正常编织图案，可见性由切口决定，因此只有环上存在被 `min_sin` 钳制的近似断口时才报 `RENDER-DRAW-ORDER-CYCLE`（info）。Manim 侧按该顺序建组、设置对应 cap 与 `z_index`，不会与几何层不一致。
-- `render="ribbon"` 当前明确抛出 `NotImplementedError`。后续应基于真正的平面细分/半边结构或经过验证的二维布尔几何来实现，而不是把普通图的环路基当成平面面域。
+- `render="ribbon"` 已实现（需要 `pip install 'manim-lace[geometry]'`，即 Shapely；缺失时抛出带安装提示的 `ImportError`）。它把丝带当**有面积的面域**构造：每条路径一条偏移带（`join`/`miter_limit` 控制拐角连接），在交叉处从被压带里扣除"该交叉局部"的 `被压带 ∩ 上方带`——即上方丝带真实覆盖的那块面积，因此没有半径近似、没有浅角钳制，也不需要端帽补偿。`result.pieces` 在 ribbon 模式下是 `RibbonRegion`（外环 + 孔洞环，role 分别为 `exterior` / `source_contour` / `occlusion`，外环逆时针、孔洞顺时针）。两种后端消费**同一份**交叉与拓扑（`FR-040`）。
+- ribbon 模式的已知边界（都有诊断，不会静默）：**自交**的两次经过共用同一条带，尚不能按经过拆带，因此该处不切除并报 `REGION-SELF-CROSSING-UNSUPPORTED`；交叉没有上下关系时报 `REGION-MISSING-ASSIGNMENT`；偏移轮廓无效时受控修复并报 `REGION-INVALID-OUTLINE`；三条以上丝带在非交叉点处重叠会让"可见面积 = 丝带并集面积"不成立，报 `REGION-AREA-MISMATCH`（含差值与容差）。Manim 侧孔洞是独立图层（Manim 没有奇偶填充规则），默认用 `hole_color` 涂成背景色，可用 `draw_holes=False` 自行处理。
 - 输入为文字、SVG 时，提取的是矢量轮廓，不是字形的语义中心线笔画。
 - Stroke 片段不变式（有测试保证）：同一路径的片段弧长区间互不重叠、也不超过路径总长；绕闭合缝的切口输出为一个 `piece-seam` 加其余可见弧段；开放路径的切口一旦覆盖整条中心线，就不输出片段并报 `RENDER-PATH-FULLY-CUT`。
-- 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`、`refine` 必须是布尔值、`conflict_strategy ∈ {"error","manual","relax"}`、`event_policy` 是 `EventPolicy`/字段映射/统一取值或 `None` 且取值合法（`endpoint_touch`、`near_tangent` 取 `"diagnose"|"weave"|"ignore"`，`collinear_overlap`、`multiway` 取 `"diagnose"|"ignore"`）、`cap_style ∈ {"butt","round","square"}`。
+- 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`、`refine` 必须是布尔值、`conflict_strategy ∈ {"error","manual","relax"}`、`event_policy` 是 `EventPolicy`/字段映射/统一取值或 `None` 且取值合法（`endpoint_touch`、`near_tangent` 取 `"diagnose"|"weave"|"ignore"`，`collinear_overlap`、`multiway` 取 `"diagnose"|"ignore"`）、`cap_style ∈ {"butt","round","square"}`、`join ∈ {"miter","bevel","round"}` 且 `miter_limit > 0`。
 - 候选加速只剪枝、不改语义：网格与暴力枚举必须给出逐事件、逐诊断、逐片段一致的结果（`tests/test_index.py`、`tests/test_benchmarks.py` 的黄金指纹）。
 - 交叉精化（`refine=True`，默认开启）只精化已有事件，不产生新事件，也不改变事件的最大集合：候选仍在采样折线上判定。精化要求两侧路径都带来源曲线探针（`PolylinePath.curve`，由 `sample_parametric` / `sample_graph` / Manim 适配器提供）与来源参数映射（`PolylinePath.parameters`），成功时事件带 `refined=True`、`parameter_a/parameter_b`、曲线弧长与由**真实局部切向**算出的 `sin_angle`。探针缺失、探针抛错或返回非有限值、Newton 不收敛、解跑出候选邻域、或路径在该处**确实拐折**（无唯一局部切向）时，一律回退到折线估计并保持 `refined=False`，不会用"平滑过的"结果冒充几何。
 - 精化后的 `segment_a`/`u_a` 描述的是精化参数所在的采样段，`s_a`/`s_b` 是折线累计弧长加上曲线在段内的真实弧长；闭合路径的弧长位置取模到 `[0, length)`。自交事件在精化后仍保证 `s_a < s_b`。
@@ -234,6 +247,11 @@ python benchmarks/bench_crossings.py --repeat 3
 | 渲染 | `RENDER-PATH-FULLY-CUT` | warning | 切口覆盖整条中心线（闭合或开放） |
 | 渲染 | `RENDER-PIECE-DROPPED` | info | 可见弧段短于 `min_piece_length` 而未输出 |
 | 渲染 | `RENDER-SHALLOW-ANGLE-APPROXIMATION` | info | 至少一个浅角交叉的断口使用了受限近似 |
+| 区域 | `REGION-SELF-CROSSING-UNSUPPORTED` | warning | ribbon 模式下自交的两次经过共用一条带，该处不切除 |
+| 区域 | `REGION-MISSING-ASSIGNMENT` | warning | ribbon 模式下交叉缺少上下关系，该处没有扣除面积 |
+| 区域 | `REGION-INVALID-OUTLINE` | warning | 偏移轮廓自交或塌缩，已受控修复 |
+| 区域 | `REGION-EMPTY-RIBBON` | info | 路径没有长度或偏移区域为空，不产生面域 |
+| 区域 | `REGION-AREA-MISMATCH` | warning | 可见区域总面积与丝带并集面积不一致（多条丝带非交叉点重叠） |
 
 ## 项目结构
 
@@ -250,7 +268,7 @@ src/manim_lace/
     refine.py              # 来源曲线上的局部交点精化（FR-036）
   topology/solver.py       # Pass 排序与 over/under 约束
   render/stroke.py         # 中心线切分几何
-  render/regions.py        # 实体区域后端接口（未实现）
+  render/regions.py        # 实体面域后端（Shapely 布尔几何，可选依赖）
   adapters/manim.py        # Manim 矢量对象提取器
   manim_api.py             # 可选的 Manim VGroup Facade
   animation/trace.py       # 真实算法阶段轨迹
@@ -268,13 +286,13 @@ python benchmarks/bench_crossings.py --repeat 3
 
 ## 建议的下一步开发顺序
 
-与 `docs/ROADMAP.md` 的里程碑顺序保持一致（当前 M1 收尾 → M4）：
+与 `docs/ROADMAP.md` 的里程碑顺序保持一致（当前 M1 收尾 → M4 收尾 → M5）：
 
-1. 建立 half-edge / planar arrangement 或验证几何库的区域后端（M4；`render/regions.py` 已有接口占位）。
+1. 区域后端收尾（M4）：按"经过"把中心线拆成子带，让自交也能在区域模式下编织；再做 half-edge/planar arrangement 对照，与 Shapely 原型比较面积与拓扑一致性。
 2. 视觉线宽的像素对齐换算，以及 Manim CE `0.19`~`0.22` 的适配器兼容矩阵（M1 版本矩阵项）。
-3. 把算法 TraceEvent 扩展成采样细分、逐候选线段对、约束传播步骤和区域遍历的细粒度记录（M5；目前候选阶段只有聚合计数、冲突只有见证环）。
+3. 把算法 TraceEvent 扩展成采样细分、逐候选线段对、约束传播步骤和区域遍历的细粒度记录（M5；目前候选阶段只有聚合计数、冲突只有见证环、区域只有面域与面积）。
 4. 验证动画高亮与最终几何使用同一批 ID/坐标（M5 剩余项）。
-5. 在更大输入上继续压索引构造与逐段记账的开销（见 `make bench` 输出）。
+5. 在更大输入上继续压索引构造与逐段记账的开销（见 `make bench` 输出；区域模式还可以压布尔运算次数）。
 6. 让精化受益于更多输入：为无法求值来源曲线的路径（如 SVG 轮廓的多段折线）定义局部多项式精化，或让适配器保留更多来源参数信息。
 7. 放宽时的质量：目前被放宽的交叉取确定性默认值，可以尝试"最少修改"的近似解（把放宽代价降到最低）。
 

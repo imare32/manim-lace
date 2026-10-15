@@ -11,6 +11,8 @@ Trace events are immutable records emitted while the engine runs. They are not g
 | `crossings` | `crossing.detected` | crossing ID, kind, position, path arc lengths, angle sine, refined flag and — when refined — the source-curve parameters |
 | `topology` | `crossing.assigned` | which side is over/under, source of assignment (`alternating`, `manual`, `free` or `relaxed`) and explanation |
 | `construction` | `stroke.piece` | piece ID, source path, number of points, arc interval and `draw_index` (records are emitted in that order) |
+| `construction` | `region.polygon` | region ID, source path, area, ring/point counts and the role of each hole (`source_contour` / `occlusion`) |
+| `construction` | `region.accounting` | band area, removed area, union area and covered area of the ribbon backend, so the conservation invariant is visible |
 | `diagnostics` | `diagnostic` | stable code, severity, details, hints |
 | `complete` | `result.complete` | counts for paths, crossings and output pieces |
 
@@ -26,6 +28,8 @@ Trace events are immutable records emitted while the engine runs. They are not g
   `details` carry the minimal cycles (crossing IDs and paths) that make it unsatisfiable.
 - Actual stroke pieces emitted by the renderer, including the painter order they are meant
   to be created in (the animation in `examples/scene_gallery.py` uses exactly that order).
+- Actual ribbon regions with their areas and hole roles, plus the area accounting that says
+  how much was removed and whether the visible areas still cover the band union.
 - Actual diagnostics for unsupported or ambiguous cases.
 
 ## What is not recorded yet

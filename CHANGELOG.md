@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased — area-based ribbon regions (M4)
+
+- Implement the region backend (SPEC FR-052, FR-053, FR-054, FR-055, FR-057, FR-058):
+  `render_mode='ribbon'` builds one offset band per path with a validated Boolean engine
+  (Shapely, the optional `geometry` extra) and, at every woven crossing, removes from the
+  under band the Boolean intersection with the over band **restricted to the component that
+  contains the crossing point**. That component is the exact footprint of the over ribbon,
+  so there is no radius heuristic, no shallow-angle clamp and no cap compensation.
+  Intersecting the bands as whole geometries would have cut the under ribbon at every
+  crossing the two paths share; `tests/test_regions.py` catches that through the area
+  invariant.
+- `render_mode='ribbon'` no longer raises `NotImplementedError`. `LaceResult.pieces` holds
+  `RibbonRegion` objects: an exterior ring plus hole rings tagged `exterior`,
+  `source_contour` (an interior contour the source shape already had) or `occlusion` (a gap
+  the weave created), exteriors counter-clockwise and holes clockwise, with `area`,
+  `removed_area`, `band_area` and `union_area` next to them for checking (FR-059).
+- Validate instead of guessing (FR-055, FR-057, FR-058): a zero-length path reports
+  `REGION-EMPTY-RIBBON`, an invalid offset outline is repaired through `make_valid` and
+  reported as `REGION-INVALID-OUTLINE`, a crossing without an assignment reports
+  `REGION-MISSING-ASSIGNMENT`, three or more ribbons overlapping away from a crossing
+  reports `REGION-AREA-MISMATCH` with the difference and tolerance, and a self-crossing —
+  whose two passes share one band — reports `REGION-SELF-CROSSING-UNSUPPORTED` instead of
+  silently staying unwoven.
+- Add `join` (`miter`/`bevel`/`round`) and `miter_limit` to the engine for the offset
+  outline (FR-053), the public `JoinStyle` type, and `cap_style` now selects real cap
+  geometry in this backend.
+- Manim facade: `render='ribbon'` builds filled regions plus a separate hole layer
+  (`Lace.holes`, `hole_color`, `draw_holes`) because Manim has no even-odd fill, and the
+  three construction paths (`__init__`, `from_parametric`, `from_graph`) now share one
+  `_attach_rendered` / `_from_engine` pair instead of duplicating the block. Unknown
+  `render` values raise `ValueError` instead of `NotImplementedError`.
+- Trace: `region.polygon` (area, ring counts, hole roles) and `region.accounting`
+  (band/removed/union/covered areas) join the construction stage, so the area invariant is
+  visible in the algorithm trace.
+- Add `RibbonGallery` to `examples/scene_gallery.py` (stroke next to ribbon for the same
+  input) and document the backend contract in `docs/ARCHITECTURE.md` and the README.
+- Move `shapely` into the `dev` extra so CI actually exercises the region backend instead
+  of skipping `tests/test_regions.py`.
+
 ## Unreleased — stroke cap policy, draw order and regression pair (M3)
 
 - Every `StrokePiece` now carries a deterministic `draw_index`. The renderer layers the

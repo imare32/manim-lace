@@ -50,6 +50,36 @@ that produced the hit.
   estimate untouched. Refinement never adds, removes or reclassifies an event on its
   own; only the angle test of the classification sees the refined angle.
 
+## Region backend (`render/regions.py`, SPEC FR-052..FR-058)
+
+The area backend is the second consumer of `WeaveTopology` and proves the topology layer
+is renderer-neutral (FR-040). It needs the optional `geometry` extra (Shapely) and is
+imported lazily, so `render_mode='ribbon'` raises an `ImportError` with the install hint
+instead of breaking the core import.
+
+- One offset band per path (`LineString.buffer` with the configured cap/join strategy and
+  miter limit) is the ribbon area.
+- At each woven crossing the *under* band loses the Boolean intersection with the *over*
+  band, restricted to the connected component that contains the crossing point. That
+  component is the exact local footprint of the over ribbon: no radius, no shallow-angle
+  clamp, no cap compensation. Intersecting the whole bands instead would cut the under
+  ribbon at every crossing the two paths share, which the area-conservation test catches.
+- `RibbonRegion` exposes an exterior ring plus hole rings, each tagged `exterior`,
+  `source_contour` (an interior contour the source shape already had) or `occlusion` (a
+  gap the weave created), with exteriors counter-clockwise and holes clockwise. Faces and
+  holes are therefore defined by geometry, not by a fill rule or ring size (FR-058).
+- Validation is explicit: an invalid offset outline is repaired through `make_valid` and
+  reported as `REGION-INVALID-OUTLINE`; a zero-length path reports `REGION-EMPTY-RIBBON`;
+  and the result carries `band_area`, `removed_area`, `union_area` and `covered_area` so
+  the invariant "visible areas = union of the bands" is checkable
+  (`REGION-AREA-MISMATCH` when three or more ribbons overlap away from a crossing).
+- Known limit, reported rather than hidden: a self-crossing's two passes share one band,
+  and this backend does not split bands per pass yet, so those crossings stay unwoven
+  (`REGION-SELF-CROSSING-UNSUPPORTED`). A crossing without an assignment reports
+  `REGION-MISSING-ASSIGNMENT`.
+- Manim has no even-odd fill, so the facade paints hole rings as its own layer
+  (`Lace.holes`) with `hole_color`; the geometry result is independent of that choice.
+
 ## Event policy and conflict strategy
 
 Two decisions are deliberately explicit instead of implicit (SPEC FR-032, FR-042, FR-045):
@@ -89,7 +119,7 @@ Two decisions are deliberately explicit instead of implicit (SPEC FR-032, FR-042
 3. Crossings classified as endpoint-touch or near-tangent are retained as diagnostics, but not sent to strict alternating assignment unless the event policy promotes them (`weave`).
 4. Collinear overlap is diagnostic-only; no automatic crossing relationship is invented, and the event policy can only silence the warning.
 5. Stroke cutting is a visual approximation. It cannot ensure exact area coverage around every shallow-angle crossing, and the cut gap is widened by `offset` when the cap style protrudes.
-6. Region rendering is deliberately not implemented yet, so no backend may assume an exact painted outline.
+6. The region backend computes exact areas with a Boolean engine, but the stroke backend remains an approximation: a renderer must not treat stroke pieces as an exact painted outline.
 
 ## Renderer guarantees (v0.1 stroke backend)
 
@@ -120,7 +150,7 @@ These are asserted by tests, not just intentions:
 
 ## Suggested extension contracts
 
-A future `CrossingDetector` implementation should return `CrossingDetectionResult`, preserving `CrossingEvent` semantics. A future `RibbonRegionRenderer` must consume `WeaveTopology` instead of recomputing assignments. Every renderer should report diagnostics for dropped pieces or geometric repair.
+A future `CrossingDetector` implementation should return `CrossingDetectionResult`, preserving `CrossingEvent` semantics. Any ribbon renderer must consume `WeaveTopology` instead of recomputing assignments (the Shapely backend above is the reference implementation). Every renderer should report diagnostics for dropped pieces or geometric repair.
 
 Anything that changes *which* pairs are examined must keep the reported events
 identical; `candidate_strategy="brute_force"` is the reference oracle for that, and

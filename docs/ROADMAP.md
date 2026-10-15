@@ -2,8 +2,8 @@
 
 Markers: `[x]` done and covered by tests, `[~]` partially done, `[ ]` not started.
 Last reviewed 2026-10-15 against the state of `main` after the crossing, stroke-boundary,
-candidate-index, intersection-refinement, event-policy, conflict-strategy and stroke
-cap/order work.
+candidate-index, intersection-refinement, event-policy, conflict-strategy, stroke
+cap/order and region-backend work.
 
 ## Where we are
 
@@ -12,11 +12,14 @@ cap/order work.
   FR-036 intersection refinement is done for inputs whose source curve is evaluable.
 - **M2 done** — event policies, minimal conflict witnesses and the FR-045 conflict
   strategy switch are implemented and tested.
-- **M3 done** — seam handling, dropped-geometry diagnostics, stated limitations, and now
-  cap policy, draw dependency order and the renderable/geometry regression pair.
-- **M4 not started**, **M5 partially scaffolded**, **M6 not started**.
-- Next in line: M4 region backend → M5 fine-grained traces and verified animation
-  coordinates.
+- **M3 done** — seam handling, dropped-geometry diagnostics, stated limitations, cap
+  policy, draw dependency order and the renderable/geometry regression pair.
+- **M4 in progress** — 2 of 3 bullets done: the Shapely region backend ships behind
+  `render_mode='ribbon'` with tagged faces/holes and validated area conservation; the
+  half-edge comparison and per-pass bands for self-crossings are open.
+- **M5 partially scaffolded**, **M6 not started**.
+- Next in line: finish M4 (self-crossing bands, half-edge comparison) → M5 fine-grained
+  traces and verified animation coordinates.
 
 ## M0 — Starter kit (done)
 - Core data model, graph/parametric samplers, line-segment crossing detector.
@@ -109,9 +112,25 @@ cap/order work.
       (`README.md` 重要语义 and the numeric assumptions in `docs/ARCHITECTURE.md`).
 
 ## M4 — Region renderer
-- [ ] Prototype Shapely-based Boolean regions vs a dedicated half-edge arrangement.
-- [ ] Define faces and holes independently of rendering fill rules.
-- [ ] Validate polygon boundaries, intersections, and area conservation.
+- [~] Prototype Shapely-based Boolean regions vs a dedicated half-edge arrangement: the
+      Shapely prototype is implemented (`render/regions.py`, `render_mode='ribbon'`, the
+      optional `geometry` extra). Each path becomes one offset band; at every woven
+      crossing the under band loses the exact Boolean intersection with the over band
+      *local to that crossing* (component containing the crossing point), so no radius,
+      no shallow-angle clamp and no cap compensation is involved. Self-crossings are
+      reported as unsupported (`REGION-SELF-CROSSING-UNSUPPORTED`) because their two
+      passes share one band, and a crossing without an assignment reports
+      `REGION-MISSING-ASSIGNMENT`; neither is silently un-woven. A half-edge/planar
+      arrangement comparison has not been started.
+- [x] Define faces and holes independently of rendering fill rules: `RibbonRegion` holds
+      an exterior ring plus tagged hole rings (`exterior` / `source_contour` /
+      `occlusion`), exteriors counter-clockwise and holes clockwise; the Manim facade
+      paints holes as its own layer because Manim has no even-odd fill, and the geometry
+      layer never depends on that choice.
+- [x] Validate polygon boundaries, intersections, and area conservation: tests assert
+      every ring is closed, simple and valid, that the removed area equals the Boolean
+      lens (no radius heuristic), and that the visible areas sum to the union of the
+      bands, with `REGION-AREA-MISMATCH` when three or more ribbons overlap off-crossing.
 
 ## M5 — Algorithm animation
 - [~] Trace adaptive subdivision, candidate pairs, event classifications,

@@ -1,15 +1,18 @@
-"""Stroke-backend gallery: cap styles and draw order.
+"""Renderer gallery: stroke caps, draw order and area-based ribbons.
 
 Run:
 
     manim -pql examples/scene_gallery.py CapStyleGallery
     manim -pql examples/scene_gallery.py DrawOrderGallery
+    manim -pql examples/scene_gallery.py RibbonGallery
 
 ``CapStyleGallery`` renders the same two-strand weave three times to show how the end
 caps change the cut: ``round`` and ``square`` paint half the ribbon width past the
 centerline endpoint, so the gap widens by ``offset`` (reported as
 ``RENDER-CAP-EXTENSION``). ``DrawOrderGallery`` creates the pieces in the renderer's
-painter order, which is computed from the over/under assignments.
+painter order, which is computed from the over/under assignments. ``RibbonGallery``
+shows the area backend next to the stroke backend for the same input; it needs the
+optional ``shapely`` extra.
 """
 
 import numpy as np
@@ -43,6 +46,35 @@ class CapStyleGallery(Scene):
             run_time=0.8,
         )
         self.play(FadeIn(VGroup(*[panel[1] for panel in panels[1:]])), run_time=0.4)
+        self.wait()
+
+
+class RibbonGallery(Scene):
+    """The area backend next to the stroke backend for the same two strands."""
+
+    def construct(self):
+        self.add(
+            Text("stroke (cut centerlines) vs ribbon (Boolean regions)", font_size=24).to_edge(UP)
+        )
+        source = _two_strand_source()
+        stroke = Lace(source, offset=0.22, render="stroke", stroke_color=TEAL)
+        ribbon = Lace(
+            source, offset=0.22, render="ribbon",
+            stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
+        )
+        for lace, label in ((stroke, "stroke"), (ribbon, "ribbon")):
+            lace.scale(0.75).shift(DOWN * 0.2)
+            print(
+                label,
+                "diagnostics:",
+                [diagnostic.code for diagnostic in lace.diagnostics],
+            )
+        panels = VGroup(
+            VGroup(stroke, Text("stroke", font_size=22).next_to(stroke, DOWN, buff=0.3)),
+            VGroup(ribbon, Text("ribbon", font_size=22).next_to(ribbon, DOWN, buff=0.3)),
+        ).arrange(RIGHT, buff=1.2)
+        self.play(Create(panels[0][0].ribbons), FadeIn(panels[1][0].ribbons), run_time=1.0)
+        self.play(FadeIn(VGroup(panels[0][1], panels[1][1])), run_time=0.4)
         self.wait()
 
 

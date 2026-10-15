@@ -38,6 +38,9 @@ ConflictStrategy = Literal["error", "manual", "relax"]
 #: ``round`` and ``square`` protrude half the ribbon width along the tangent, which the
 #: renderer compensates for by widening the gap (a visual approximation, reported).
 CapStyle = Literal["butt", "round", "square"]
+#: How the ribbon-region backend connects offset segments at a polyline vertex
+#: (SPEC FR-053). ``miter`` is limited by ``miter_limit``.
+JoinStyle = Literal["miter", "bevel", "round"]
 
 
 @dataclass(frozen=True, slots=True)

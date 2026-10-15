@@ -64,6 +64,63 @@ def test_parametric_facade_defaults_to_butt_caps():
     assert all(mob.cap_style == CapStyleType.BUTT for mob in lace.ribbons)
 
 
+def test_ribbon_mode_builds_filled_regions():
+    from manim import TEAL, Circle, Line, VGroup
+
+    from manim_lace import Lace
+
+    source = VGroup(
+        Circle(radius=1),
+        Line(np.array([-2.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0])),
+    )
+    lace = Lace(source, offset=0.15, render="ribbon", stroke_color=TEAL, fill_color=TEAL)
+    assert lace.render_mode == "ribbon"
+    assert len(lace.ribbons) == len(lace.result.pieces) >= 2
+    assert all(mob.get_fill_opacity() == pytest.approx(1.0) for mob in lace.ribbons)
+    assert all(mob.get_stroke_width() > 0 for mob in lace.ribbons)
+    for mob, region in zip(lace.ribbons, lace.result.pieces, strict=True):
+        corners = np.asarray(mob.points)[:, :2]
+        assert np.allclose(corners[0], region.exterior.points[0], atol=1e-12)
+        assert np.allclose(corners.min(axis=0), region.exterior.points.min(axis=0), atol=1e-9)
+        assert np.allclose(corners.max(axis=0), region.exterior.points.max(axis=0), atol=1e-9)
+
+
+def test_ribbon_holes_are_a_separate_layer():
+    from manim import Circle
+
+    from manim_lace import Lace
+
+    with_holes = Lace(Circle(radius=1), offset=0.2, render="ribbon")
+    assert len(with_holes.holes) == 1
+    assert with_holes.holes[0].get_fill_opacity() == pytest.approx(1.0)
+
+    without_holes = Lace(Circle(radius=1), offset=0.2, render="ribbon", draw_holes=False)
+    assert len(without_holes.holes) == 0
+
+
+def test_ribbon_mode_is_available_from_the_parametric_factory():
+    from manim_lace import Lace
+
+    lace = Lace.from_parametric(
+        lambda t: (np.cos(t), np.sin(t)), (0.0, 2 * np.pi),
+        closed=True, offset=0.1, render="ribbon",
+    )
+    assert lace.render_mode == "ribbon"
+    assert lace.engine.render_mode == "ribbon"
+    assert lace.ribbons
+
+
+def test_unknown_render_mode_is_rejected():
+    from manim import Circle
+
+    from manim_lace import Lace
+
+    with pytest.raises(ValueError):
+        Lace(Circle(radius=1), render="mesh")
+    with pytest.raises(ValueError):
+        Lace.from_parametric(lambda t: (t, t), (0.0, 1.0), render="mesh")
+
+
 def _source_curve_gap(event, path_a, path_b, *, refined):
     """Distance between the two source curves at the event's parameters.
 

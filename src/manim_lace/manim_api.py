@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 from manim import (  # type: ignore[import-not-found]
+    BLACK,
     BLUE,
     DOWN,
     GREY_B,
@@ -32,10 +33,14 @@ from .model import EventPolicy, LaceResult, PolylinePath
 
 
 class Lace(VGroup):
-    """Turn a Manim 2D vector object into a stroke-style weave.
+    """Turn a Manim 2D vector object into a weave.
 
     This is a Manim VGroup facade over the renderer-neutral :class:`LaceEngine`.
-    The area-based ``ribbon`` renderer is intentionally not implemented yet.
+    ``render='stroke'`` builds cut centerline strokes; ``render='ribbon'`` builds
+    area-based regions (fill plus outline) and needs the optional ``shapely`` extra.
+    In ribbon mode the holes are separate mobjects (Manim has no even-odd fill), filled
+    with ``hole_color`` so they read as gaps; pick a colour that matches your scene
+    background, or set ``draw_holes=False`` and handle them yourself.
     """
 
     def __init__(
@@ -49,6 +54,10 @@ class Lace(VGroup):
         stroke_color: Any = WHITE,
         stroke_width: float | None = None,
         stroke_opacity: float = 1.0,
+        fill_color: Any = None,
+        fill_opacity: float = 1.0,
+        hole_color: Any = BLACK,
+        draw_holes: bool = True,
         sample_error: float = 1e-3,
         min_sin: float = 0.2,
         min_piece_length: float = 1e-7,
@@ -57,15 +66,15 @@ class Lace(VGroup):
         event_policy: EventPolicy | dict[str, str] | str | None = None,
         conflict_strategy: str = "error",
         cap_style: str = "butt",
+        join: str = "miter",
+        miter_limit: float = 5.0,
         **extra: Any,
     ) -> None:
         super().__init__()
         if extra:
             raise TypeError(f"unsupported Lace options in starter kit: {sorted(extra)}")
-        if render != "stroke":
-            raise NotImplementedError(
-                "The starter kit currently implements render='stroke'. The 'ribbon' region renderer is a roadmap item."
-            )
+        if render not in ("stroke", "ribbon"):
+            raise ValueError("render must be 'stroke' or 'ribbon'")
         self.target_mobject = target_mobject
         self.offset = float(offset)
         self.render_mode = render
@@ -83,24 +92,69 @@ class Lace(VGroup):
             event_policy=event_policy,
             conflict_strategy=conflict_strategy,  # type: ignore[arg-type]
             cap_style=cap_style,  # type: ignore[arg-type]
+            join=join,  # type: ignore[arg-type]
+            miter_limit=miter_limit,
         )
         self.result: LaceResult = self.engine.solve()
         self.interlacing = self.result.topology  # migration-friendly discoverability
         self.crossings = self.result.crossings
         self.diagnostics = self.result.diagnostics
         self.trace = self.result.trace
-        self.holes = VGroup()
-        self.source_paths = VGroup()
-        for path in self.paths:
-            mob = _polyline_to_vmobject(path.points, closed=path.closed)
+        self._attach_rendered({
+            "stroke_color": stroke_color,
+            "stroke_width": stroke_width,
+            "stroke_opacity": stroke_opacity,
+            "fill_color": fill_color,
+            "fill_opacity": fill_opacity,
+            "hole_color": hole_color,
+            "draw_holes": draw_holes,
+        })
+
+    def _attach_rendered(self, style: dict[str, Any]) -> None:
+        """Build the output mobjects for the active backend and add them to the group."""
+        self.source_paths = VGroup(*[
+            _polyline_to_vmobject(path.points, closed=path.closed) for path in self.paths
+        ])
+        for mob in self.source_paths:
             mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
-            self.source_paths.add(mob)
-        width = stroke_width if stroke_width is not None else max(1.0, 200.0 * offset)
-        self.ribbons = _ribbon_group(
-            self.result.pieces, color=stroke_color, width=width,
-            opacity=stroke_opacity, cap_style=cap_style,
-        )
-        self.add(self.ribbons)
+        stroke_width = style["stroke_width"]
+        width = stroke_width if stroke_width is not None else max(1.0, 200.0 * self.offset)
+        if self.render_mode == "ribbon":
+            self.ribbons, self.holes = _region_groups(
+                self.result.pieces,
+                fill_color=style["fill_color"] if style["fill_color"] is not None else style["stroke_color"],
+                fill_opacity=style["fill_opacity"],
+                stroke_color=style["stroke_color"],
+                stroke_width=width,
+                stroke_opacity=style["stroke_opacity"],
+                hole_color=style["hole_color"],
+                draw_holes=style["draw_holes"],
+            )
+        else:
+            self.holes = VGroup()
+            self.ribbons = _ribbon_group(
+                self.result.pieces, color=style["stroke_color"], width=width,
+                opacity=style["stroke_opacity"], cap_style=self.engine.cap_style,
+            )
+        self.add(self.ribbons, self.holes)
+
+    @classmethod
+    def _from_engine(cls, engine: LaceEngine, *, render: str, style: dict[str, Any]) -> Lace:
+        """Wrap a solved engine into a facade object (shared by the factory methods)."""
+        obj = cls.__new__(cls)
+        VGroup.__init__(obj)
+        obj.target_mobject = None
+        obj.offset = engine.offset
+        obj.render_mode = render
+        obj.paths = engine.paths
+        obj.engine = engine
+        obj.result = engine.solve()
+        obj.interlacing = obj.result.topology
+        obj.crossings = obj.result.crossings
+        obj.diagnostics = obj.result.diagnostics
+        obj.trace = obj.result.trace
+        obj._attach_rendered(style)
+        return obj
 
     @classmethod
     def from_parametric(
@@ -108,86 +162,30 @@ class Lace(VGroup):
     ) -> Lace:
         """Create a Manim VGroup directly from a parametric function.
 
-        Geometry options are forwarded to ``LaceEngine.from_parametric``;
-        style options (``stroke_color``, ``stroke_width``, ``stroke_opacity``)
-        are consumed by this wrapper.
+        Geometry options are forwarded to ``LaceEngine.from_parametric``; style options
+        (``stroke_color``, ``stroke_width``, ``stroke_opacity``, ``fill_color``,
+        ``fill_opacity``, ``hole_color``, ``draw_holes``) are consumed by this wrapper.
         """
-        style = {
-            "stroke_color": kwargs.pop("stroke_color", WHITE),
-            "stroke_width": kwargs.pop("stroke_width", None),
-            "stroke_opacity": kwargs.pop("stroke_opacity", 1.0),
-        }
-        render = kwargs.pop("render", "stroke")
-        if render != "stroke":
-            raise NotImplementedError("Only render='stroke' is available in starter kit v0.1")
+        style = _pop_style(kwargs)
+        render = _pop_render(kwargs)
         sample_error = kwargs.pop("sample_error", kwargs.pop("max_error", 1e-3))
         engine = LaceEngine.from_parametric(
-            func, t_range, offset=offset, max_error=sample_error, **kwargs
+            func, t_range, offset=offset, max_error=sample_error, render_mode=render, **kwargs
         )
-        obj = cls.__new__(cls)
-        VGroup.__init__(obj)
-        obj.target_mobject = None
-        obj.offset = float(offset)
-        obj.render_mode = "stroke"
-        obj.paths = engine.paths
-        obj.engine = engine
-        obj.result = engine.solve()
-        obj.interlacing = obj.result.topology
-        obj.crossings = obj.result.crossings
-        obj.diagnostics = obj.result.diagnostics
-        obj.trace = obj.result.trace
-        obj.holes = VGroup()
-        obj.source_paths = VGroup(*[_polyline_to_vmobject(p.points, closed=p.closed) for p in obj.paths])
-        for mob in obj.source_paths:
-            mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
-        width = style["stroke_width"] if style["stroke_width"] is not None else max(1.0, 200.0 * offset)
-        obj.ribbons = _ribbon_group(
-            obj.result.pieces, color=style["stroke_color"], width=width,
-            opacity=style["stroke_opacity"], cap_style=engine.cap_style,
-        )
-        obj.add(obj.ribbons)
-        return obj
+        return cls._from_engine(engine, render=render, style=style)
 
     @classmethod
     def from_graph(
         cls, func: Any, x_range: tuple[float, float], *, offset: float = 0.1, **kwargs: Any
     ) -> Lace:
         """Create a Manim VGroup directly from ``y = f(x)``."""
-        style = {
-            "stroke_color": kwargs.pop("stroke_color", WHITE),
-            "stroke_width": kwargs.pop("stroke_width", None),
-            "stroke_opacity": kwargs.pop("stroke_opacity", 1.0),
-        }
-        render = kwargs.pop("render", "stroke")
-        if render != "stroke":
-            raise NotImplementedError("Only render='stroke' is available in starter kit v0.1")
+        style = _pop_style(kwargs)
+        render = _pop_render(kwargs)
         sample_error = kwargs.pop("sample_error", kwargs.pop("max_error", 1e-3))
         engine = LaceEngine.from_graph(
-            func, x_range, offset=offset, max_error=sample_error, **kwargs
+            func, x_range, offset=offset, max_error=sample_error, render_mode=render, **kwargs
         )
-        obj = cls.__new__(cls)
-        VGroup.__init__(obj)
-        obj.target_mobject = None
-        obj.offset = float(offset)
-        obj.render_mode = "stroke"
-        obj.paths = engine.paths
-        obj.engine = engine
-        obj.result = engine.solve()
-        obj.interlacing = obj.result.topology
-        obj.crossings = obj.result.crossings
-        obj.diagnostics = obj.result.diagnostics
-        obj.trace = obj.result.trace
-        obj.holes = VGroup()
-        obj.source_paths = VGroup(*[_polyline_to_vmobject(p.points, closed=p.closed) for p in obj.paths])
-        for mob in obj.source_paths:
-            mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
-        width = style["stroke_width"] if style["stroke_width"] is not None else max(1.0, 200.0 * offset)
-        obj.ribbons = _ribbon_group(
-            obj.result.pieces, color=style["stroke_color"], width=width,
-            opacity=style["stroke_opacity"], cap_style=engine.cap_style,
-        )
-        obj.add(obj.ribbons)
-        return obj
+        return cls._from_engine(engine, render=render, style=style)
 
     def as_mobject(self) -> Lace:
         return self
@@ -261,6 +259,60 @@ class Lace(VGroup):
         if "complete" in stage_names:
             animations.append(Wait(0.5))
         return Succession(*animations) if animations else Wait(0.1)
+
+
+def _pop_render(kwargs: dict[str, Any]) -> str:
+    """Take the backend selector out of the keyword arguments."""
+    render = kwargs.pop("render", "stroke")
+    if render not in ("stroke", "ribbon"):
+        raise ValueError("render must be 'stroke' or 'ribbon'")
+    return render
+
+
+def _pop_style(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Take the style-only options out of the keyword arguments."""
+    return {
+        "stroke_color": kwargs.pop("stroke_color", WHITE),
+        "stroke_width": kwargs.pop("stroke_width", None),
+        "stroke_opacity": kwargs.pop("stroke_opacity", 1.0),
+        "fill_color": kwargs.pop("fill_color", None),
+        "fill_opacity": kwargs.pop("fill_opacity", 1.0),
+        "hole_color": kwargs.pop("hole_color", BLACK),
+        "draw_holes": kwargs.pop("draw_holes", True),
+    }
+
+
+def _region_groups(
+    regions: list[Any],
+    *,
+    fill_color: Any,
+    fill_opacity: float,
+    stroke_color: Any,
+    stroke_width: float,
+    stroke_opacity: float,
+    hole_color: Any,
+    draw_holes: bool,
+) -> tuple[VGroup, VGroup]:
+    """Turn ribbon regions into a filled VGroup plus a separate hole VGroup.
+
+    Manim has no even-odd fill, so a hole is painted as its own polygon on top of the
+    ribbon. Ring roles stay available on the geometry side for anything more exact.
+    """
+    ribbons = VGroup()
+    for region in regions:
+        mob = _polyline_to_vmobject(region.exterior.points, closed=True)
+        mob.set_fill(fill_color, opacity=fill_opacity)
+        mob.set_stroke(stroke_color, width=stroke_width, opacity=stroke_opacity)
+        ribbons.add(mob)
+    holes = VGroup()
+    if draw_holes:
+        for region in regions:
+            for hole in region.holes:
+                mob = _polyline_to_vmobject(hole.points, closed=True)
+                mob.set_fill(hole_color, opacity=1.0)
+                mob.set_stroke(width=0)
+                holes.add(mob)
+    return ribbons, holes
 
 
 def _polyline_to_vmobject(points: np.ndarray, *, closed: bool = False) -> VMobject:

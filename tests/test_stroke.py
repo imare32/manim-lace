@@ -213,6 +213,8 @@ def test_degenerate_path_produces_no_piece():
         {"render_mode": "mesh"},
         {"weave_mode": "strict"},
         {"manual_over": {"X0000": "top"}},
+        {"join": "spline"},
+        {"miter_limit": 0.0},
     ],
 )
 def test_invalid_engine_parameters_raise_at_construction(kwargs):
@@ -221,9 +223,14 @@ def test_invalid_engine_parameters_raise_at_construction(kwargs):
         LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])], **kwargs)
 
 
-def test_ribbon_render_mode_is_still_unimplemented():
-    with pytest.raises(NotImplementedError):
-        LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])], render_mode="ribbon")
+def test_the_default_backend_remains_the_stroke_renderer():
+    # ``render_mode='ribbon'`` is served by tests/test_regions.py; the stroke backend is
+    # still what the default mode produces, with its own piece type.
+    from manim_lace.render.stroke import StrokePiece
+
+    result = LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])]).solve()
+    assert result.render_mode == "stroke"
+    assert all(isinstance(piece, StrokePiece) for piece in result.pieces)
 
 
 def _two_path_crossing(offset=0.2, **kwargs):
