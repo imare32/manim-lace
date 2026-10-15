@@ -24,6 +24,19 @@ The topology layer must not depend on either rendering backend. In particular, c
 5. Stroke cutting is a visual approximation. It cannot ensure exact area coverage around every shallow-angle crossing.
 6. Region rendering is deliberately not implemented yet.
 
+## Renderer guarantees (v0.1 stroke backend)
+
+These are asserted by tests, not just intentions:
+
+- Pieces of one path never overlap in arc space and are never longer than the path.
+- A cut that wraps a closed seam becomes one `piece-seam` (covering
+  `[last_start, length] U [0, first_end]`) plus the remaining visible arc. An open
+  path whose cut reaches both ends yields no piece and a `RENDER-PATH-FULLY-CUT`
+  diagnostic, because an open path has no seam to weave around.
+- Geometry is never dropped silently: `GEOM-DEGENERATE-PATH`,
+  `RENDER-PIECE-DROPPED`, `RENDER-PATH-FULLY-CUT` and `RENDER-MISSING-ASSIGNMENT`
+  mark removed centerline arcs.
+
 ## Suggested extension contracts
 
 A future `CrossingDetector` implementation should return `CrossingDetectionResult`, preserving `CrossingEvent` semantics. A future `RibbonRegionRenderer` must consume `WeaveTopology` instead of recomputing assignments. Every renderer should report diagnostics for dropped pieces or geometric repair.

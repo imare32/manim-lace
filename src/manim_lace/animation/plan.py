@@ -30,7 +30,7 @@ class AnimationPlan:
     def stage_names(self) -> list[str]:
         return [stage.name for stage in self.stages]
 
-    def for_mode(self, mode: str) -> "AnimationPlan":
+    def for_mode(self, mode: str) -> AnimationPlan:
         return AnimationPlan(
             mode=mode,
             stages=[s for s in self.stages if mode in s.include_in_modes],

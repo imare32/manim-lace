@@ -35,6 +35,7 @@ def test_engine_from_parametric_runs():
 
 def test_nonplanar_xyz_is_rejected_by_2d_path_model():
     import pytest
+
     from manim_lace import PolylinePath
 
     with pytest.raises(ValueError, match="XY-parallel"):

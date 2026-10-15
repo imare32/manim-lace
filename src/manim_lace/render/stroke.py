@@ -86,6 +86,21 @@ def _merge_intervals(intervals: list[tuple[float, float]], tol: float = 1e-10) -
     return out
 
 
+def _fully_cut_diagnostic(path: PolylinePath, *, closed_seam: bool) -> Diagnostic:
+    message = (
+        "交叉切口覆盖了整条闭合路径，因此没有可见中心线片段。"
+        if closed_seam
+        else "交叉切口覆盖了整条开放中心线，因此没有可见片段。"
+    )
+    return Diagnostic(
+        code="RENDER-PATH-FULLY-CUT",
+        severity=Severity.WARNING,
+        message=message,
+        path_ids=(path.path_id,),
+        hints=("减小 offset，或为密集／小环路实现独立的局部区域几何策略。",),
+    )
+
+
 def render_stroke_geometry(
     paths: list[PolylinePath],
     crossings: list[CrossingEvent],
@@ -102,11 +117,19 @@ def render_stroke_geometry(
     ``offset / max(abs(sin(theta)), min_sin)`` and is intentionally bounded at
     shallow angles. This first implementation is suitable for opaque stroke
     rendering; transparent strokes and exact area clipping are out of scope.
+
+    Guarantees for the emitted pieces of one path: their arc intervals never
+    overlap, never cross the removed cut intervals, and a piece is never longer
+    than the path itself.
     """
     if offset <= 0 or not np.isfinite(offset):
         raise ValueError("offset must be positive and finite")
     if not 0 < min_sin <= 1:
         raise ValueError("min_sin must be within (0, 1]")
+    if not np.isfinite(overshoot) or overshoot < 0:
+        raise ValueError("overshoot must be finite and non-negative")
+    if not np.isfinite(min_piece_length) or min_piece_length < 0:
+        raise ValueError("min_piece_length must be finite and non-negative")
     path_index_by_id = {p.path_id: i for i, p in enumerate(paths)}
     cuts: dict[str, list[tuple[float, float]]] = {p.path_id: [] for p in paths}
     diagnostics: list[Diagnostic] = []
@@ -155,6 +178,10 @@ def render_stroke_geometry(
     pieces: list[StrokePiece] = []
     for path in paths:
         length = path.length
+        if length <= 0:
+            # A zero-length path carries no centerline to draw; the geometry layer
+            # already reported GEOM-DEGENERATE-PATH for it.
+            continue
         intervals = _merge_intervals(cuts[path.path_id])
         if not intervals:
             pieces.append(StrokePiece(
@@ -162,35 +189,61 @@ def render_stroke_geometry(
                 points=path.points.copy(), arc_start=0.0, arc_end=length, closed=path.closed,
             ))
             continue
-        if path.closed and len(intervals) == 1 and intervals[0][0] <= 1e-10 and intervals[0][1] >= length - 1e-10:
-            diagnostics.append(Diagnostic(
-                code="RENDER-PATH-FULLY-CUT",
-                severity=Severity.WARNING,
-                message="交叉切口覆盖了整条闭合路径，因此没有可见中心线片段。",
-                path_ids=(path.path_id,),
-                hints=("减小 offset，或为密集／小环路实现独立的局部区域几何策略。",),
-            ))
-            continue
-        if intervals[0][0] <= 1e-10 and intervals[-1][1] >= length - 1e-10:
-            # A cut wraps over the path seam. The seam is not a true endpoint, so
-            # merge the first and last kept intervals into one cyclic piece.
+        seam_tol = 1e-10
+        covers_seam = intervals[0][0] <= seam_tol and intervals[-1][1] >= length - seam_tol
+        seam_piece: StrokePiece | None = None
+        cursor, limit = 0.0, length
+        if covers_seam:
+            if not path.closed:
+                # An open path has no seam to weave around: a cut that reaches both
+                # ends removes the whole centerline instead of wrapping around.
+                diagnostics.append(_fully_cut_diagnostic(path, closed_seam=False))
+                continue
+            if len(intervals) == 1:
+                diagnostics.append(_fully_cut_diagnostic(path, closed_seam=True))
+                continue
             first_end = intervals[0][1]
             last_start = intervals[-1][0]
             intervals = intervals[1:-1]
+            # The seam piece spans [last_start, length] U [0, first_end] as one
+            # cyclic piece. The remaining visible arc starts at first_end and ends
+            # at last_start; using 0/length here would duplicate the seam geometry.
+            cursor, limit = first_end, last_start
             if length - last_start + first_end > min_piece_length:
-                pts = _slice_arc(path, last_start, length + first_end)
-                pieces.append(StrokePiece(
+                seam_piece = StrokePiece(
                     piece_id=f"{path.path_id}.piece-seam", path_id=path.path_id,
-                    points=pts, arc_start=last_start, arc_end=length + first_end,
-                ))
+                    points=_slice_arc(path, last_start, length + first_end),
+                    arc_start=last_start, arc_end=length + first_end,
+                )
+        if seam_piece is not None:
+            pieces.append(seam_piece)
         keep: list[tuple[float, float]] = []
-        cursor = 0.0
+        dropped: list[tuple[float, float]] = []
         for start, end in intervals:
             if start - cursor > min_piece_length:
                 keep.append((cursor, start))
+            elif start > cursor:
+                dropped.append((cursor, start))
             cursor = max(cursor, end)
-        if length - cursor > min_piece_length:
-            keep.append((cursor, length))
+        if limit - cursor > min_piece_length:
+            keep.append((cursor, limit))
+        elif limit > cursor:
+            dropped.append((cursor, limit))
+        if dropped:
+            diagnostics.append(Diagnostic(
+                code="RENDER-PIECE-DROPPED",
+                severity=Severity.INFO,
+                message=(
+                    f"路径 {path.path_id} 上有 {len(dropped)} 段可见中心线短于 min_piece_length，"
+                    "未输出为片段。"
+                ),
+                path_ids=(path.path_id,),
+                details={
+                    "dropped_count": len(dropped),
+                    "longest_dropped": max(end - start for start, end in dropped),
+                },
+                hints=("减小 min_piece_length 可保留这些极短片段。",),
+            ))
         for idx, (start, end) in enumerate(keep):
             points = _slice_arc(path, start, end)
             pieces.append(StrokePiece(

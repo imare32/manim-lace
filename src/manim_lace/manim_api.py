@@ -7,7 +7,9 @@ from typing import Any
 import numpy as np
 from manim import (  # type: ignore[import-not-found]
     BLUE,
+    DOWN,
     GREY_B,
+    LEFT,
     ORANGE,
     RED,
     WHITE,
@@ -48,6 +50,7 @@ class Lace(VGroup):
         stroke_opacity: float = 1.0,
         sample_error: float = 1e-3,
         min_sin: float = 0.2,
+        min_piece_length: float = 1e-7,
         **extra: Any,
     ) -> None:
         super().__init__()
@@ -68,6 +71,7 @@ class Lace(VGroup):
             manual_over=manual_over,
             render_mode=render,
             min_sin=min_sin,
+            min_piece_length=min_piece_length,
         )
         self.result: LaceResult = self.engine.solve()
         self.interlacing = self.result.topology  # migration-friendly discoverability
@@ -91,7 +95,7 @@ class Lace(VGroup):
     @classmethod
     def from_parametric(
         cls, func: Any, t_range: tuple[float, float], *, offset: float = 0.1, **kwargs: Any
-    ) -> "Lace":
+    ) -> Lace:
         """Create a Manim VGroup directly from a parametric function.
 
         Geometry options are forwarded to ``LaceEngine.from_parametric``;
@@ -136,7 +140,7 @@ class Lace(VGroup):
     @classmethod
     def from_graph(
         cls, func: Any, x_range: tuple[float, float], *, offset: float = 0.1, **kwargs: Any
-    ) -> "Lace":
+    ) -> Lace:
         """Create a Manim VGroup directly from ``y = f(x)``."""
         style = {
             "stroke_color": kwargs.pop("stroke_color", WHITE),
@@ -173,7 +177,7 @@ class Lace(VGroup):
         obj.add(obj.ribbons)
         return obj
 
-    def as_mobject(self) -> "Lace":
+    def as_mobject(self) -> Lace:
         return self
 
     def build_animation(self, mode: str = "overview", *, show_sampling: bool = False, show_crossing_ids: bool = True) -> Any:

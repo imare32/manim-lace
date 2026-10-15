@@ -9,7 +9,11 @@
 ## M1 — Input and crossing correctness
 - Test current Manim CE VMobject layouts across supported versions.
 - Add source-parameter-aware curves and adaptive intersection refinement.
-- Strengthen event clustering at polyline vertices and closed-path seams.
+- [x] Strengthen event clustering at polyline vertices and closed-path seams:
+      vertex crossings on interior segments and with repeated points stay
+      `transverse`, a crossing at a closed seam is reported once at arc 0, and a
+      zero-length path is reported as `GEOM-DEGENERATE-PATH` instead of being
+      silently ignored. Regression tests live in `tests/test_crossings.py`.
 - Add a deterministic spatial index and performance benchmarks.
 
 ## M2 — Weave topology robustness
@@ -18,7 +22,12 @@
 - Make manual override precedence and strictness settings explicit.
 
 ## M3 — Production stroke renderer
-- Correct cyclic interval handling around closed-path seams.
+- [x] Correct cyclic interval handling around closed-path seams: a cut that wraps
+      the seam emits one `piece-seam` plus the remaining arc, an open path whose
+      cut reaches both ends emits no piece and reports `RENDER-PATH-FULLY-CUT`,
+      and pieces of one path never overlap in arc space (`tests/test_stroke.py`).
+- [x] Report dropped geometry (`RENDER-PIECE-DROPPED`, `RENDER-MISSING-ASSIGNMENT`)
+      instead of silently shortening the centerline.
 - Add draw dependency order, round/butt/square cap policy, and visual regression examples.
 - State limitations for alpha compositing and shallow-angle crossings.
 

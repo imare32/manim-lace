@@ -8,7 +8,6 @@ uses De Casteljau subdivision based on chord error.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
 
 import numpy as np
 

@@ -103,29 +103,56 @@ def _arc_distance(a: float, b: float, length: float, closed: bool) -> float:
 
 
 
+def _branch_ray(
+    points: np.ndarray,
+    index: int,
+    direction: int,
+    origin: np.ndarray,
+    *,
+    closed: bool,
+    tol: float,
+) -> np.ndarray | None:
+    """First point along the walk from ``index`` (inclusive) that differs from ``origin``.
+
+    Coincident repeated vertices are skipped. Without this, a duplicated sample
+    collapses one local branch, which silently demotes a genuine vertex crossing
+    to ``endpoint_touch`` and removes it from strict alternation.
+    """
+    count = len(points) - 1 if closed else len(points)
+    if count <= 0:
+        return None
+    cursor = index % count if closed else index
+    for _ in range(count):
+        if not closed and (cursor < 0 or cursor >= count):
+            return None
+        delta = points[cursor] - origin
+        if float(np.linalg.norm(delta)) > tol:
+            return delta
+        cursor = (cursor + direction) % count if closed else cursor + direction
+    return None
+
+
 def _local_rays(path: PolylinePath, arc: float, point: np.ndarray, tol: float) -> list[np.ndarray]:
     """Return the one or two local branches leaving a curve position."""
+    points = path.points
+    closed = path.closed and path.length > 0
+    if closed:
+        arc = arc % path.length
     cumulative = path.cumulative_lengths
-    length = float(cumulative[-1])
-    if path.closed and length > 0:
-        arc = arc % length
     idx = int(np.argmin(np.abs(cumulative - arc)))
     if abs(float(cumulative[idx]) - arc) <= tol:
-        if path.closed and idx == len(path.points) - 1:
+        if closed and idx == len(points) - 1:
             idx = 0
-        if idx == 0:
-            if path.closed:
-                rays = [path.points[-2] - point, path.points[1] - point]
-            else:
-                rays = [path.points[1] - point]
-        elif idx == len(path.points) - 1:
-            rays = [path.points[-2] - point]
-        else:
-            rays = [path.points[idx - 1] - point, path.points[idx + 1] - point]
+        back_index, forward_index = idx - 1, idx + 1
     else:
-        seg = int(np.clip(np.searchsorted(cumulative, arc, side="right") - 1, 0, len(path.points) - 2))
-        rays = [path.points[seg] - point, path.points[seg + 1] - point]
-    return [ray / np.linalg.norm(ray) for ray in rays if np.linalg.norm(ray) > tol]
+        seg = int(np.clip(np.searchsorted(cumulative, arc, side="right") - 1, 0, len(points) - 2))
+        back_index, forward_index = seg, seg + 1
+    rays: list[np.ndarray] = []
+    for index, direction in ((back_index, -1), (forward_index, 1)):
+        delta = _branch_ray(points, index, direction, point, closed=closed, tol=tol)
+        if delta is not None:
+            rays.append(delta / float(np.linalg.norm(delta)))
+    return rays
 
 
 def _classify_vertex_intersection(
@@ -169,12 +196,28 @@ def detect_crossings(
         raise ValueError("angle_tol must be finite and within (0, 1)")
     raw_hits: list[_RawHit] = []
     diagnostics: list[Diagnostic] = []
+    for path in paths:
+        if path.length <= position_tol:
+            diagnostics.append(Diagnostic(
+                code="GEOM-DEGENERATE-PATH",
+                severity=Severity.WARNING,
+                message=(
+                    f"路径 {path.path_id} 的总长度不超过位置容差，不会产生有意义的交叉事件，"
+                    "也不会生成描边片段。"
+                ),
+                path_ids=(path.path_id,),
+                hints=("检查采样是否在不同参数处返回了重复坐标；重复顶点无法参与编织。",),
+            ))
     for i, path_i in enumerate(paths):
+        if path_i.length <= position_tol:
+            continue
         starts_i, ends_i = path_i.points[:-1], path_i.points[1:]
         lens_i = path_i.segment_lengths
         cum_i = path_i.cumulative_lengths
         for j in range(i, len(paths)):
             path_j = paths[j]
+            if path_j.length <= position_tol:
+                continue
             starts_j, ends_j = path_j.points[:-1], path_j.points[1:]
             lens_j = path_j.segment_lengths
             cum_j = path_j.cumulative_lengths

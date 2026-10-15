@@ -1,6 +1,7 @@
+import numpy as np
+
 from manim_lace import LaceEngine
 from manim_lace.animation import build_animation_plan, trace_to_jsonable
-import numpy as np
 
 
 def test_algorithm_plan_includes_construction_and_complete():

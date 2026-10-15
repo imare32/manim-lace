@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable, Sequence
 import numpy as np
 
 from .animation.trace import TraceRecorder
-from .diagnostics import Diagnostic, Severity
 from .geometry.intersections import detect_crossings
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import LaceResult, PathSource, PolylinePath
@@ -31,6 +30,9 @@ class LaceEngine:
         The starter kit currently implements ``stroke`` geometry only. ``ribbon``
         is an explicit extension point and raises until a genuine region backend is
         added.
+    min_piece_length:
+        Visible centerline pieces shorter than this arc length are dropped and
+        reported through a ``RENDER-PIECE-DROPPED`` diagnostic.
     """
 
     def __init__(
@@ -45,11 +47,14 @@ class LaceEngine:
         angle_tol: float = 1e-8,
         min_sin: float = 0.2,
         overshoot: float = 0.03,
+        min_piece_length: float = 1e-7,
     ) -> None:
         if not np.isfinite(offset) or offset <= 0:
             raise ValueError("offset must be positive and finite")
         if render_mode not in {"stroke", "ribbon"}:
             raise ValueError("render_mode must be 'stroke' or 'ribbon'")
+        if not np.isfinite(min_piece_length) or min_piece_length < 0:
+            raise ValueError("min_piece_length must be finite and non-negative")
         if render_mode == "ribbon":
             raise NotImplementedError(
                 "render_mode='ribbon' is reserved for the future region backend. "
@@ -64,6 +69,7 @@ class LaceEngine:
         self.angle_tol = float(angle_tol)
         self.min_sin = float(min_sin)
         self.overshoot = float(overshoot)
+        self.min_piece_length = float(min_piece_length)
         self.result: LaceResult | None = None
 
     @staticmethod
@@ -106,7 +112,7 @@ class LaceEngine:
         breakpoints: Iterable[float] = (),
         closed: bool = False,
         **kwargs: object,
-    ) -> "LaceEngine":
+    ) -> LaceEngine:
         paths = sample_parametric(
             func, t_range, max_error=max_error, max_step=max_step,
             breakpoints=breakpoints, closed=closed,
@@ -125,7 +131,7 @@ class LaceEngine:
         breakpoints: Iterable[float] = (),
         jump_threshold: float | None = None,
         **kwargs: object,
-    ) -> "LaceEngine":
+    ) -> LaceEngine:
         paths = sample_graph(
             func, x_range, max_error=max_error, max_step=max_step,
             breakpoints=breakpoints, jump_threshold=jump_threshold,
@@ -174,6 +180,7 @@ class LaceEngine:
         rendered = render_stroke_geometry(
             self.paths, detected.crossings, topology,
             offset=self.offset, min_sin=self.min_sin, overshoot=self.overshoot,
+            min_piece_length=self.min_piece_length,
         )
         for piece in rendered.pieces:
             trace.emit(

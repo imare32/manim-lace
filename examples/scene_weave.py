@@ -2,6 +2,7 @@
 
 import numpy as np
 from manim import *
+
 from manim_lace import Lace
 
 
