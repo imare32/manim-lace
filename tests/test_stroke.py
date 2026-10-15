@@ -196,9 +196,31 @@ def test_degenerate_path_produces_no_piece():
     assert {piece.path_id for piece in result.pieces} == {"P0001"}
 
 
-def test_invalid_stroke_parameters_raise_value_error():
-    paths = [np.array([[0.0, 0.0], [1.0, 0.0]])]
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"offset": 0.0},
+        {"offset": float("inf")},
+        {"position_tol": 0.0},
+        {"position_tol": float("nan")},
+        {"angle_tol": 0.0},
+        {"angle_tol": 1.0},
+        {"min_sin": 0.0},
+        {"min_sin": 1.5},
+        {"overshoot": -0.5},
+        {"min_piece_length": -1.0},
+        {"candidate_strategy": "quadtree"},
+        {"render_mode": "mesh"},
+        {"weave_mode": "strict"},
+        {"manual_over": {"X0000": "top"}},
+    ],
+)
+def test_invalid_engine_parameters_raise_at_construction(kwargs):
+    # Fail fast: every knob is checked before any geometry work happens.
     with pytest.raises(ValueError):
-        LaceEngine(paths, min_piece_length=-1.0)
-    with pytest.raises(ValueError):
-        LaceEngine(paths, overshoot=-0.5).solve()
+        LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])], **kwargs)
+
+
+def test_ribbon_render_mode_is_still_unimplemented():
+    with pytest.raises(NotImplementedError):
+        LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])], render_mode="ribbon")

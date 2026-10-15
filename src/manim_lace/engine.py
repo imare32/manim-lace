@@ -54,14 +54,31 @@ class LaceEngine:
         min_piece_length: float = 1e-7,
         candidate_strategy: CandidateStrategy = "grid",
     ) -> None:
+        # Every knob is validated here so that an invalid configuration fails at
+        # construction instead of halfway through solve().
         if not np.isfinite(offset) or offset <= 0:
             raise ValueError("offset must be positive and finite")
         if render_mode not in {"stroke", "ribbon"}:
             raise ValueError("render_mode must be 'stroke' or 'ribbon'")
+        if not np.isfinite(position_tol) or position_tol <= 0:
+            raise ValueError("position_tol must be positive and finite")
+        if not np.isfinite(angle_tol) or not 0 < angle_tol < 1:
+            raise ValueError("angle_tol must be finite and within (0, 1)")
+        if not np.isfinite(min_sin) or not 0 < min_sin <= 1:
+            raise ValueError("min_sin must be within (0, 1]")
+        if not np.isfinite(overshoot) or overshoot < 0:
+            raise ValueError("overshoot must be finite and non-negative")
         if not np.isfinite(min_piece_length) or min_piece_length < 0:
             raise ValueError("min_piece_length must be finite and non-negative")
         if candidate_strategy not in ("grid", "brute_force"):
             raise ValueError("candidate_strategy must be 'grid' or 'brute_force'")
+        if weave_mode not in ("alternating", "free", "manual"):
+            raise ValueError("weave_mode must be 'alternating', 'free' or 'manual'")
+        invalid_manual = {
+            key: side for key, side in (manual_over or {}).items() if side not in {"a", "b"}
+        }
+        if invalid_manual:
+            raise ValueError(f"manual_over values must be 'a' or 'b': {invalid_manual}")
         if render_mode == "ribbon":
             raise NotImplementedError(
                 "render_mode='ribbon' is reserved for the future region backend. "

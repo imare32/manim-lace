@@ -9,6 +9,9 @@ from ..model import LaceResult, TraceEvent
 
 AnimationMode = Literal["overview", "algorithm", "construction", "debug", "custom"]
 
+#: Every accepted plan mode; ``custom`` keeps all stages that have events.
+ANIMATION_MODES = ("overview", "algorithm", "construction", "debug", "custom")
+
 
 @dataclass(slots=True)
 class AnimationStage:
@@ -39,7 +42,12 @@ class AnimationPlan:
 
 
 def build_animation_plan(result: LaceResult, mode: AnimationMode = "overview") -> AnimationPlan:
-    """Group actual trace events into pedagogically meaningful phases."""
+    """Group actual trace events into pedagogically meaningful phases.
+
+    An unknown mode raises instead of silently returning an empty plan.
+    """
+    if mode not in ANIMATION_MODES:
+        raise ValueError(f"mode must be one of {ANIMATION_MODES}, got {mode!r}")
     stage_definitions = [
         ("input", "输入路径与规范化", 1.4, ("overview", "algorithm", "construction", "debug")),
         ("crossings", "识别交叉事件", 1.4, ("overview", "algorithm", "debug")),

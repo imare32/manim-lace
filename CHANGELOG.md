@@ -24,6 +24,14 @@
   rejection now compares scalar values instead of NumPy scalars. Dense curves
   drop from ~15 ms to ~4.5 ms and the reference strategy from ~190 ms to ~12.5 ms,
   with event digests unchanged.
+- Validate every `LaceEngine` knob at construction (`position_tol`, `angle_tol`,
+  `min_sin`, `overshoot`, `weave_mode`, `manual_over`) instead of failing halfway
+  through `solve()`, and reject unknown `build_animation(mode=...)` values instead
+  of silently returning an empty animation.
+- Sync `README.md` with shipped behaviour: candidate strategy and
+  `detection_stats`, stroke piece invariants, the diagnostic-code table, and the
+  measured Manim CE 0.22.0 render of `examples/scene_weave.py` (which replaces the
+  outdated "Manim is not installed here" caveat).
 
 ## Unreleased — crossing stability and stroke boundaries
 
