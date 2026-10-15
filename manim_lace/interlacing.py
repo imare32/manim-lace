@@ -1929,6 +1929,61 @@ class Interlacing:
             indices = [(start - k) % num_seg for k in range(max(backward, 0))]
         return [((path_index, "o", track, index), rail[index]) for index in indices]
 
+    def _woven_rail_points(self, i: int, track: int, records: list[dict]) -> list[tuple[tuple, np.ndarray]]:
+        """编织路径的一条轨道上的**有序点**(折线顶点 + 交点记录)。
+
+        返回 ``[(节点键, 坐标), ...]``: ``(track, "v", j)`` 是折线顶点, ``(track, "e", id(record))``
+        是交点记录。每条轨道各成一条链, 左右链由"切口端头"边连接(见 :meth:`_crossing_ribbon_cycles`)。
+        """
+        rail = self.paths_l[i] if track == 1 else self.paths_r[i]
+        num_seg = len(rail) - 1
+        by_seg: dict[int, list[dict]] = defaultdict(list)
+        for record in records:
+            by_seg[record["seg"]].append(record)
+        points: list[tuple[tuple, np.ndarray]] = []
+        for j in range(num_seg):
+            points.append(((track, "v", j), rail[j]))
+            for record in by_seg.get(j, []):
+                points.append(((track, "e", id(record)), record["point"]))
+        if not self.paths_closed[i]:
+            points.append(((track, "v", num_seg), rail[num_seg]))
+        return points
+
+    def _crossing_layout(self, i: int) -> tuple[dict[int, list], list] | None:
+        """按**交叉身份**给出的布局: ``(每轨道的点序, 按弧长排序的全部穿越)``。
+
+        :meth:`_crossing_ribbon_cycles`(丝带片段)与 :meth:`_set_holes`(孔洞边界)共用这一套布局 ——
+        两者的图都建在"沿轨道的点序"上, 差别只在挖哪些区间、要不要补端头。任何一步对不上就返回
+        ``None``, 调用方保持降级(宁缺勿滥)。
+
+        为什么不能用"段"当单位: :meth:`_set_ribbons` / :meth:`_set_holes` 的逐段索引配对隐含前提
+        "一次穿越的两个交点落在同一条线段上"。密采样时这两个交点沿轨相距约 ``2 * offset``(正好是
+        对方丝带的宽度), 会跨 4~8 条线段 —— 实测段内事件数出现 ``(3, 3)`` 这样的**奇数**,
+        于是孔洞图连不起来(候选环 0 个)、丝带整片错乱。
+        """
+        left, _seams_l = self._rail_events(i, 1)
+        right, _seams_r = self._rail_events(i, 2)
+        if not left or len(left) != len(right):
+            return None
+        groups = self._crossing_groups(i, left, right)
+        if groups is None:
+            return None
+
+        passes: list[tuple[tuple[dict, dict], tuple[dict, dict]]] = []
+        for members, _raw in groups:
+            for cluster in self._branch_clusters(i, members):
+                corners = self._cluster_pass_records(cluster)
+                if corners is None:
+                    return None
+                passes.append(corners)
+        if not passes:
+            return None
+        passes.sort(key=lambda corners: min(record["arc"] for pair in corners for record in pair))
+        chains = {1: self._woven_rail_points(i, 1, left), 2: self._woven_rail_points(i, 2, right)}
+        if not all(chains.values()):
+            return None
+        return chains, passes
+
     def _crossing_ribbon_cycles(self, i: int) -> list[np.ndarray] | None:
         """按**交叉身份**切分路径 ``i`` 的丝带(阶段 1 第三步, 只用于现行降级路径)。
 
@@ -1952,31 +2007,12 @@ class Interlacing:
         都返回 ``None``, 调用方保持降级(宁缺勿滥)。**只对现行降级路径调用**, 因此健康配置的
         输出逐字节不变。
         """
-        left, _seams_l = self._rail_events(i, 1)
-        right, _seams_r = self._rail_events(i, 2)
-        if not left or len(left) != len(right):
+        layout = self._crossing_layout(i)
+        if layout is None:
             return None
-        groups = self._crossing_groups(i, left, right)
-        if groups is None:
-            return None
-
-        passes: list[tuple[tuple[dict, dict], tuple[dict, dict]]] = []
-        for members, _raw in groups:
-            for cluster in self._branch_clusters(i, members):
-                corners = self._cluster_pass_records(cluster)
-                if corners is None:
-                    return None
-                passes.append(corners)
-        if not passes:
-            return None
-        passes.sort(key=lambda corners: min(record["arc"] for pair in corners for record in pair))
-
-        cuts: list[tuple[tuple[dict, dict], tuple[dict, dict]]] = []
+        chains, passes = layout
         flag = self.paths_flag[i]
-        for corners in passes:
-            if flag:
-                cuts.append(corners)
-            flag = not flag
+        cuts = [corners for index, corners in enumerate(passes) if (index % 2 == 0) == bool(flag)]
         if not cuts:
             return None
 
@@ -1990,34 +2026,23 @@ class Interlacing:
             return seen[key]
 
         graph = networkx.Graph()
-        chains: dict[int, list[int]] = {}
-        positions: dict[int, dict[int, int]] = {}
-        for track, rail, records in ((1, self.paths_l[i], left), (2, self.paths_r[i], right)):
-            num_seg = len(rail) - 1
-            by_seg: dict[int, list[dict]] = defaultdict(list)
-            for record in records:
-                by_seg[record["seg"]].append(record)
-            chain: list[int] = []
-            position: dict[int, int] = {}
-            for j in range(num_seg):
-                chain.append(node((track, "v", j), rail[j]))
-                for record in by_seg.get(j, []):
-                    position[id(record)] = len(chain)
-                    chain.append(node((track, "e", id(record)), record["point"]))
-            if not self.paths_closed[i]:
-                chain.append(node((track, "v", num_seg), rail[num_seg]))
-            for first, second in zip(chain, chain[1:]):
+        order: dict[int, dict] = {}
+        for track in (1, 2):
+            ids = [node(key, point) for key, point in chains[track]]
+            order[track] = {key: index for index, (key, _point) in enumerate(chains[track])}
+            for first, second in zip(ids, ids[1:]):
                 graph.add_edge(first, second)
             if self.paths_closed[i]:
-                graph.add_edge(chain[-1], node((track, "v", 0), rail[0]))
-            chains[track] = chain
-            positions[track] = position
+                rail = self.paths_l[i] if track == 1 else self.paths_r[i]
+                graph.add_edge(ids[-1], node((track, "v", 0), rail[0]))
+            chains[track] = ids
 
         for left_pair, right_pair in cuts:
             for track, pair in ((1, left_pair), (2, right_pair)):
                 chain = chains[track]
-                position = positions[track]
-                start, end = position[id(pair[0])], position[id(pair[1])]
+                position = order[track]
+                start = position[(track, "e", id(pair[0]))]
+                end = position[(track, "e", id(pair[1]))]
                 if start > end:
                     start, end = end, start
                 if end - start > len(chain) // 2:
@@ -2048,10 +2073,21 @@ class Interlacing:
                 # 退化片段(顶点不足 / 面积为零): 说明这次切分没对上, **整体放弃**保持降级。
                 # 这是"宁缺勿滥"的运行期兜底 —— 实测 PR n=6 L=3 会切出退化的零面积片段,
                 # 画面 A/C/D/E 全亮(证据见 PROGRESS §3 P0-5)。
+                logger.debug(
+                    "Interlacing: 路径 %d 按交叉切分得到退化片段(顶点 %d, 面积 %.3g), 放弃。",
+                    i,
+                    len(coords),
+                    abs(_signed_area(coords)),
+                )
                 return None
             cycles.append(coords)
         if len(cycles) != len(cuts):
-            # 片段数与"该切几刀"不符, 同样视为没对上
+            logger.debug(
+                "Interlacing: 路径 %d 按交叉切分得到 %d 条片段, 与切刀数 %d 不符, 放弃。",
+                i,
+                len(cycles),
+                len(cuts),
+            )
             return None
         return cycles or None
 
