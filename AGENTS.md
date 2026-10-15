@@ -27,7 +27,7 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| `manim_lace/interlacing.py` | `Interlacing` 求解器与 `clear_paths` / `merge_paths` / `generate_offset_lines` / `vectorized_intersection` / `right_handed` / `longest_chain` / `is_cycle` / `is_open_walk` |
+| `manim_lace/interlacing.py` | `Interlacing` 求解器与 `clear_paths` / `merge_paths` / `generate_offset_lines` / `vectorized_intersection` / `right_handed` / `longest_chain` / `is_cycle` / `is_open_walk`。自交枚举的相邻段判据见 `_centerline_crossings`(闭合路径跳过首末段这一对, 缺陷 11), "按交叉身份"切分的片段有效性见 `_is_valid_fragment` |
 | `manim_lace/lace.py` | `Lace`(继承 `VGroup`)与 `mobject_paths`(曲线折线化, `CURVE_SAMPLES`)、`to_3d`、`HOLE_GROUP_METHODS`、`RIBBON_GROUP_METHODS`(丝带分组配色) |
 | `manim_lace/stroke.py` | **第二条通道**(`Lace(render="stroke")`): `StrokeWeave` / `centerline_crossings` —— 中心线交叉(路径间 + 自交, 相邻线段不算)、交替二着色(`flags` / `upper_path`)、断口 `offset / |sinθ|`、按弧长切片与片段顺序。纯几何, 不 import manim; 必须**不透明**, 见 `PROGRESS.md` §3 P0-6 |
 | `manim_lace/rosette.py` | **可选模块**: `StarRosette`(继承 `Polygram`)与 `cal_kernels` / `get_petals_by_kernel` / `sort_petals` / `merge_adjacent_petals` / `transform_reps`。只依赖 `numpy` + `manim`, 与核心零耦合, 由 `__init__.py` 惰性转发 |
@@ -70,11 +70,13 @@ uv run python tools/matrix_digest.py media/_review/digest.txt          # 全矩�
 uv run python tools/defect_report.py                                   # 缺陷对照报告 + 网页
 ```
 
-预览图输出到 `media/` 下的子目录, 该目录已被 `.gitignore` 忽略。两个预览脚本的产物都能用
-浏览器直接打开: `media/rosette_gallery/index.html` 是可按键筛选(花型 / N / 等级)的浏览页,
-模板在 `examples/gallery_page.html`; `media/defect_report/index.html` 是**缺陷对照报告** ——
-每条缺陷的"修复前 / 修复后"渲染图 + 症状 / 根因 / 修法 / 修复到什么程度,
-"修复前"用 `git archive` 取出的历史源码树(`v020` / `prestep3` / `head`)渲染, 基线是实测挑的。
+预览图输出到 `media/` 下的子目录, 该目录已被 `.gitignore` 忽略。里面的渲染产物(玫瑰线大全、缺陷对照报告、
+类一~类五测试矩阵画廊、验收图)与探针脚本都是**为仓库目标服务的中间产物**, 目标达成前不入库 ——
+只有仓库现状报告 `docs/index.html` 入库。这些页面都能用浏览器直接打开:
+`media/rosette_gallery/index.html` 是可按键筛选(花型 / N / 等级)的浏览页(模板 `examples/gallery_page.html`);
+`media/defect_report/index.html` 是**缺陷对照报告** —— 每条缺陷的"修复前 / 修复后"渲染图 + 症状 / 根因 /
+修法 / 修复到什么程度("修复前"用 `git archive` 取出的历史源码树 `v020` / `prestep3` / `head` 渲染,
+基线是实测挑的)。
 
 ## 约定
 
@@ -115,10 +117,12 @@ uv run python tools/defect_report.py                                   # 缺陷�
 manim_lace/          # 包源码
 tools/               # 入库的验证工具: ab_render.py(A/B 逐字节底线)、matrix_digest.py(全矩阵指纹)、
                      #   defect_report.py(缺陷对照报告 + 网页)
-tests/               # pytest 测试套件(含 helpers.py)
+tests/               # pytest 测试套件(含 helpers.py 构造器、weave_checks.py 可见性模型)
+                     #   cases.py + test_cases.py: 类二~类四测试矩阵的固化回归(合格 / 诚实降级 / 已知短板)
 examples/            # 可运行的渲染示例与预览工具, 不参与打包
                      #   rosette_gallery.py + gallery_page.html(图形大全与浏览页模板)
                      #   rosette_levels.py(相邻阶叠加对比)
 images/              # README 展示图
+docs/                # 仓库现状报告 index.html(唯一的入库产物; 渲染产物与探针脚本仍未入库, 在 media/)
 .github/workflows/   # CI
 ```

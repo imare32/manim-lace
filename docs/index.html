@@ -1,0 +1,295 @@
+<script>/* 报告里的图片来自 media/(不入库): 缺失时自动隐藏, 避免破图。 */addEventListener("error",function(e){var t=e.target;if(t&&t.tagName==="IMG"){var b=t.closest("figure,.card");(b||t).style.display="none";}},true);</script><!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>manim-lace 现状报告 · 2026-10-15</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1b2430; --dim:#5c6b7a; --line:#e3e8ee;
+    --teal:#0f766e; --indigo:#3730a3; --amber:#b45309; --red:#b91c1c; --green:#15803d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;
+       line-height:1.65;font-size:15px}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 22px 72px}
+  header{background:linear-gradient(135deg,#0f766e 0%,#1e3a8a 100%);color:#fff;
+         padding:38px 0 30px;margin-bottom:26px}
+  header .wrap{padding-bottom:0}
+  h1{margin:0 0 6px;font-size:29px;letter-spacing:.5px}
+  .sub{opacity:.9;font-size:14px}
+  .badges{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px}
+  .badge{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.3);
+         border-radius:999px;padding:3px 12px;font-size:12.5px}
+  .badge.ok{background:rgba(255,255,255,.9);color:var(--teal);border-color:transparent;font-weight:600}
+  .badge.warn{background:rgba(255,236,200,.92);color:var(--amber);border-color:transparent;font-weight:600}
+  h2{font-size:20px;margin:38px 0 14px;padding-left:11px;border-left:4px solid var(--teal)}
+  h3{font-size:16px;margin:22px 0 8px;color:var(--indigo)}
+  p{margin:8px 0}
+  .muted{color:var(--dim);font-size:13.5px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:14px;margin:18px 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 16px 13px;
+        box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .card .n{font-size:26px;font-weight:700;color:var(--teal);line-height:1.2}
+  .card .n.indigo{color:var(--indigo)}
+  .card .n.amber{color:var(--amber)}
+  .card .l{font-size:12.5px;color:var(--dim);margin-top:3px}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
+        border-radius:12px;overflow:hidden;font-size:14px}
+  th{background:#eef2f6;text-align:left;padding:10px 12px;font-weight:600;font-size:13px;color:#374151}
+  td{padding:9px 12px;border-top:1px solid var(--line);vertical-align:top}
+  tr:hover td{background:#fafbfc}
+  code{background:#eef2f6;border-radius:4px;padding:1px 5px;font-size:12.8px;
+       font-family:Consolas,"Cascadia Mono",monospace}
+  pre{background:#111827;color:#e5e7eb;border-radius:10px;padding:14px 16px;overflow:auto;
+      font-size:12.8px;line-height:1.6}
+  .tag{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;font-weight:600;white-space:nowrap}
+  .t-ok{background:#dcfce7;color:var(--green)}
+  .t-part{background:#fef3c7;color:var(--amber)}
+  .t-no{background:#fee2e2;color:var(--red)}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+  figure{margin:0;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  figure img{width:100%;display:block;background:#0b0f14}
+  figcaption{padding:9px 12px;font-size:12.5px;color:var(--dim);border-top:1px solid var(--line)}
+  .pill{display:inline-block;background:#eef2f6;border-radius:999px;padding:2px 10px;font-size:12.5px;
+        color:var(--dim);margin:2px 4px 2px 0}
+  a{color:var(--indigo)}
+  nav.toc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin:0 0 6px}
+  nav.toc a{margin-right:16px;font-size:13.5px;text-decoration:none}
+  nav.toc a:hover{text-decoration:underline}
+  .timeline{border-left:2px solid var(--line);margin-left:8px;padding-left:18px}
+  .timeline .it{margin:0 0 14px;position:relative}
+  .timeline .it::before{content:"";position:absolute;left:-25px;top:6px;width:9px;height:9px;
+        border-radius:50%;background:var(--teal)}
+  .timeline .it .w{font-size:12.5px;color:var(--dim)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media (max-width:760px){.two{grid-template-columns:1fr}}
+  footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>manim-lace 现状报告</h1>
+    <div class="sub">一个基于 Manim 的"丝带编织交错 + 星形玫瑰"Python 库 · 快照 2026-10-15 · 版本 0.3.0 · 分支 <code style="background:rgba(255,255,255,.18);color:#fff">master</code> HEAD <code style="background:rgba(255,255,255,.18);color:#fff">d02c417</code></div>
+    <div class="badges">
+      <span class="badge ok">627 tests passed（实测）</span>
+      <span class="badge ok">ruff check / format 全绿</span>
+      <span class="badge ok">A/B 4 场景逐字节一致</span>
+      <span class="badge">缺陷 1~11 已修</span>
+      <span class="badge warn">缺陷 3 / 10 的几何退化族：诚实降级</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<nav class="toc">
+  <strong style="font-size:13px;color:var(--dim)">跳转：</strong>
+  <a href="#verdict">结论</a>
+  <a href="#milestones">里程碑</a>
+  <a href="#channels">两条通道</a>
+  <a href="#defects">缺陷台账</a>
+  <a href="#bottom">回归底线</a>
+  <a href="#evidence">效果证据</a>
+  <a href="#left">仍未完成</a>
+  <a href="#rejected">已否决</a>
+  <a href="#scale">规模</a>
+</nav>
+
+<h2 id="verdict">一句话结论</h2>
+<div class="box">
+  <p><strong>已经从"能画出交错图案的原型"走到了"有回归底线、有缺陷台账、有两条互补编织通道、退化输入会诚实降级而不是静默画错"的可用库。</strong>
+  直线 / 多边形 / 网格 / 玫瑰线这一类输入都能稳定产出正确的上下穿插；真正剩下的问题集中在<strong>几何本身退化</strong>的一族
+  （拐点处切触、miter 截断、交叉比丝带还密的图案）——这类配置现在<strong>不崩、不空白、不画错</strong>，而是整条路径降级为不编织的丝带并给出汇总告警。</p>
+  <p class="muted">数字口径：测试数与 ruff 为本机 <code>2026-10-15</code> 实测；A/B、指纹、缺陷状态取自仓库文档与 <code>tools/</code> 脚本的既有记录。</p>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="n">627</div><div class="l">pytest 通过（0 失败）</div></div>
+  <div class="card"><div class="n">11 / 11</div><div class="l">缺陷已修（缺陷 3 部分修复）</div></div>
+  <div class="card"><div class="n">4 / 4</div><div class="l">A/B 展示场景 png 逐字节一致</div></div>
+  <div class="card"><div class="n indigo">1166</div><div class="l">全矩阵指纹覆盖的配置行数</div></div>
+  <div class="card"><div class="n indigo">535 / 631</div><div class="l">其中健康 / 降级或有 issues</div></div>
+  <div class="card"><div class="n amber">2</div><div class="l">并存的编织通道（ribbon / stroke）</div></div>
+</div>
+
+<h2 id="milestones">里程碑时间线（按提交点）</h2>
+<div class="box">
+<div class="timeline">
+  <div class="it"><div class="w">7ede551 · tag <code>pre-step3</code></div><strong>v0.3.0 重构 + 缺陷 1/2 修复</strong>：环形丝带（<code>annulus_polygon</code>）、闭合点绕回共线清理，<code>Lace(Circle)</code> 从"全空白"到 <code>1 hole / 1 ribbon</code>。</div>
+  <div class="it"><div class="w">5dc2df2</div><strong>缺陷 1~8 修复 + 曲线输入保真 + 玫瑰线降级为可选模块</strong>：<code>mobject_paths()</code>（贝塞尔重采样）替掉"控制点当折线"；容差全面改为尺度无关（比 <code>sinθ</code>）。</div>
+  <div class="it"><div class="w">ea1fea3 / f5bbffd</div><strong>工程化收尾</strong>：A/B 底线、全矩阵指纹、缺陷对照报告三件工具入库；CI 收敛为单版本。</div>
+  <div class="it"><div class="w">e639831</div><strong>缺陷 9 / 10 修复 + 环形丝带描边收尾</strong>：按事件重归属 + 引用校验回滚；端点容差尺度无关 + <code>_has_joint_crossing</code> 结构判据；环带拆双 subpath，狭缝细线消失。</div>
+  <div class="it"><div class="w">53a9593 / 59fcfa8</div><strong>按"交叉身份"切分</strong>：让密采样自交曲线（利萨如）真正织起来 —— <code>r=7</code> 且 C/D/E/F 全过；布局抽成 <code>_crossing_layout</code> 供丝带片段与孔洞共用。</div>
+  <div class="it"><div class="w">6b4d73e / d02c417</div><strong>第二条编织通道 <code>Lace(render="stroke")</code></strong>：中心线 + <code>stroke_width</code> + 绘制顺序，绕开"区域切分"的全部难点；端到端像素验收通过。</div>
+  <div class="it"><div class="w">本轮（待提交）</div><strong>缺陷 11：闭合路径起始顶点上的"幻影自交"</strong>：自交枚举的相邻段判据写反 → 每条闭合路径在起始顶点多一个假交叉。它此前在"按交叉身份"的分组里是个<strong>空组</strong>，使该通道对需要它的配置<strong>一次都没生效过</strong>，还造成了 <code>CR n=10 L3</code> 的假"歧义"（修复后记录命中锚点数分布 <code>{1: 160}</code>）；配套 <code>_is_valid_fragment()</code>（片段的 A 级有效性）接住原先靠幻影"意外实现"的诚实降级 —— <strong>全矩阵指纹 1166 行逐字节不变</strong>。同一轮把<strong>类二/类三/类四测试矩阵固化成 <code>tests/</code> 回归</strong>（<code>tests/cases.py</code> + <code>tests/test_cases.py</code>，36 个配置钉成合格 / 诚实降级 / 已知短板三类）。</div>
+</div>
+</div>
+
+<h2 id="channels">核心架构：两条互补的编织通道</h2>
+<div class="two">
+  <div class="box">
+    <h3 style="margin-top:0">① <code>render="ribbon"</code>（默认，区域切分）</h3>
+    <p>丝带是一个<strong>多边形区域</strong>：偏移线求交 → miter 接头 → 配对 → 挖区间 → 显式构造孔洞（<code>_set_holes</code>）。</p>
+    <p><span class="pill">几何在 <code>interlacing.py</code></span><span class="pill">有孔洞 / 支持 3D</span><span class="pill">A/B 底线适用</span><span class="pill">可半透明</span></p>
+    <p class="muted">代价：难点全在"一次交叉的四个角点"—— 拐点/切触退化时需要表示层改造（未完成）。</p>
+  </div>
+  <div class="box">
+    <h3 style="margin-top:0">② <code>render="stroke"</code>（新，中心线 + 描边）</h3>
+    <p>丝带 = <strong>中心线 + <code>stroke_width</code></strong>：事件取中心线交叉弧长，断口 = <code>offset / |sinθ|</code>，孔洞<strong>不需要构造</strong>（没被盖住的就是背景）。</p>
+    <p><span class="pill">几何在 <code>stroke.py</code></span><span class="pill">无孔洞 / 无 3D</span><span class="pill">必须不透明</span><span class="pill">A/B 不适用（并存通道）</span></p>
+    <p class="muted">代价：浅角交叉残留 <code>offset²·cotθ</code> 三角、交替无解时退化为整条描边。</p>
+  </div>
+</div>
+<p class="muted">两条通道的公共输入通道是 <code>mobject_paths()</code>（按三次贝塞尔采样，<code>CURVE_SAMPLES = 8</code>）；纯直线/多边形输入几何逐字节不变。</p>
+
+<h2 id="defects">缺陷台账（<code>DEFECTS.md</code>）</h2>
+<table>
+  <thead><tr><th style="width:74px">编号</th><th>症状</th><th style="width:92px">状态</th><th style="width:34%">修法要点</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>无自交闭合路径渲染成实心团块（孔洞被盖死）</td><td><span class="tag t-ok">已修</span></td><td><code>annulus_polygon()</code> + <code>_is_simple_closed()</code>；描边收尾用 Polygram 双 subpath</td></tr>
+    <tr><td>2</td><td><code>Lace(Circle)</code> 输出完全空白</td><td><span class="tag t-ok">已修</span></td><td><code>_clear_closed_collinear()</code>：闭合点的"绕回共线"</td></tr>
+    <tr><td>3</td><td>PR/CR 高阶及部分小 n 低阶编织错乱（84 组损坏）</td><td><span class="tag t-part">部分修复</span></td><td>类型 A（逐段归属错位）已修：<code>_normalize_rail_attribution</code>；密采样自交分支已修（按交叉身份切分）</td></tr>
+    <tr><td>4</td><td>闭合曲线组合的上下压相位不自洽（两圆不编织）</td><td><span class="tag t-ok">已修</span></td><td><code>_fix_path_flags()</code> BFS 二着色 + <code>_rail_events</code> 接缝切分</td></tr>
+    <tr><td>5</td><td>点数密的曲线被静默删点 / 删空</td><td><span class="tag t-ok">已修</span></td><td><code>_is_non_collinear</code> 改比 <code>sinθ</code>（尺度无关）</td></tr>
+    <tr><td>6</td><td>自交事件重归属时 <code>KeyError</code> 崩掉整幅图</td><td><span class="tag t-ok">已修</span></td><td><code>_reservation_is_consistent()</code> 预演护栏，不自洽则降级</td></tr>
+    <tr><td>7</td><td>校验器 C/D/G 系统性误报（影响修复方向）</td><td><span class="tag t-ok">已修</span></td><td>C/D 探针含交点本身且距离随夹角自适应；G 改为可见图层光栅</td></tr>
+    <tr><td>8</td><td>稠密折线输入角点事件丢失 → 输出空白且无告警</td><td><span class="tag t-ok">已修</span></td><td>平行判据 <code>PARALLEL_SIN_ATOL</code> + <code>_fill_rail_corners()</code></td></tr>
+    <tr><td>9</td><td>重归属留下"查不到坐标的引用"→ 求解崩溃（7 组玫瑰线）</td><td><span class="tag t-ok">已修</span></td><td><code>_commit_rail_reattribution()</code> 按事件改写另一端 + 校验回滚</td></tr>
+    <tr><td>10</td><td>落在端点的交点被固定参数容差丢掉（CR/PR/PO 一族"缺镜像事件"的真因）</td><td><span class="tag t-ok">已修</span></td><td>端点容差改 <code>DEFAULT_ATOL / |d|</code> + 必须配套 <code>_has_joint_crossing()</code> 结构化降级判据</td></tr>
+    <tr><td>11</td><td>闭合路径起始顶点上的"幻影自交"（隐蔽：让按交叉身份的切分永不生效 + 制造假歧义）</td><td><span class="tag t-ok">已修</span></td><td><code>_centerline_crossings</code> 的相邻段跳过判据取反（闭合跳过首末段；开放路径保留） + 配套 <code>_is_valid_fragment()</code> A 级有效性兜底</td></tr>
+    <tr><td>附</td><td>曲线输入保真 / 输入退化检查 / 派生几何自检 + 降级</td><td><span class="tag t-ok">已修</span></td><td><code>mobject_paths()</code>、<code>validate_paths()</code>（ignore/warn/raise）、<code>_check_rail_geometry()</code></td></tr>
+  </tbody>
+</table>
+<p class="muted">判定口径：按"画家顺序可见性模型"验证 6 项性质 ——
+A 多边形有效 / C 每个交点恰好一方压上 / D 过欠严格交替 / E 中心线无重叠无破洞 / F 孔洞可见 / G 旋转对称（<code>tests/weave_checks.py</code>）。
+已知正确配置：<code>PA n=12 L2</code>、<code>CA n=9 L1</code>、<code>PA n=8 L4</code>、<code>PA n=10 L3</code>、<code>CA n=12 L4</code>、两圆相交、3×3/4×4/5×5 编织网格 → 0 问题。</p>
+
+<h2 id="bottom">回归底线：三件入库工具</h2>
+<div class="cards">
+  <div class="card"><div class="n">4/4</div><div class="l"><code>tools/ab_render.py</code><br>示例前 4 场景 png md5 逐字节一致</div></div>
+  <div class="card"><div class="n indigo">0 行</div><div class="l"><code>tools/matrix_digest.py</code><br>健康配置（535 行）指纹零变化</div></div>
+  <div class="card"><div class="n">125</div><div class="l"><code>tools/defect_report.py</code><br>缺陷"修复前/后"渲染对照（69 png）</div></div>
+</div>
+<p>任何核心改动都必须同时过这三条：<strong>示例场景逐字节不变</strong> + <strong>全矩阵指纹只动"本来就降级"的那些行</strong> + <strong>pytest / ruff 全绿</strong>，并记入 <code>CHANGELOG.md</code>。缺陷 9 的验证就是靠指纹量出"崩溃 8 行 → 0 行、其余 1149 行逐字节不变"。</p>
+<pre>uv run pytest -q
+uv run ruff check . &amp;&amp; uv run ruff format --check .
+uv run python tools/ab_render.py --root media/_review/head_tree --out media/_review/ab_old
+uv run python tools/ab_render.py --root .                       --out media/_review/ab_new
+uv run python tools/matrix_digest.py media/_review/digest.txt
+uv run python tools/defect_report.py</pre>
+
+<h2 id="evidence">效果证据（"修复前 / 修复后"）</h2>
+<div class="grid2">
+  <figure><img src="../media/defect_report/img/d1-square__before.png" alt="缺陷1 修复前"><figcaption><strong>缺陷 1 修复前</strong>：无自交闭合路径 = 实心团块，孔洞被内侧圆盘盖死</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d1-square__after.png" alt="缺陷1 修复后"><figcaption><strong>缺陷 1 修复后</strong>：环形丝带，孔洞可见，描边下再无狭缝细线</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d2-circle__before.png" alt="缺陷2 修复前"><figcaption><strong>缺陷 2 修复前</strong>：<code>Lace(Circle)</code> 完全空白（<code>0 holes / 0 ribbons</code>）</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d2-circle__after.png" alt="缺陷2 修复后"><figcaption><strong>缺陷 2 修复后</strong>：<code>1 hole / 1 ribbon</code>，闭合点绕回共线已清理</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d5-dense-curve__before.png" alt="缺陷5 修复前"><figcaption><strong>缺陷 5/8 修复前</strong>：采样一密的曲线被误判共线 → 删空 / 输出空白</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d5-dense-curve__after.png" alt="缺陷5 修复后"><figcaption><strong>缺陷 5/8 修复后</strong>：容差尺度无关，稠密曲线保真（默认这条密采样配置仍"诚实降级"）</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d10-cr10l3__before.png" alt="缺陷10 修复前"><figcaption><strong>缺陷 10 修复前</strong>：CR n=10 L3 的"缺镜像事件" → 编织错乱</figcaption></figure>
+  <figure><img src="../media/defect_report/img/d10-cr10l3__after.png" alt="缺陷10 修复后"><figcaption><strong>缺陷 10 修复后</strong>：端点容差 + 拐点交叉判据 → 该族配置转为诚实降级（不再静默画错）</figcaption></figure>
+  <figure><img src="../media/stroke_check/images/acceptance_x_lines.png" alt="stroke X形"><figcaption><strong>第二条通道 · X 形两线</strong>：端到端像素验收 6/6</figcaption></figure>
+  <figure><img src="../media/stroke_check/images/acceptance_two_rings.png" alt="stroke 两圆"><figcaption><strong>第二条通道 · 两圆相交</strong>：端到端像素验收 11/11</figcaption></figure>
+</div>
+<p class="muted">更多可浏览页（本地相对路径，需要 <code>media/</code> 存在；这些页面都还没入库）：
+<a href="../media/defect_report/index.html">缺陷对照报告</a> ·
+<a href="../media/rosette_gallery/index.html">玫瑰线图形大全（566 张，可按花型/N/等级筛选）</a> ·
+<a href="../media/lace_tests/rosette/index.html">类一 玫瑰线</a> ·
+<a href="../media/lace_tests/closed/index.html">类二 闭合</a> ·
+<a href="../media/lace_tests/mixed/index.html">类三 闭合+开放</a> ·
+<a href="../media/lace_tests/open/index.html">类四 开放+开放</a> ·
+<a href="../media/lace_tests/tiling/index.html">类五 平铺</a> ·
+<a href="../media/lace_tests/kaplan/index.html">类五 Kaplan 变体</a></p>
+<p class="muted">其中<strong>类二 / 类三 / 类四</strong>的 36 个候选已不再只活在渲染画廊里：门禁口径（不降级 + 无
+告警 + 可见性 A/C/D/E/F 全过）连同 <code>(孔洞数, 丝带片段数)</code> 指标一起固化成了
+<code>tests/cases.py</code> + <code>tests/test_cases.py</code> —— 每个配置被钉成<strong>合格（15）</strong> /
+<strong>诚实降级（11）</strong> / <strong>已知短板（10）</strong>三类，另有一条"分类完整性"断言确保
+没有配置"既不画对也不吭声"。</p>
+
+<h2 id="left">仍未完成（<code>PROGRESS.md</code> §3）</h2>
+<h3>P0 —— 决定"降级机制能否退役"</h3>
+<table>
+  <thead><tr><th style="width:56px">编号</th><th>内容</th><th style="width:36%">当前判断</th></tr></thead>
+  <tbody>
+    <tr><td>P0-0</td><td>平铺（与 CR/PR 同源）的"缺镜像事件"</td><td>与 P0-1 的接头/表示层是同一件事；稳健格距 1.75~1.85R 可用，2.00R 相切档降级</td></tr>
+    <tr><td>P0-1</td><td>接头拓扑（miter + <code>MITER_LIMIT=5.0</code>）</td><td>已收窄到<strong>几何本身退化</strong>（拐点重合 / 切触 / 截断）；只对 PO 家族直接有效，现在一律诚实降级</td></tr>
+    <tr><td>P0-2</td><td>残差收敛：<code>CA n=9 L5</code> D3+E1 等</td><td>量级 ≈0.05% 采样点，优先级低</td></tr>
+    <tr><td>P0-3</td><td>浅角 / 近平行交叉（θ ≲ 42°）没有自动检查</td><td>需要尺度无关判据（比较"两侧可见片段是否同一片"）</td></tr>
+    <tr><td>P0-4</td><td><code>merge_paths</code> 会改写开放路径起点/方向</td><td>几何不变，影响 <code>by_path</code> 分组与 D 的遍历方向</td></tr>
+    <tr><td>P0-5</td><td>表示层改造：把"一次交叉的四个角点"当整体事件</td><td>阶段 0/1 已完成（只读结构 + 按交叉身份切分已接线，密采样利萨如 <code>r=7</code> 且 C/D/E/F 全过）；<strong>缺陷 11 定案后口径更正</strong>：该通道此前因"幻影锚点"造成的空组而<strong>一次都没生效</strong>，修掉后 <code>CR n=10 L3</code> 等 28 组真的会走它、但切出的片段通不过 A 级有效性（已由显式判据挡回诚实降级）；剩下的仍是这里的表示层改造</td></tr>
+    <tr><td>P0-6</td><td>第二条通道（中心线 + stroke）</td><td>✅ 已接入（<code>Lace(render="stroke")</code> + 18 个测试）；后续：自适应采样、护栏</td></tr>
+  </tbody>
+</table>
+<h3>P1（覆盖与简化）/ P2（工程）</h3>
+<p>
+<span class="pill">P1-5 类五变体 B 扩展（≥3 圈 / 其它正多边形 / Kaplan 第 3 步）</span>
+<span class="pill">P1-6 共线重合按"双股带"处理（96 组）</span>
+<span class="pill">P1-7 类二/三/四矩阵已固化成 tests 回归（<code>tests/cases.py</code> + <code>test_cases.py</code>）；类五（平铺/Kaplan）待搬</span>
+<span class="pill">P1-8 结构性限制：奇环无解（三圆链等）需"非交替织法"</span>
+<span class="pill">P1-9 星形多边形自交处的织法重测</span>
+<span class="pill">P1-10 玫瑰线"物理搬走"</span>
+<span class="pill">P2-11 check_picture 空间索引（检查比求解慢 60~100 倍）</span>
+<span class="pill">P2-12 其余验收脚本入库</span>
+<span class="pill">P2-13 images/ 4 张展示图是否替换</span>
+<span class="pill">P2-14 README 补 ribbon_swatch 用法</span>
+</p>
+
+<h2 id="rejected">已否决的做法（<code>PROGRESS.md</code> §4，共 26 条，精选）</h2>
+<table>
+  <thead><tr><th style="width:34%">尝试</th><th>结论与数据</th></tr></thead>
+  <tbody>
+    <tr><td>缩小丝带宽度解决缺陷 3</td><td><span class="tag t-no">无效</span> 扫 4%→0.05% 仍 16/40 不等；miter 接头随 offset 等比缩放，尺度不变</td></tr>
+    <tr><td>只修缺陷 10 的端点容差、不加退化判据</td><td><span class="tag t-no">静默画错</span> 补登记后 52/52 组配置违反 C/D/E/F</td></tr>
+    <tr><td>按"对应中心线段是否相交"剔除单侧事件</td><td><span class="tag t-no">画面错</span> 契约恢复（坏段 16→0）但真交叉变成"双带同绘"</td></tr>
+    <tr><td>按线段整体替换标识（缺陷 9 快速修法）</td><td><span class="tag t-no">反向弄坏</span> 把原本正常的 <code>CA n=9 L4</code> 打成"降级 + 36 处悬挂引用"</td></tr>
+    <tr><td>放开重归属护栏让平滑利萨如"织起来"</td><td><span class="tag t-no">静默画错</span> 不再降级但 C×8 / D / E（677/6115 采样点重叠）</td></tr>
+    <tr><td>用固定距离探针（±1.5×offset）判压上/被压</td><td><span class="tag t-no">系统性假阳性</span> θ ≲ 42° 时窗口落进压上方带子，改为随夹角自适应</td></tr>
+  </tbody>
+</table>
+<p class="muted">文档里还固化了一句方法论：动手改算法前先确认"这个红灯是真缺陷，还是<strong>校验器的口径问题</strong>"——某一轮 6 个红灯里 5 个是校验器假阳性。</p>
+
+<h2 id="scale">规模与技术栈</h2>
+<div class="two">
+  <table>
+    <thead><tr><th>部分</th><th style="width:90px">行数</th></tr></thead>
+    <tbody>
+      <tr><td><code>manim_lace/interlacing.py</code>（第一条通道 · 纯几何）</td><td>2215</td></tr>
+      <tr><td><code>manim_lace/lace.py</code>（渲染层）</td><td>650</td></tr>
+      <tr><td><code>manim_lace/stroke.py</code>（第二条通道 · 纯几何）</td><td>513</td></tr>
+      <tr><td><code>manim_lace/rosette.py</code>（可选模块）</td><td>367</td></tr>
+      <tr><td><code>manim_lace/swatches.py</code>（84 张日式配色）</td><td>110</td></tr>
+      <tr><td><strong>包合计</strong></td><td><strong>≈3923</strong></td></tr>
+      <tr><td>tests/（含 <code>weave_checks.py</code> 校验器）</td><td>3306</td></tr>
+      <tr><td>tools/（3 件入库工具）</td><td>1196</td></tr>
+      <tr><td>examples/</td><td>1172</td></tr>
+      <tr><td>文档（PROGRESS / DEFECTS / CHANGELOG / README）</td><td>1616</td></tr>
+    </tbody>
+  </table>
+  <div class="box">
+    <h3 style="margin-top:0">技术栈与工程约定</h3>
+    <p><span class="pill">Python ≥3.10（本机 3.11）</span><span class="pill">manim 0.22（0.3.0）</span><span class="pill">numpy / scipy / networkx</span><span class="pill">uv 管理依赖</span><span class="pill">pytest + ruff</span><span class="pill">GitHub Actions</span></p>
+    <ul style="margin:8px 0 0 18px;padding:0">
+      <li>核心（代码与测试）<strong>不得 import 玫瑰线</strong>；<code>rosette</code> 为可拆分的可选模块（PEP 562 惰性转发）。</li>
+      <li>任何容差必须<strong>尺度无关</strong>（比 <code>sinθ</code>，不比叉积绝对量）。</li>
+      <li>输出多边形统一逆时针、首尾点重复；空输入退化为空结果；非法参数抛 <code>ValueError</code>；几何不可实现显式报错，绝不产出 <code>inf</code>/<code>nan</code>。</li>
+      <li>不可编织时<strong>诚实降级</strong>（整条丝带 + 汇总 <code>UserWarning</code>），宁可不变好，不可静默画错。</li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  本报告由仓库内的 <code>PROGRESS.md</code> / <code>DEFECTS.md</code> / <code>CHANGELOG.md</code> / <code>AGENTS.md</code> 与
+  <code>media/</code> 下已渲染的验收产物汇总而成，未修改任何项目代码（测试数 627 为本次实测）。
+  报告位于 <code>docs/index.html</code>；渲染产物与探针脚本仍留在 <code>media/</code>（不入库），
+  报告里的图片与浏览页链接需要 <code>media/</code> 存在才能显示（缺失的图会自动隐藏）。
+  注：文档快照与测试数于 2026-10-15 对齐（<code>PROGRESS.md</code> 记 471 / 489 passed 的旧快照已刷新为 627；
+  本轮 = 缺陷 11 + 类二/类三/类四矩阵固化，改动已在工作区完成并跑完全部红线，尚未提交）。
+</footer>
+
+</div>
+</body>
+</html>
