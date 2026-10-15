@@ -101,6 +101,27 @@ instead of breaking the core import.
 - Manim has no even-odd fill, so the facade paints hole rings as its own layer
   (`Lace.holes`) with `hole_color`, and paints regions in `draw_index` order with a
   matching `z_index`; the geometry result is independent of both choices.
+- A section split leaves a *seam* across a strand: a chord where two regions of the same
+  strand abut, marked on the regions as `RibbonRegion.flush_edges`. The seams are the edges
+  lying on the real split chords (`_cut_lines`, from the arcs the sections were split at), not
+  edges guessed from sharing: on a self-crossing the under pass's notch lies exactly on the
+  over pass's outline, so those two kinds of edge cannot be told apart that way. A region with
+  seams is filled without an outline stroke and stroked through `Lace.outlines` as the open
+  runs *between* the seams instead, one mobject per run — stroking a seam would draw a line
+  across a strand that runs straight through it, and one mobject with several subpaths would
+  link the runs with exactly that line. The same group carries each seam restated in the fill
+  colour at `z_index = -0.5`, below every fill: two abutting polygons each paint only part of
+  the pixels on their shared edge, and without it the background shows through as a hairline
+  across the strand. Scenes must draw `Lace.outlines` together with `Lace.ribbons`.
+- A ring the Boolean backend hands out is cleaned of *folds* before anything uses it
+  (`_drop_folds`, applied in `_ring_points` so exteriors, holes and both backends get it). A
+  cut that only touches the boundary — the tip of a weave lens is the usual case — can make
+  the boundary run out along a line and come straight back. The fold encloses no area, so the
+  fill was always right, but the fold is part of the ring: stroking it drew a short whisker
+  poking into the neighbouring ribbon, which is what made the trefoil, the 2×2 circle grid and
+  the chain cards look blemished. A vertex is dropped only when the ring turns back into
+  itself *and* the triangle it spans carries no area (`_FOLD_AREA_TOLERANCE`), repeated until
+  none is left; a genuine corner, however thin, spans area and is never touched.
 
 ### Face ownership (`ribbon_backend='arrangement'`)
 
@@ -159,14 +180,15 @@ Two decisions are deliberately explicit instead of implicit (SPEC FR-032, FR-042
   A collinear overlap is an interval and a multiway node has more than two strands, so
   neither has a single binary over/under decision and both only accept `diagnose`/`ignore`.
 - **Conflict strategy** (`conflict_strategy`, engine and `solve_weave`). It only applies to
-  `alternating` mode and only when the parity system has no solution. `error` (default)
-  returns no assignment at all and reports the witnesses; `manual` seeds the propagation
-  from the user's over sides (which become hard constraints) and relaxes the automatic
-  constraints that contradict them; `relax` keeps the automatic solution and relaxes what
-  has to give. Both relaxing strategies mark every relaxed crossing with
-  `source='relaxed'` and report `TOPOLOGY-ALTERNATION-RELAXED`. A relaxed crossing takes a
-  deterministic side (`a` over, or the user's side when one was given); improving that
-  choice is a known follow-up, not a hidden behaviour.
+  `alternating` mode and only when the parity system has no solution. `relax` (default)
+  keeps the automatic solution and relaxes only what has to give, so the weave is as
+  alternating as the geometry allows; `error` returns no assignment at all and reports the
+  witnesses, for callers that must not accept an approximation; `manual` seeds the
+  propagation from the user's over sides (which become hard constraints) and relaxes the
+  automatic constraints that contradict them. All relaxing strategies mark every relaxed
+  crossing with `source='relaxed'` and report `TOPOLOGY-ALTERNATION-RELAXED`. A relaxed
+  crossing takes a deterministic side (`a` over, or the user's side when one was given);
+  improving that choice is a known follow-up, not a hidden behaviour.
 - **Conflict witnesses** are minimal on purpose: for a rejected parity constraint the
   witness is the shortest alternative path between its two paths — a cycle of crossing IDs —
   and for a self-crossing whose two passes share a parity it is that single crossing.

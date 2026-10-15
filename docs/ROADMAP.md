@@ -103,10 +103,12 @@ plan and aesthetic-policy work.
       the union of those witnesses instead of every crossing in the conflicting
       component.
 - [x] Make manual override precedence and strictness settings explicit: the FR-045
-      switch `conflict_strategy` (engine and `solve_weave`) selects `error` (default:
-      report the witnesses and return no assignment), `manual` (the user's over sides
-      become hard constraints and the automatic ones that contradict them are
-      relaxed) or `relax` (keep the automatic solution and relax what has to give).
+      switch `conflict_strategy` (engine and `solve_weave`) selects `relax` (default:
+      keep the automatic solution and relax only what has to give, so the default
+      weaves as far as the geometry allows), `error` (report the witnesses and return
+      no assignment, for callers that must not accept an approximation) or `manual`
+      (the user's over sides become hard constraints and the automatic ones that
+      contradict them are relaxed).
       Both relaxing strategies mark every relaxed crossing with `source='relaxed'`
       and report `TOPOLOGY-ALTERNATION-RELAXED`; manual sides stay authoritative as
       before (`TOPOLOGY-MANUAL-OVERRIDE`), and two contradicting manual sides on one

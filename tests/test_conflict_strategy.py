@@ -48,7 +48,9 @@ def unsat_diagnostic(topology):
 
 def test_error_strategy_reports_only_the_minimal_witness_set():
     crossings = odd_cycle_with_tail()
-    topology = solve_weave(crossings, ["a", "b", "c", "d"], mode="alternating")
+    topology = solve_weave(
+        crossings, ["a", "b", "c", "d"], mode="alternating", conflict_strategy="error"
+    )
     assert topology.assignments == {}
     diagnostic = unsat_diagnostic(topology)
     details = diagnostic.details
@@ -71,7 +73,7 @@ def test_self_crossing_conflict_is_its_own_witness():
         ),
         event("X0001", "a", "b", 0, 1, 3.0, 2.0),
     ]
-    topology = solve_weave(crossings, ["a", "b"], mode="alternating")
+    topology = solve_weave(crossings, ["a", "b"], mode="alternating", conflict_strategy="error")
     details = unsat_diagnostic(topology).details
     assert details["self_conflicts"] == ["X0000"]
     assert details["crossing_ids"] == ["X0000"]
@@ -163,6 +165,22 @@ def test_conflict_strategy_is_validated(strategy):
     solve_weave([], ["a"], mode="alternating", conflict_strategy=strategy)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         solve_weave([], ["a"], mode="alternating", conflict_strategy="guess")  # type: ignore[arg-type]
+
+
+def test_the_default_engine_strategy_relaxes_and_marks_instead_of_giving_up():
+    # Pins the contract that matters for the interactive path: the default must weave.
+    # Strict alternation that cannot hold is relaxed as little as possible and every
+    # exception is visible, so no caller ever gets an unweaveable empty assignment.
+    result = LaceEngine(bow_and_line(), offset=0.15, weave_mode="alternating").solve()
+    transverse = [c for c in result.crossings if c.kind == "transverse"]
+    assert transverse
+    assert set(result.topology.assignments) == {c.crossing_id for c in transverse}
+    sources = [a.source for a in result.topology.assignments.values()]
+    assert "relaxed" in sources
+    assert sources.count("relaxed") < len(sources)
+    codes = [d.code for d in result.diagnostics]
+    assert "TOPOLOGY-ALTERNATION-RELAXED" in codes
+    assert "TOPOLOGY-ALTERNATION-UNSAT" not in codes
 
 
 def test_engine_relax_keeps_every_crossing_assignable():

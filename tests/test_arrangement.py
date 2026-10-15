@@ -1,9 +1,10 @@
 """Face-based planar arrangement backend, compared against the Boolean one.
 
-The two region backends must agree wherever the assignment is unambiguous, and the
-arrangement must be the one that stays exact where the Boolean one cannot: overlapping
-sections for self-crossings and coincident crossings. These tests pin both the agreement
-and the differences down.
+The two region backends must agree wherever the assignment is unambiguous — including
+self-crossings, which the Boolean backend cuts on the under pass just like a cross-path
+crossing. They then part ways where the Boolean one runs out of room: it can still leave
+sections overlapping, and only the arrangement owns every face exactly once. These tests
+pin both the agreement and the differences down.
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from manim_lace.render.regions import render_region_geometry
 
 shapely = pytest.importorskip("shapely")
 
-from shapely.geometry import Point, Polygon  # noqa: E402
+from shapely.geometry import LineString, Point, Polygon  # noqa: E402
 
 
 def _circle(radius=1.0, samples=361):
@@ -75,11 +76,13 @@ def test_a_self_crossing_lens_equals_the_analytic_overlap():
     _, _, arrangement, boolean = _both([BOW], offset=offset)
     expected = 4.0 * offset * offset
     assert arrangement.removed_area == pytest.approx(expected, rel=1e-6)
-    # The Boolean backend cannot cut a band with itself, and says so through overlapping
-    # sections with no hidden area at all.
-    assert boolean.removed_area == 0.0
-    assert "REGION-OVERLAPPING-SECTIONS" in _codes(boolean)
-    assert arrangement.region_area_sum < boolean.region_area_sum
+    # The Boolean backend cuts the under pass of a self-crossing by the same local overlap
+    # of the two offset bands, so it hides exactly the same area.
+    assert boolean.removed_area == pytest.approx(expected, rel=1e-6)
+    assert boolean.painted_area == pytest.approx(arrangement.painted_area, rel=1e-9)
+    assert "REGION-AREA-MISMATCH" not in _codes(boolean)
+    assert boolean.region_area_sum == pytest.approx(boolean.painted_area, rel=1e-9)
+    assert arrangement.region_area_sum == pytest.approx(boolean.region_area_sum, rel=1e-9)
 
 
 def test_the_under_pass_of_a_self_crossing_does_not_own_the_lens():
@@ -108,6 +111,46 @@ def test_the_under_pass_of_a_self_crossing_does_not_own_the_lens():
         if Polygon(region.exterior.points).contains(Point(*crossing.point))
     ]
     assert all(region.path_id == crossing.path_a for region in lens_owner)
+
+
+def test_the_arrangement_marks_a_self_crossing_cut_as_a_seam():
+    # Every boundary of the arrangement is noded, so a section cut arrives here split into
+    # pieces by the other pass's outline. The marking still has to land on the cut line —
+    # the chord through the crossing that separates two sections of one strand — and must
+    # not land on the weave notch, which is offset from the crossing and is real boundary.
+    offset = 0.1
+    _, result, arrangement, _ = _both([FIGURE_EIGHT], offset=offset, weave_mode="free")
+    crossing = np.asarray(result.crossings[0].point, dtype=float)
+
+    def edges(region):
+        points = np.asarray(region.exterior.points, dtype=float)
+        count = len(points) - 1
+        for index in range(count):
+            yield index, points[index], points[(index + 1) % count]
+
+    def crossing_distance(start, end):
+        return LineString([start, end]).distance(Point(*crossing))
+
+    seams = [
+        (region, start, end)
+        for region in arrangement.regions
+        for index, start, end in edges(region)
+        if index in region.flush_edges
+    ]
+    assert seams
+    for region, start, end in seams:
+        assert 0.0 < float(np.hypot(*(end - start))) <= 2.0 * offset
+        assert crossing_distance(start, end) == pytest.approx(0.0, abs=1e-9)
+
+    notches = [
+        (region, index)
+        for region in arrangement.regions
+        for index, start, end in edges(region)
+        if index not in region.flush_edges
+        and 0.0 < float(np.hypot(*(end - start))) <= 2.0 * offset
+        and crossing_distance(start, end) > 1e-9
+    ]
+    assert notches, "the geometry must actually have notches for this to prove anything"
 
 
 def test_coincident_crossings_conserve_area_in_the_arrangement():
@@ -173,7 +216,7 @@ def test_the_engine_can_select_the_backend():
         LaceEngine(paths, render_mode="ribbon", ribbon_backend="quadtree")
 
 
-def test_a_dense_self_intersecting_curve_keeps_disjoint_regions():
+def test_a_dense_self_intersecting_curve_is_covered_exactly():
     theta = np.linspace(0.0, 2.0 * np.pi, 400)
     curve = np.column_stack((np.sin(3.0 * theta), np.sin(4.0 * theta)))
     # ``free`` mode: the alternating solution has no consistent answer for a dense
@@ -182,6 +225,10 @@ def test_a_dense_self_intersecting_curve_keeps_disjoint_regions():
     assert arrangement.painted_area == pytest.approx(arrangement.union_area, rel=1e-9)
     assert arrangement.region_area_sum == pytest.approx(arrangement.painted_area, rel=1e-9)
     assert arrangement.removed_area > 0
-    # The Boolean backend keeps the sections apart only by overlap, so its area sum is
-    # measurably larger than what is painted.
-    assert boolean.region_area_sum > 1.1 * boolean.painted_area
+    # The Boolean backend cuts every self-crossing too, so it covers its ribbon exactly;
+    # on a curve this dense its sections keep overlapping where no cut touched them, which
+    # is what the backend reports instead of hiding.
+    assert boolean.painted_area == pytest.approx(boolean.union_area, rel=1e-9)
+    assert boolean.removed_area > 0
+    assert boolean.region_area_sum > boolean.painted_area
+    assert "REGION-OVERLAPPING-SECTIONS" in _codes(boolean)

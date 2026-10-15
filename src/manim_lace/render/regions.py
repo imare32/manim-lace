@@ -9,7 +9,12 @@ The removed lens is precisely the footprint of the ribbon that is over, which is
 Each path's band is cut at the crossings it takes part in, so the two passes of a
 self-crossing become *sections* that can be over and under each other — a single band
 cannot be both. Sections meet exactly on the split line, so their union is the whole
-band again and no seam is introduced.
+band again; the split line itself is a straight chord across the strand with the same
+material on either side, and every such chord is marked as flush so a renderer does not
+stroke it as if the strand had been cut there (:func:`mark_flush_edges`). Marking is done
+from the cut chords themselves, not from pairs of shared edges: on a self-crossing the cut
+the under pass shows lies exactly on the other pass's outline, so a shared-edge rule cannot
+tell the weave from a seam.
 
 Regions are extracted with a validated Boolean engine (Shapely), as SPEC FR-054
 requires, instead of a cycle-basis polygon heuristic. Ring roles are reported
@@ -89,10 +94,136 @@ class RibbonRegion:
     holes: list[RegionRing] = field(default_factory=list)
     area: float = 0.0
     draw_index: int = 0
+    #: Indices of ``exterior.points`` whose edge to the next point is a seam of the section
+    #: split — a straight chord across the strand with the same material on both sides, not
+    #: an outline of the strand. Stroking it would draw a short tick across the ribbon
+    #: (SPEC FR-057). Filled in by :func:`mark_flush_edges` from the section cut chords; a
+    #: renderer should skip exactly those edges and stroke every other one.
+    flush_edges: tuple[int, ...] = ()
 
     @property
     def rings(self) -> list[RegionRing]:
         return [self.exterior, *self.holes]
+
+
+def _section_boundary_arcs(path: PolylinePath, group: list[_Strip]) -> list[float]:
+    """The arcs at which a sectioned path was divided, without its own ribbon ends.
+
+    An open path's two ends are boundaries of the ribbon itself, not seams of a split, so
+    they stay out: stroking them is what draws the cut end of the strand.
+    """
+    length = float(path.length)
+    if length <= 0.0:
+        return []
+    tolerance = 1e-9 * max(length, 1.0)
+    arcs: list[float] = []
+    for strip in group:
+        for arc in (strip.start_arc, strip.end_arc):
+            value = float(arc) % length if path.closed else float(arc)
+            if not path.closed and (value <= tolerance or value >= length - tolerance):
+                continue
+            if any(abs(value - kept) <= tolerance for kept in arcs):
+                continue
+            arcs.append(value)
+    return sorted(arcs)
+
+
+def _cut_lines(
+    paths: list[PolylinePath],
+    sections: dict[str, list[_Strip]],
+    *,
+    offset: float,
+) -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
+    """The cross-section chords where each path was divided into sections.
+
+    A section is a buffered sub-path, so both of its ends are flat caps: straight chords
+    through a split point, across the strand. Those chords — and only those — are the seams
+    of the split. The sides of a section are the strand's own outline and stay drawable even
+    where they happen to coincide with another pass's outline: that coincidence is exactly
+    the cut the under pass shows at a crossing.
+    """
+    by_id = {path.path_id: path for path in paths}
+    lines: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+    for path_id, group in sections.items():
+        path = by_id.get(path_id)
+        if path is None:
+            continue
+        length = float(path.length)
+        probe = 1e-9 * max(length, 1.0)
+        reach = 4.0 * offset
+        chords: list[tuple[np.ndarray, np.ndarray]] = []
+        for arc in _section_boundary_arcs(path, group):
+            point, _ = _arc_frame(path, arc)
+            # A split point can land on a path vertex, where the section before and the
+            # section after have caps of different directions: both are real seams.
+            for direction in (arc - probe, arc + probe):
+                _, tangent = _arc_frame(path, direction)
+                normal = np.array([-tangent[1], tangent[0]])
+                chords.append((point - normal * reach, point + normal * reach))
+        if chords:
+            lines[path_id] = chords
+    return lines
+
+
+def _on_cut(
+    first: np.ndarray,
+    second: np.ndarray,
+    start: np.ndarray,
+    end: np.ndarray,
+    tolerance: float,
+) -> bool:
+    """True when the segment lies on the cut chord from ``start`` to ``end``."""
+    chord = end - start
+    span = float(np.dot(chord, chord))
+    if span <= 0.0:
+        return False
+    normal = np.array([-chord[1], chord[0]]) / float(np.sqrt(span))
+    if abs(float(np.dot(first - start, normal))) > tolerance:
+        return False
+    if abs(float(np.dot(second - start, normal))) > tolerance:
+        return False
+    first_along = float(np.dot(first - start, chord)) / span
+    second_along = float(np.dot(second - start, chord)) / span
+    slack = tolerance / float(np.sqrt(span))
+    return min(first_along, second_along) >= -slack and max(first_along, second_along) <= 1.0 + slack
+
+
+def mark_flush_edges(
+    regions: list[RibbonRegion],
+    *,
+    cuts: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    tolerance: float = 1e-6,
+) -> int:
+    """Mark the exterior edges that are seams of a section split, and return how many.
+
+    Cutting a self-crossing needs the path divided into sections (and, for the Boolean
+    backend, into windows around each pass), which leaves a chord across the strand where
+    the material simply continues: the two sides are one strand, one colour, one region.
+    Nothing visible happens along such a chord, so stroking it draws a tick across the
+    ribbon and makes the strand look cut when it is not.
+
+    The chords are known exactly — they are the caps of the section bands, see
+    :func:`_cut_lines` — so they are handed in instead of being guessed from pairs of
+    shared edges. Guessing cannot work on a self-crossing: the *cut* the under pass shows
+    there lies exactly on the other pass's outline, because the subtracted lens is bounded
+    by it, so a shared-edge test marks the weave itself as a seam. A cut edge therefore
+    stays unmarked and keeps the weave readable.
+    """
+    marked = 0
+    for region in regions:
+        chords = cuts.get(region.path_id, ())
+        points = np.asarray(region.exterior.points, dtype=float)
+        indices = [
+            index
+            for index in range(len(points) - 1)
+            if any(
+                _on_cut(points[index], points[index + 1], start, end, tolerance)
+                for start, end in chords
+            )
+        ]
+        region.flush_edges = tuple(indices)
+        marked += len(indices)
+    return marked
 
 
 @dataclass(slots=True)
@@ -172,8 +303,57 @@ def _require_shapely() -> tuple[Any, Any, Any, Any, Any, Any]:
     return LineString, Point, Polygon, unary_union, make_valid, orient
 
 
+#: A folded vertex whose triangle is this small (world units²) is numeric noise from the
+#: polygon boolean rather than shape: it encloses no area at all, so dropping it cannot
+#: change what the ring covers. Compare with ``_FOLD_AREA_TOLERANCE`` usage in
+#: :func:`_drop_folds`.
+_FOLD_AREA_TOLERANCE = 1e-12
+
+
+def _drop_folds(points: np.ndarray, *, area_tolerance: float = _FOLD_AREA_TOLERANCE) -> np.ndarray:
+    """Remove the out-and-back folds a polygon boolean can leave on a ring.
+
+    A boolean cut that only touches the boundary (the tip of a weave lens is the usual case)
+    can make the boundary run out along a line and come straight back to where it started.
+    Such a fold encloses no area, so the fill looks right, but the fold *is* part of the ring:
+    stroking the ring draws that line, and it shows up as a short whisker sticking out of the
+    ribbon (SPEC FR-057, the same family as the seam ticks).
+
+    Only reversals are considered — the ring has to turn back into itself — and only when the
+    triangle they span carries no area, so a genuine corner or a real (if thin) feature is
+    never touched. Folds are removed until none remain, because dropping one can expose
+    another.
+    """
+    if len(points) < 4:
+        return points
+    kept = [np.array(point) for point in points[:-1]]
+    changed = True
+    while changed and len(kept) >= 3:
+        changed = False
+        pruned: list[np.ndarray] = []
+        count = len(kept)
+        for index in range(count):
+            previous = kept[index - 1]
+            current = kept[index]
+            following = kept[(index + 1) % count]
+            back = current - previous
+            forward = following - current
+            if float(np.dot(back, forward)) >= 0.0:
+                pruned.append(current)
+                continue
+            area = 0.5 * abs(float(back[0] * forward[1] - back[1] * forward[0]))
+            if area > area_tolerance:
+                pruned.append(current)
+                continue
+            changed = True
+        kept = pruned
+    if len(kept) < 3:
+        return points
+    return np.vstack((np.array(kept), np.array(kept[0])))
+
+
 def _ring_points(ring: Any) -> np.ndarray:
-    coords = np.asarray(ring.coords, dtype=float)[:, :2]
+    coords = _drop_folds(np.asarray(ring.coords, dtype=float)[:, :2])
     if len(coords) < 2 or not np.allclose(coords[0], coords[-1]):
         coords = np.vstack((coords, coords[0]))
     return coords
@@ -312,6 +492,18 @@ def _half_plane(point: np.ndarray, tangent: np.ndarray, extent: float, polygon_c
     return polygon_class([
         point - across, point + along - across, point + along + across, point + across,
     ])
+
+
+def _self_crossing_reach(offset: float, sin_angle: float) -> float:
+    """How far from a self-crossing a pass must be its own geometry.
+
+    Two ribbons of half-width ``offset`` meeting at angle ``theta`` overlap for about
+    ``offset / sin(theta)`` along each pass, so a window of a couple of widths around the
+    crossing contains that overlap. The cut is the *intersection* inside the window, so
+    the result does not depend on the window size as long as it is large enough; the
+    ``0.2`` clamp matches the one the stroke backend uses for shallow crossings.
+    """
+    return 2.0 * offset / max(abs(float(sin_angle)), 0.2)
 
 
 def _split_arcs(path: PolylinePath, arcs: list[float]) -> list[float]:
@@ -514,11 +706,25 @@ def build_sections(
     point_class: Any,
     polygon_class: Any,
     unary_union: Any,
+    pass_windows: bool = False,
 ) -> dict[str, list[_Strip]]:
-    """Sections of the paths that cross themselves, keyed by path ID."""
+    """Sections of the paths that cross themselves, keyed by path ID.
+
+    ``pass_windows`` additionally splits a window either side of every self-crossing pass.
+    The Boolean backend needs that: it cuts the under pass, and without the windows the
+    piece between the crossing's two split points holds the material of *both* passes, so
+    cutting it would erase the strand that is supposed to stay on top. The arrangement
+    backend owns whole faces and works off the plain crossing splits, so it leaves the flag
+    alone and stays unaffected by the Boolean backend's cut geometry.
+    """
     split_arcs: dict[str, list[float]] = {path_id: [] for path_id in bands}
     for crossing in self_crossings:
         split_arcs[crossing.path_a].extend((crossing.s_a, crossing.s_b))
+        if not pass_windows:
+            continue
+        reach = _self_crossing_reach(offset, crossing.sin_angle)
+        for arc in (crossing.s_a, crossing.s_b):
+            split_arcs[crossing.path_a].extend((arc - reach, arc + reach))
     builder = _StripBuilder(
         offset=offset, cap_style=cap_style, join=join, miter_limit=miter_limit,
         point_class=point_class, polygon_class=polygon_class,
@@ -552,6 +758,76 @@ def _subtract_from_strips(strips: list[_Strip], visible: dict[str, Any], lens: A
         visible[strip.strip_id] = current.difference(lens)
         removed += before - float(visible[strip.strip_id].area)
     return removed
+
+
+def _union_or_none(parts: list[Any], unary_union: Any) -> Any | None:
+    """The union of the non-empty parts, or ``None`` when none of them has area."""
+    live = [part for part in parts if part is not None and not part.is_empty]
+    if not live:
+        return None
+    return live[0] if len(live) == 1 else unary_union(live)
+
+
+def _sections_around(
+    group: list[_Strip], arc: float, reach: float, path: PolylinePath
+) -> list[_Strip]:
+    """The sections covering ``arc ± reach``: the material of one pass at a crossing.
+
+    ``build_sections`` cuts a window either side of every self-crossing pass, so this is a
+    contiguous run of sections that belongs to that pass alone (the other pass's material
+    lives in its own run, and the long piece between the two windows belongs to neither).
+    """
+    length = float(path.length)
+    low, high = arc - reach, arc + reach
+    spans = [(low, high)]
+    if path.closed:
+        # A closed path wraps, so the window also matches the shifted copies of itself.
+        spans += [(low + length, high + length), (low - length, high - length)]
+    found = []
+    for strip in group:
+        for low, high in spans:
+            if strip.start_arc < high - 1e-12 and strip.end_arc > low + 1e-12:
+                found.append(strip)
+                break
+    return found
+
+
+def _self_crossing_lens(
+    under_sections: list[_Strip],
+    over_sections: list[_Strip],
+    visible: dict[str, Any],
+    point: tuple[float, float],
+    window: Any,
+    *,
+    unary_union: Any,
+    point_class: Any,
+) -> Any | None:
+    """The offset-band overlap at a self-crossing, i.e. exactly where the over pass covers.
+
+    A self-crossing's two passes are two different runs of sections of one path, so the
+    question is the same one asked at a cross-path crossing — "where does the strand on
+    top actually cover the strand below?" — and is answered the same way: intersect the
+    two offset bands and keep the component that contains this crossing point
+    (:func:`_local_lens`). Both sides are clipped to the window first, which is what keeps
+    the cut local: the sections themselves run far away from the crossing, and only the
+    overlap *at* the crossing may be removed.
+
+    Both sides are taken as they currently stand, so a pass that was already cut loses
+    (and protects) only what it really shows: a cut can never open a gap the over pass
+    does not cover.
+    """
+    under = _union_or_none(
+        [visible[strip.strip_id].intersection(window) for strip in under_sections], unary_union
+    )
+    over = _union_or_none(
+        [visible[strip.strip_id].intersection(window) for strip in over_sections], unary_union
+    )
+    if under is None or over is None:
+        return None
+    lens = _local_lens(under, over, point, point_class)
+    if lens is None or lens.is_empty:
+        return None
+    return lens
 
 
 def render_region_geometry(
@@ -605,7 +881,7 @@ def render_region_geometry(
     strips = build_sections(
         paths, bands, self_crossings, offset=offset, cap_style=cap_style, join=join,
         miter_limit=miter_limit, line_class=LineString, point_class=Point,
-        polygon_class=Polygon, unary_union=unary_union,
+        polygon_class=Polygon, unary_union=unary_union, pass_windows=True,
     )
     visible_band: dict[str, Any] = dict(bands)
     visible_strip: dict[str, Any] = {
@@ -635,13 +911,48 @@ def render_region_geometry(
             ))
             continue
         if crossing.path_a == crossing.path_b:
-            # One path: both passes are sections of the same ribbon, and the sections
-            # already overlap at the crossing. Painting the over section after the under
-            # one shows the same result as cutting, without removing area that belongs
-            # to the strand on top.
+            # One path: both passes are sections of the same ribbon. They are still two
+            # different passes, so the under one is cut exactly like a cross-path
+            # crossing, by the local overlap of the two offset bands. Leaving the cut to
+            # the paint order only works while a consistent order exists, and an odd
+            # cycle of self-crossings has none (the solver says so through its
+            # self-crossing conflict witnesses).
+            under_arc = crossing.s_a if assignment.under_side == "a" else crossing.s_b
+            over_arc = crossing.s_b if assignment.under_side == "a" else crossing.s_a
+            path = geometry_by_id.get(crossing.path_a)
+            group = strips.get(crossing.path_a, [])
             self_crossing_count += 1
-            walk.add({"kind": "skip", "reason": "self_crossing_order",
-                      "crossing_id": crossing.crossing_id})
+            if path is None or not group:
+                walk.add({"kind": "skip", "reason": "self_crossing_without_sections",
+                          "crossing_id": crossing.crossing_id})
+                continue
+            reach = _self_crossing_reach(offset, crossing.sin_angle)
+            under_sections = _sections_around(group, under_arc, reach, path)
+            over_sections = _sections_around(group, over_arc, reach, path)
+            if not under_sections or not over_sections:
+                lens_miss_count += 1
+                walk.add({"kind": "skip", "reason": "self_crossing_without_sections",
+                          "crossing_id": crossing.crossing_id})
+                continue
+            window = Point(float(crossing.point[0]), float(crossing.point[1])).buffer(reach)
+            lens = _self_crossing_lens(
+                under_sections, over_sections, visible_strip, crossing.point, window,
+                unary_union=unary_union, point_class=Point,
+            )
+            if lens is None:
+                lens_miss_count += 1
+                walk.add({"kind": "skip", "reason": "no_local_overlap",
+                          "crossing_id": crossing.crossing_id})
+                continue
+            removed = _subtract_from_strips(under_sections, visible_strip, lens)
+            removed_area += removed
+            cut_count += 1
+            section_cut_count += 1
+            walk.add({"kind": "weave", "crossing_id": crossing.crossing_id,
+                      "under": [strip.strip_id for strip in under_sections],
+                      "over": [strip.strip_id for strip in over_sections],
+                      "target": "self-section", "lens_area": float(lens.area),
+                      "removed_area": float(removed)})
             continue
         under_id = crossing.path_a if assignment.under_side == "a" else crossing.path_b
         over_id = crossing.path_b if assignment.under_side == "a" else crossing.path_a
@@ -709,27 +1020,15 @@ def render_region_geometry(
             code="REGION-DRAW-ORDER-CYCLE",
             severity=Severity.INFO,
             message=(
-                "过／欠关系存在环，且其中有路径被拆成分段（自交必须靠绘制顺序解决）；"
-                "顺序按节点顺序确定性打破，可能有个别交叉的上下关系与几何期望相反。"
+                "路径层面的过／欠约束存在环，绘制顺序只能按节点顺序确定性打破；"
+                "交叉处的上下关系由几何切口决定（被压的分段已按偏移带求交挖掉），"
+                "因此该环不再决定任何交叉的结果，只影响未切口的重叠分段之间的先后。"
             ),
             details={"constraints": [[under, over] for under, over in congested]},
-            hints=("两条股线交叉偶数次时该环必然出现；不透明填充顺序仍需遵守 draw_index。",),
-        ))
-    overlapping_paths = sorted({
-        crossing.path_a for crossing in self_crossings
-        if topology.assignment_for(crossing.crossing_id) is not None
-    })
-    if overlapping_paths:
-        diagnostics.append(Diagnostic(
-            code="REGION-OVERLAPPING-SECTIONS",
-            severity=Severity.INFO,
-            message=(
-                "自交路径按分段输出互相重叠的面域，重叠处（交叉）由 draw_index 决定谁在上，"
-                "因此区域面积之和会大于可见面积。"
+            hints=(
+                "两条股线交叉偶数次、或单条路径自交时该环都可能出现，不影响编织结果。",
+                "不透明填充仍应按 draw_index 递增绘制。",
             ),
-            path_ids=tuple(overlapping_paths),
-            details={"path_ids": overlapping_paths},
-            hints=("填充时按 RibbonRegion.draw_index 递增绘制；可见面积请用 painted_area。",),
         ))
     coincident: dict[tuple[float, float], list[str]] = {}
     for crossing in weavable:
@@ -766,9 +1065,15 @@ def render_region_geometry(
     owners: set[str] = set()
     hole_count_total = 0
     for path in paths:
-        if strips.get(path.path_id):
+        group = strips.get(path.path_id)
+        if group:
+            # The sections stay separate pieces: a piece boundary is what draws the strand
+            # on top (its silhouette crossing the strand below it), so merging them back
+            # would remove the weave itself. The chords where the path was split are marked
+            # as flush afterwards and skipped by the renderer instead (see
+            # ``mark_flush_edges``).
             parts = [
-                (strip.strip_id, visible_strip[strip.strip_id]) for strip in strips[path.path_id]
+                (strip.strip_id, visible_strip[strip.strip_id]) for strip in group
                 if not visible_strip[strip.strip_id].is_empty
             ]
         else:
@@ -803,33 +1108,60 @@ def render_region_geometry(
     region_area_sum = float(sum(region.area for region in regions))
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-12)
     whole_union = float(unary_union(list(bands.values())).area) if bands else 0.0
-    if strips and abs(union_area - whole_union) > tolerance:
+    section_seam = bool(strips) and abs(union_area - whole_union) > tolerance
+    if section_seam:
         diagnostics.append(Diagnostic(
             code="REGION-SECTION-SEAM",
             severity=Severity.INFO,
             message=(
-                "分段并集与整条丝带并集有差异：某个切分点落在折线顶点上，两段之间少了"
-                "拐角连接的面积。"
+                "分段并集与整条丝带并集有差异：某个切分点落在折线顶点上，两段之间要么"
+                "少了拐角连接的面积、要么互相重叠了一块，因此分段面积之和不是丝带面积。"
             ),
             details={"section_area": union_area, "band_area": whole_union},
             hints=("提高采样密度让交叉落在段中，或减小 offset，可让差异消失。",),
         ))
-    if ribbon_parts and abs(painted_area - union_area) > tolerance:
+    if region_area_sum > painted_area + tolerance:
+        # Only when the emitted pieces really do overlap somewhere. Self-crossing sections
+        # are merged back after their cuts, so what is left is the case the Boolean model
+        # cannot answer: strands that overlap without crossing (nearly parallel ribbons).
+        diagnostics.append(Diagnostic(
+            code="REGION-OVERLAPPING-SECTIONS",
+            severity=Severity.INFO,
+            message=(
+                "输出的片段互相重叠（区域面积之和大于可见面积）：自交分段在切口之外仍可能互相重叠，"
+                "没有交叉点的贴近平行丝带也会互相覆盖，重叠处由 draw_index 决定先后。"
+            ),
+            details={
+                "region_area_sum": region_area_sum,
+                "painted_area": painted_area,
+            },
+            hints=("填充时按 RibbonRegion.draw_index 递增绘制；可见面积请用 painted_area。",),
+        ))
+    # ``union_area`` is the union of the *sections*, which is only a fair reference while
+    # they tile the ribbon; when a split point lands on a vertex (``section_seam``) their
+    # union is smaller than the ribbon, and the ribbon union is the honest yardstick.
+    reference_area = whole_union if section_seam else union_area
+    if ribbon_parts and painted_area < reference_area - tolerance:
         diagnostics.append(Diagnostic(
             code="REGION-AREA-MISMATCH",
             severity=Severity.WARNING,
             message=(
-                "可见区域总面积与丝带并集面积不一致：某处被切除的区域没有被上方丝带覆盖"
+                "可见区域总面积小于丝带并集面积：某处被切除的区域没有被上方丝带覆盖"
                 "（通常是三条以上丝带在非交叉点处互相重叠）。"
             ),
             details={
                 "painted_area": painted_area,
                 "union_area": union_area,
-                "difference": painted_area - union_area,
+                "band_area": whole_union,
+                "reference_area": reference_area,
+                "difference": painted_area - reference_area,
                 "tolerance": tolerance,
             },
             hints=("检查是否有三条以上丝带在同一区域重叠；必要时减小 offset 或改回描边后端。",),
         ))
+    flush_edge_count = mark_flush_edges(
+        regions, cuts=_cut_lines(paths, strips, offset=offset)
+    )
     return RegionRenderResult(
         regions=regions,
         diagnostics=diagnostics,
@@ -855,6 +1187,7 @@ def render_region_geometry(
             "lens_miss_count": lens_miss_count,
             "congested": bool(congested),
             "hole_count": hole_count_total,
+            "flush_edge_count": flush_edge_count,
             # This backend's traversal unit is a band (or a section), so it counts the
             # region polygons it produced rather than arrangement faces.
             "region_polygon_count": len(regions),

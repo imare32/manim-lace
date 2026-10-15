@@ -8,11 +8,12 @@ import numpy as np
 import pytest
 
 from manim_lace import JoinStyle, LaceEngine, PolylinePath
-from manim_lace.render.regions import RibbonRegion, render_region_geometry
+from manim_lace.render.regions import RibbonRegion, _drop_folds, render_region_geometry
 
 shapely = pytest.importorskip("shapely")
 
 from shapely.geometry import LineString, Point, Polygon  # noqa: E402
+from shapely.ops import unary_union  # noqa: E402
 
 
 def _paths(*arrays):
@@ -136,18 +137,21 @@ def test_cap_style_changes_open_ribbon_geometry():
     assert square_area == pytest.approx(butt_area + 2 * 0.2 * 0.4, abs=1e-9)
 
 
-def test_a_self_crossing_path_is_emitted_as_overlapping_ordered_sections():
+def test_a_self_crossing_path_is_cut_on_the_under_pass():
     bow = np.array([[-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [1.0, -1.0]])
-    result = LaceEngine([bow], offset=0.1, render_mode="ribbon").solve()
+    offset = 0.1
+    result = LaceEngine([bow], offset=offset, render_mode="ribbon").solve()
     codes = [d.code for d in result.diagnostics]
-    # One band cannot be both over and under itself, so the path is split into sections
-    # whose overlap is resolved by the paint order instead of by cutting area.
-    assert "REGION-OVERLAPPING-SECTIONS" in codes
+    # A self-crossing is woven by cutting area, exactly like a cross-path crossing: the
+    # two passes are different sections of one path, and the under one loses the local
+    # overlap of the two offset bands. Nothing is left to the paint order.
     assert "REGION-AREA-MISMATCH" not in codes
+    assert "REGION-OVERLAPPING-SECTIONS" not in codes
     accounting = next(event for event in result.trace if event.event_type == "region.accounting").data
-    assert accounting["removed_area"] == 0.0
-    assert accounting["region_area_sum"] > accounting["painted_area"]
-    assert accounting["painted_area"] == pytest.approx(accounting["union_area"], abs=1e-9)
+    # Two 90 degree passes of one ribbon hide one square of side 2 * offset.
+    assert accounting["removed_area"] == pytest.approx(4.0 * offset * offset, rel=1e-6)
+    assert accounting["painted_area"] == pytest.approx(accounting["band_area"], abs=1e-9)
+    assert accounting["region_area_sum"] == pytest.approx(accounting["painted_area"], abs=1e-9)
     assert sorted(region.draw_index for region in result.pieces) == list(range(len(result.pieces)))
     traced = [
         event.object_ids[0] for event in result.trace if event.event_type == "region.polygon"
@@ -158,53 +162,79 @@ def test_a_self_crossing_path_is_emitted_as_overlapping_ordered_sections():
     ]
 
 
-def test_the_paint_order_puts_the_over_pass_of_a_self_crossing_last():
-    # A figure eight with its crossing in the middle of straight runs: both passes are
-    # clean sections, so the paint order must follow the solver's assignment.
+def test_a_self_crossing_marks_the_section_cuts_as_seams_not_the_notches():
+    # The seams of a self-crossing are the chords the section split cuts across the
+    # strand. The weave notches — the edges where the under pass stops against the over
+    # pass's lateral edge — must stay out of that set: they are boundary a renderer has to
+    # stroke, and marking them is what drew ticks across the ribbon.
+    offset = 0.1
+    figure = np.array([[-1.0, -1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, 1.0]])
+    result = LaceEngine([figure], offset=offset, render_mode="ribbon", weave_mode="free").solve()
+    centerline = LineString(figure)
+
+    def edges(region):
+        points = np.asarray(region.exterior.points, dtype=float)
+        count = len(points) - 1
+        for index in range(count):
+            yield index, points[index], points[(index + 1) % count]
+
+    def band_distance(start, end):
+        """Distance from the edge's middle to the centreline of the strand."""
+        return centerline.distance(Point(*(0.5 * (start + end))))
+
+    seams = [
+        (region, start, end)
+        for region in result.pieces
+        for index, start, end in edges(region)
+        if index in region.flush_edges
+    ]
+    assert seams
+    for region, start, end in seams:
+        assert float(np.hypot(*(end - start))) == pytest.approx(2.0 * offset, abs=1e-9)
+        # A chord across the strand is centred on it; a notch follows the other pass's
+        # lateral edge and is one band width away from the centreline instead.
+        assert band_distance(start, end) == pytest.approx(0.0, abs=1e-9)
+
+    notches = [
+        (region, index)
+        for region in result.pieces
+        for index, start, end in edges(region)
+        if index not in region.flush_edges
+        and float(np.hypot(*(end - start))) == pytest.approx(2.0 * offset, abs=1e-9)
+        and band_distance(start, end) == pytest.approx(offset, abs=1e-9)
+    ]
+    assert notches, "the geometry must actually have notches for this to prove anything"
+
+
+def test_the_self_crossing_cut_keeps_each_pass_material_beside_the_crossing():
+    # A figure eight with its crossing in the middle of straight runs: the cut must be
+    # local to the crossing. Cutting whole sections instead would erase the material the
+    # strand on top still shows right next to the crossing.
     from manim_lace.render.regions import _arc_frame
 
     figure = np.array([[-1.0, -1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, 1.0]])
     engine = LaceEngine([figure], offset=0.1, render_mode="ribbon", weave_mode="free")
     result = engine.solve()
     crossing = result.crossings[0]
-    assignment = result.topology.assignments[crossing.crossing_id]
-    assert assignment is not None
     path = engine.paths[0]
+    polygons = [
+        Polygon(region.exterior.points, [hole.points for hole in region.holes])
+        for region in result.pieces
+    ]
+    visible = unary_union(polygons)
 
-    index = {region.region_id: region.draw_index for region in result.pieces}
-
-    def owners(side) -> set[str]:
-        arc = crossing.s_a if side == "a" else crossing.s_b
+    for arc in (crossing.s_a, crossing.s_b):
         point, tangent = _arc_frame(path, arc)
-        found: set[str] = set()
         for direction in (1.0, -1.0):
             probe = Point(*(point + tangent * 1.0 * direction))
-            found.update(
-                region.region_id for region in result.pieces
-                if Polygon(region.exterior.points).contains(probe)
-            )
-        return found
+            assert visible.contains(probe), "each pass keeps its own material beside the crossing"
 
-    under_side = assignment.under_side
-    over_side = "b" if under_side == "a" else "a"
-    under_regions = owners(under_side)
-    over_regions = owners(over_side)
-    shared = under_regions & over_regions
-    under_only = under_regions - shared
-    over_only = over_regions - shared
-    assert under_only and over_only
-    assert max(index[region_id] for region_id in under_only) < min(
-        index[region_id] for region_id in over_only
-    )
-    # The section that both passes share carries material of both strands, so it sits
-    # between them instead of being ordered strictly before or after itself.
-    if shared:
-        assert max(index[region_id] for region_id in under_only) < min(
-            index[region_id] for region_id in shared
-        )
-        assert max(index[region_id] for region_id in shared) < min(
-            index[region_id] for region_id in over_only
-        )
+    # The crossing itself is covered exactly once: the lens belongs to the over pass only,
+    # so no piece may overlap another there.
+    disk = Point(*crossing.point).buffer(0.02)
+    covered = sum(polygon.intersection(disk).area for polygon in polygons)
+    assert covered == pytest.approx(visible.intersection(disk).area, abs=1e-9)
+    assert covered > 0.0
 
 
 def test_coincident_crossings_are_reported_because_they_cannot_conserve_area():
@@ -222,6 +252,48 @@ def test_coincident_crossings_are_reported_because_they_cannot_conserve_area():
     mismatch = next(d for d in result.diagnostics if d.code == "REGION-AREA-MISMATCH")
     assert mismatch.details["difference"] < 0
     assert mismatch.details["tolerance"] > 0
+
+
+def test_a_zero_area_fold_is_dropped_and_a_real_thin_corner_is_kept():
+    # A boolean cut that only touches the boundary can leave the ring running out along a
+    # line and straight back. That fold holds no area, but it is part of the ring, so
+    # stroking the ring would draw it as a whisker sticking out of the ribbon.
+    folded = np.array([
+        [0.0, 0.0], [0.04, 0.0], [0.0005, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0],
+    ])
+    cleaned = _drop_folds(folded)
+    assert len(cleaned) == len(folded) - 2
+    assert [tuple(point) for point in cleaned] == [
+        (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0),
+    ]
+    # A thin feature the geometry really has is not a fold: it turns back, but it spans area.
+    cusp = np.array([[0.0, 0.0], [0.5, 0.02], [1.0, 0.0], [0.5, -1.0], [0.0, 0.0]])
+    assert np.array_equal(_drop_folds(cusp), cusp)
+    # Removal is idempotent, and a ring too small to fold is returned untouched.
+    assert np.array_equal(_drop_folds(cleaned), cleaned)
+    degenerate = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]])
+    assert np.array_equal(_drop_folds(degenerate), degenerate)
+
+
+def test_a_ribbon_ring_never_keeps_a_folded_vertex():
+    # Three interlocked circles -- the gallery's chain card. A boolean cut that only touches
+    # the boundary used to leave out-and-back folds in these rings, and the renderer stroked
+    # each fold as a short whisker poking into the neighbouring ribbon. Every ring the
+    # backend hands out must already be free of them.
+    circles = []
+    for index, x in enumerate((-1.3, 0.0, 1.3)):
+        theta = np.linspace(0.0, 2.0 * np.pi, 721)
+        circles.append(np.column_stack((
+            0.9 * np.cos(theta) + x,
+            0.9 * np.sin(theta) + 0.3 * (index % 2),
+        )))
+    result = LaceEngine(circles, offset=0.13, render_mode="ribbon").solve()
+    assert result.pieces
+    rings = [ring for region in result.pieces for ring in (region.exterior, *region.holes)]
+    assert rings
+    for ring in rings:
+        points = np.asarray(ring.points, dtype=float)
+        assert len(_drop_folds(points)) == len(points)
 
 
 def test_missing_assignments_are_reported_per_crossing():

@@ -86,6 +86,88 @@ def test_ribbon_mode_builds_filled_regions():
         assert np.allclose(corners.max(axis=0), region.exterior.points.max(axis=0), atol=1e-9)
 
 
+def test_a_cross_path_crossing_needs_neither_seams_nor_open_outlines():
+    # Two different paths crossing cut each other by area; no path is split into sections,
+    # so nothing is marked as a seam and every piece keeps its whole closed ring as its
+    # outline. The outline layer stays empty.
+    pytest.importorskip("shapely")
+    from manim import Circle, Line, VGroup
+
+    from manim_lace import Lace
+
+    source = VGroup(
+        Circle(radius=1.0),
+        Line(np.array([-2.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0])),
+    )
+    lace = Lace(source, offset=0.15, render="ribbon", weave_mode="free")
+    assert lace.result.pieces
+    assert all(not region.flush_edges for region in lace.result.pieces)
+    assert len(lace.outlines) == 0
+    assert len(lace.ribbons) == len(lace.result.pieces)
+    assert all(mob.get_stroke_width() > 0 for mob in lace.ribbons)
+
+
+def _pentagram():
+    """A ``{5/2}`` star: one closed path that crosses itself five times."""
+    from manim import PI, VMobject
+
+    angles = [PI / 2 + index * 2 * PI / 5 for index in range(5)]
+    outer = [np.array([1.4 * np.cos(angle), 1.4 * np.sin(angle), 0.0]) for angle in angles]
+    order = (0, 2, 4, 1, 3)
+    star = VMobject()
+    star.set_points_as_corners(np.array([outer[index] for index in order] + [outer[order[0]]]))
+    return star
+
+
+def test_the_facade_also_weaves_as_far_as_it_can_by_default():
+    # ``Lace`` forwards its own default conflict strategy to the engine, and that default
+    # must be "weave, do not give up": an unsatisfiable input comes back as a marked
+    # best-effort alternation rather than as a pattern with no over/under at all.
+    pytest.importorskip("shapely")
+    from manim import Line, VGroup, VMobject
+
+    from manim_lace import Lace
+
+    bow = VMobject()
+    bow.set_points_as_corners(
+        np.array([[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0], [1.0, -1.0, 0.0]])
+    )
+    line = Line(np.array([-1.2, 0.0, 0.0]), np.array([1.2, 0.0, 0.0]))
+    lace = Lace(VGroup(bow, line), offset=0.15, render="ribbon")
+    transverse = [crossing for crossing in lace.crossings if crossing.kind == "transverse"]
+    assert transverse
+    assert len(lace.result.topology.assignments) == len(transverse)
+    codes = [diagnostic.code for diagnostic in lace.diagnostics]
+    assert "TOPOLOGY-ALTERNATION-RELAXED" in codes
+    assert "TOPOLOGY-ALTERNATION-UNSAT" not in codes
+
+
+def test_outline_runs_keep_a_straight_edge_straight():
+    # A piece of a self-crossing strand is stroked as the runs between its seams. One
+    # straight edge must stay one segment: a row of short collinear pieces is stroked as a
+    # row of ticks, which is exactly the artefact this guards against.
+    pytest.importorskip("shapely")
+    from manim_lace import Lace
+    from manim_lace.manim_api import _stroke_runs
+
+    lace = Lace(_pentagram(), offset=0.12, render="ribbon", weave_mode="free")
+    runs = [run for region in lace.result.pieces for run in _stroke_runs(region)]
+    assert runs
+    assert any(region.flush_edges for region in lace.result.pieces)
+    for run in runs:
+        assert len(run) >= 2
+        for previous, current, following in zip(run, run[1:], run[2:]):
+            direction = following - previous
+            offset = current - previous
+            distance = abs(
+                float(direction[0] * offset[1] - direction[1] * offset[0])
+            ) / float(np.linalg.norm(direction))
+            reverses = float(np.dot(current - previous, following - current)) <= 0.0
+            # The only collinear vertex allowed to stay is a zero-width spike: dropping it
+            # would shorten the stroke and leave a gap in the outline.
+            assert reverses or distance > 1e-6
+
+
 def test_ribbon_holes_are_a_separate_layer():
     from manim import Circle
 

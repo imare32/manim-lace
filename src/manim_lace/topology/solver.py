@@ -286,7 +286,7 @@ def solve_weave(
     *,
     mode: WeaveMode = "alternating",
     manual: dict[str, Literal["a", "b"]] | None = None,
-    conflict_strategy: ConflictStrategy = "error",
+    conflict_strategy: ConflictStrategy = "relax",
     topology_tracer: TopologyTracer | None = None,
 ) -> WeaveTopology:
     """Solve over/under identities independently of rendering.
@@ -299,15 +299,17 @@ def solve_weave(
     ``conflict_strategy`` only applies to ``alternating`` mode, and only decides what
     happens when strict alternation has no solution (SPEC FR-045):
 
+    ``relax``
+        The default. Keep the automatic alternation solution wherever it exists, relax
+        the remaining constraints, and mark every relaxed crossing, so the weave is as
+        alternating as the geometry allows without ever claiming strictness it does not
+        have.
     ``error``
-        Report the minimal conflict witnesses and return no assignment at all. This
-        is the default: the result never claims strict alternation that does not hold.
+        Report the minimal conflict witnesses and return no assignment at all, for
+        callers that must not accept an approximation.
     ``manual``
         Keep the user's over sides as hard constraints, relax the automatic
         constraints that contradict them, and mark every relaxed crossing.
-    ``relax``
-        Keep the automatic alternation solution wherever it exists, relax the
-        remaining constraints, and mark every relaxed crossing.
     """
     if mode not in {"alternating", "free", "manual"}:
         raise ValueError(f"unsupported weave mode: {mode}")

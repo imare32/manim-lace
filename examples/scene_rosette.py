@@ -372,8 +372,9 @@ GALLERY: tuple[tuple[str, RosetteEntry], ...] = (
     ("RosetteWeave", RosetteEntry(
         key="RosetteWeave", title="把玫瑰线交给编织器",
         blurb="合并后的折线是闭合自交股线，于是可以直接喂给 manim_lace：两朵玫瑰线"
-              "（level 1 与 level 2）在三个绘制通道里编织。单路径没法自己压自己，"
-              "ribbon 后端会照例报 REGION-DRAW-ORDER-CYCLE 与 REGION-OVERLAPPING-SECTIONS。",
+              "（level 1 与 level 2）在三个绘制通道里编织。单路径没法用交替约束解决"
+              "自己压自己，但 ribbon 后端会把被压的那一遍按偏移带局部交叠切掉："
+              "70 个交叉（其中 40 处是自交）全部由几何切口决定，不再依赖绘制顺序。",
         tags=("stroke / boolean / arrangement", "跨模块"),
     )),
     ("RosetteLimits", RosetteEntry(

@@ -46,6 +46,28 @@ def test_self_crossing_with_even_pass_gap_reports_conflict():
         ),
         event("X0001", "a", "b", 0, 1, 3.0, 2.0),
     ]
-    topology = solve_weave(crossings, ["a", "b"], mode="alternating")
+    topology = solve_weave(crossings, ["a", "b"], mode="alternating", conflict_strategy="error")
     assert topology.assignments == {}
     assert any(d.code == "TOPOLOGY-ALTERNATION-UNSAT" for d in topology.diagnostics)
+
+
+def test_the_default_strategy_relaxes_the_same_input_instead_of_giving_up():
+    # The same unsatisfiable input, solved the way the engine does by default: the
+    # automatic alternation is kept where it holds and only the forced crossing is
+    # relaxed and marked, so a renderer always has an over/under for every crossing.
+    crossings = [
+        CrossingEvent(
+            crossing_id="X0000", kind="transverse", point=(0.0, 0.0),
+            path_a="a", path_b="a", path_index_a=0, path_index_b=0,
+            s_a=1.0, s_b=5.0, segment_a=0, segment_b=2,
+            u_a=0.5, u_b=0.5, sin_angle=1.0,
+        ),
+        event("X0001", "a", "b", 0, 1, 3.0, 2.0),
+    ]
+    topology = solve_weave(crossings, ["a", "b"], mode="alternating")
+    assert set(topology.assignments) == {"X0000", "X0001"}
+    assert any(a.source == "relaxed" for a in topology.assignments.values())
+    assert topology.assignments["X0001"].source == "alternating"
+    codes = [d.code for d in topology.diagnostics]
+    assert codes.count("TOPOLOGY-ALTERNATION-RELAXED") == 1
+    assert "TOPOLOGY-ALTERNATION-UNSAT" not in codes

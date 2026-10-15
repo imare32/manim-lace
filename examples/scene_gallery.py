@@ -105,7 +105,7 @@ def build_circle_line() -> Lace:
 
 
 def build_sine_line() -> Lace:
-    """Sine curve crossing a straight line — free-mode weave.
+    """Sine curve crossing a straight line — alternating weave.
 
     The sine completes 3 periods across the range, so it meets the horizontal line
     seven times; the two outermost of those are the path's own endpoints sitting on
@@ -119,7 +119,7 @@ def build_sine_line() -> Lace:
         ),
         Line(LEFT * 3, RIGHT * 3, color=GREY_B),
     )
-    return Lace(source, offset=0.13, weave_mode="free", **_RIBBON_STYLE)
+    return Lace(source, offset=0.13, **_RIBBON_STYLE)
 
 
 def build_trefoil() -> Lace:
@@ -128,17 +128,11 @@ def build_trefoil() -> Lace:
     for angle in (0, 2 * PI / 3, 4 * PI / 3):
         center = 0.7 * np.array([np.cos(angle), np.sin(angle), 0])
         source.add(Circle(radius=1.0, color=GREY_B).move_to(center))
-    return Lace(source, offset=0.14, weave_mode="free", **_RIBBON_STYLE)
+    return Lace(source, offset=0.14, **_RIBBON_STYLE)
 
 
-def build_star() -> Lace:
-    """A real pentagram ``{5/2}``: one closed path that crosses itself five times.
-
-    A single path cannot be over and under itself, so these self-crossings are not
-    solvable by alternation: the ribbon backend cuts the path into sections and lets
-    the paint order decide, which it reports as ``REGION-DRAW-ORDER-CYCLE`` and
-    ``REGION-OVERLAPPING-SECTIONS`` instead of pretending to have resolved them.
-    """
+def _star_source() -> VGroup:
+    """A ``{5/2}`` pentagram: one closed path that crosses itself five times."""
     angles = [PI / 2 + i * 2 * PI / 5 for i in range(5)]
     outer = [np.array([1.4 * np.cos(a), 1.4 * np.sin(a), 0]) for a in angles]
     order = (0, 2, 4, 1, 3)
@@ -146,7 +140,34 @@ def build_star() -> Lace:
     star = VMobject()
     star.set_points_as_corners(np.array(verts))
     star.set_stroke(GREY_B, width=2)
-    return Lace(VGroup(star), offset=0.12, weave_mode="free", **_RIBBON_STYLE)
+    return VGroup(star)
+
+
+def _fit_frame(composed: Mobject, *, margin: float = 1.0) -> Mobject:
+    """Shrink a composed layout so it fits the camera frame.
+
+    Not a formatting nicety: a row of panels silently overflows the frame otherwise,
+    and the overflow is invisible in the still until someone looks at it. (Same helper
+    as in ``scene_rosette.py``; the example modules stay importable on their own.)
+    """
+    if composed.width > config.frame_width - margin:
+        composed.scale_to_fit_width(config.frame_width - margin)
+    if composed.height > config.frame_height - margin:
+        composed.scale_to_fit_height(config.frame_height - margin)
+    return composed
+
+
+def build_star() -> Lace:
+    """A real pentagram ``{5/2}``: one closed path that crosses itself five times.
+
+    A single path cannot be over and under itself, and five self-crossings are an odd
+    number, so strict alternation has no solution; the solver says so and falls back to
+    a declared non-alternating assignment. Each of the two passes is a *different
+    section* of the same ribbon, so the under pass is cut by the local overlap of the
+    two offset bands exactly like a cross-path crossing — the weave is decided by
+    geometry, not by paint order.
+    """
+    return Lace(_star_source(), offset=0.12, **_RIBBON_STYLE)
 
 
 def build_spiral() -> Lace:
@@ -154,7 +175,9 @@ def build_spiral() -> Lace:
 
     Angular range covers ~3.5 full turns so the spiral crosses the horizontal
     line ~7 times (twice per turn plus the initial crossing) while staying
-    inside the camera frame.
+    inside the camera frame. Strict alternation cannot hold at every crossing of
+    this source, so the engine's default (alternating, relaxing only what has to
+    give) reports the two relaxed crossings and keeps the rest alternating.
     """
     spiral = ParametricFunction(
         lambda t: np.array([0.18 * t * np.cos(t), 0.18 * t * np.sin(t), 0]),
@@ -162,7 +185,7 @@ def build_spiral() -> Lace:
         color=GREY_B,
     )
     line = Line(LEFT * 2.5, RIGHT * 2.5, color=GREY_B)
-    return Lace(VGroup(spiral, line), offset=0.10, weave_mode="free", **_RIBBON_STYLE)
+    return Lace(VGroup(spiral, line), offset=0.10, **_RIBBON_STYLE)
 
 
 def build_grid() -> Lace:
@@ -179,22 +202,36 @@ def build_grid() -> Lace:
         0.75 * DOWN + 0.75 * LEFT, 0.75 * DOWN + 0.75 * RIGHT,
     ):
         source.add(Circle(radius=0.9, color=GREY_B).move_to(pos))
-    return Lace(source, offset=0.13, weave_mode="free", **_RIBBON_STYLE)
+    return Lace(source, offset=0.13, **_RIBBON_STYLE)
 
 
 def build_cross() -> Lace:
-    """Two perpendicular line pairs forming a cross — four-way intersection."""
+    """Three horizontal lines and one vertical one — a four-way intersection.
+
+    The vertical crosses three times, so the alternating solution is what the eye
+    expects there: over, under, over (or the mirror), never two in a row.
+    """
     source = VGroup(
         Line(LEFT * 2.5, RIGHT * 2.5, color=GREY_B),
         Line(UP * 2.5, DOWN * 2.5, color=GREY_B),
         Line(LEFT * 2.5 + UP * 0.8, RIGHT * 2.5 + UP * 0.8, color=GREY_B),
         Line(LEFT * 2.5 + DOWN * 0.8, RIGHT * 2.5 + DOWN * 0.8, color=GREY_B),
     )
-    return Lace(source, offset=0.15, weave_mode="free", **_RIBBON_STYLE)
+    return Lace(source, offset=0.15, **_RIBBON_STYLE)
 
 
 def build_infinity() -> Lace:
-    """Lemniscate (infinity) curve crossing a horizontal line."""
+    """Lemniscate (infinity) crossing a horizontal line.
+
+    The curve crosses *itself* at the centre, exactly where the line passes through: a
+    coincident crossing, which is the case the diagnostic
+    ``REGION-COINCIDENT-CROSSINGS`` warns about (two crossings at one point cannot both
+    claim their cut area). The self-crossing is woven like any other one, by cutting the
+    under pass where the two offset bands overlap locally.
+    Strict alternation makes the two crossings at that shared point remove their overlap
+    in opposite directions, which the area accounting then reports as
+    ``REGION-AREA-MISMATCH``; the card asks for ``weave_mode="free"`` and says so.
+    """
     lemniscate = ParametricFunction(
         lambda t: np.array([
             2.0 * np.cos(t) / (1 + np.sin(t) ** 2),
@@ -213,7 +250,7 @@ def build_chain() -> Lace:
     source = VGroup()
     for i, x in enumerate((-1.3, 0, 1.3)):
         source.add(Circle(radius=0.9, color=GREY_B).move_to(RIGHT * x + UP * 0.3 * (i % 2)))
-    return Lace(source, offset=0.13, weave_mode="free", **_RIBBON_STYLE)
+    return Lace(source, offset=0.13, **_RIBBON_STYLE)
 
 
 def build_backend_trio() -> tuple[tuple[str, Lace], ...]:
@@ -244,6 +281,18 @@ class _WhiteScene(Scene):
         self.camera.background_color = WHITE
 
 
+def _outline_animations(lace: Lace) -> list[Animation]:
+    """Animations for the outline layer, which exists only where a piece has flush seams.
+
+    Ribbon mode strokes a piece through its outline layer when its exterior contains the
+    chords where the section split meets itself: the open runs in the outline colour, plus
+    those same seams restated in the fill colour one layer below the fills, so abutting
+    pieces of one strand do not show a hairline between them. A scene that draws
+    ``lace.ribbons`` must draw ``lace.outlines`` with it or the strands lose their outlines.
+    """
+    return [FadeIn(lace.outlines, run_time=0.5)] if len(lace.outlines) else []
+
+
 class _WeaveGallery(_WhiteScene):
     """Shared drawing for the showcase weaves: title, framing, painter order."""
 
@@ -252,11 +301,11 @@ class _WeaveGallery(_WhiteScene):
     def construct(self):
         lace = self.entry.build()
         print(f"{self.entry.key} diagnostics:", [d.code for d in lace.diagnostics])
-        self.add(Text(self.entry.title, font_size=28).to_edge(UP))
+        self.add(Text(self.entry.title, font_size=28, color=BLACK).to_edge(UP))
         if self.entry.scale != 1.0:
             lace.scale(self.entry.scale)
         lace.shift(DOWN * 0.2)
-        self.play(Create(lace.ribbons), run_time=self.entry.run_time)
+        self.play(Create(lace.ribbons), *_outline_animations(lace), run_time=self.entry.run_time)
         self.play(FadeIn(lace.holes), run_time=0.5)
         self.wait()
 
@@ -293,7 +342,14 @@ class RibbonGallery(Scene):
             print(label, "diagnostics:", [diagnostic.code for diagnostic in lace.diagnostics])
             panels.add(VGroup(lace, Text(label, font_size=20).next_to(lace, DOWN, buff=0.3)))
         panels.arrange(RIGHT, buff=0.9)
-        self.play(*[Create(panel[0].ribbons) for panel in panels], run_time=1.0)
+        self.play(*[
+            animation
+            for panel in panels
+            for animation in (
+                Create(panel[0].ribbons),
+                *_outline_animations(panel[0]),
+            )
+        ], run_time=1.0)
         self.play(FadeIn(VGroup(*[panel[1] for panel in panels])), run_time=0.4)
         self.wait()
 
@@ -341,13 +397,13 @@ class CircleLineGallery(_WeaveGallery):
 
 
 class SineLineGallery(_WeaveGallery):
-    """Sine curve crossing a straight line — free-mode weave."""
+    """Sine curve crossing a straight line — alternating weave."""
 
     entry = GalleryEntry(
         key="sine_line", title="正弦曲线与直线",
-        blurb="正弦曲线与水平直线反复相交，自由模式编织；曲线两端正好压在直线上，"
+        blurb="正弦曲线与水平直线反复相交，逐次上下交替；曲线两端正好压在直线上，"
               "会被如实报为端点接触而不是硬当成交叉。",
-        tags=("自由模式", "参数曲线"), build=build_sine_line, scale=0.8,
+        tags=("交替模式", "参数曲线"), build=build_sine_line, scale=0.8,
     )
 
 
@@ -357,7 +413,7 @@ class TrefoilGallery(_WeaveGallery):
     entry = GalleryEntry(
         key="trefoil", title="三叶结",
         blurb="三个相互交叠的圆构成三叶结拓扑，六处交叉点交替编织。",
-        tags=("自由模式", "3 路径"), build=build_trefoil, scale=0.85,
+        tags=("交替模式", "3 路径"), build=build_trefoil, scale=0.85,
     )
 
 
@@ -366,9 +422,11 @@ class StarGallery(_WeaveGallery):
 
     entry = GalleryEntry(
         key="star", title="五角星",
-        blurb="真正的五角星（{5/2}）：一条闭合路径自交五次。单路径没法用交替约束解决"
-              "自己压自己，于是切成段、由绘制顺序决定谁在上，并把这件事报出来。",
-        tags=("自由模式", "自相交", "分段 + 绘制顺序"), build=build_star,
+        blurb="真正的五角星（{5/2}）：一条闭合路径自交五次。自交把路径切成分段，"
+              "沿路径数下去是 10 遍（偶数），所以严格交替仍然可解：每一遍与上一遍相反，"
+              "五个自交点都拿到确定的上下关系，不需要退化。两遍各属于不同分段，"
+              "交叉处由偏移带在局部求交得到的切口决定上下，与跨路径交叉同一套处理。",
+        tags=("交替模式", "自相交", "偏移带求交切口"), build=build_star,
     )
 
 
@@ -377,8 +435,11 @@ class SpiralGallery(_WeaveGallery):
 
     entry = GalleryEntry(
         key="spiral", title="螺旋与直线",
-        blurb="阿基米德螺线绕数圈反复穿过水平线，交叉沿半径一次次向外推进。",
-        tags=("自由模式", "参数曲线"), build=build_spiral, run_time=1.8,
+        blurb="阿基米德螺线绕数圈反复穿过水平线，交叉沿半径一次次向外推进。"
+              "严格交替在这个输入上无法全程成立，引擎的默认策略只在必需的两处放宽并逐条标记"
+              "（TOPOLOGY-ALTERNATION-RELAXED），其余交叉仍严格交替——"
+              "也就是「能交替的都交替」。",
+        tags=("交替模式", "少量放宽", "参数曲线"), build=build_spiral, scale=0.8, run_time=1.8,
     )
 
 
@@ -388,18 +449,19 @@ class GridGallery(_WeaveGallery):
     entry = GalleryEntry(
         key="grid", title="四圆格栅",
         blurb="2×2 排列的四个圆两两相交，相邻的每一对都形成两处交叉，"
-              "对角方向互不接触。",
-        tags=("自由模式", "4 路径"), build=build_grid, scale=0.8, run_time=2.0,
+              "对角方向互不接触；每个圆上的交叉逐次上下交替。",
+        tags=("交替模式", "4 路径"), build=build_grid, scale=0.8, run_time=2.0,
     )
 
 
 class CrossGallery(_WeaveGallery):
-    """Two perpendicular line pairs forming a cross — four-way intersection."""
+    """Three horizontal lines and one vertical line — four-way intersection."""
 
     entry = GalleryEntry(
         key="cross", title="十字格栅",
-        blurb="三条水平线与一条垂直线交叉，构成四路交叉节点。",
-        tags=("自由模式", "4 路径"), build=build_cross,
+        blurb="三条水平线与一条垂直线交叉，构成四路交叉节点；"
+              "垂直线穿过三次，逐次上下交替（上—下—上），不会连着两次同侧。",
+        tags=("交替模式", "4 路径"), build=build_cross,
     )
 
 
@@ -408,8 +470,12 @@ class InfinityGallery(_WeaveGallery):
 
     entry = GalleryEntry(
         key="infinity", title="双纽线与直线",
-        blurb="双纽线（∞ 形）在中点穿过水平线，参数曲线编织。",
-        tags=("自由模式", "参数曲线"), build=build_infinity, scale=0.8,
+        blurb="双纽线（∞ 形）在中点穿过水平线；难点在于曲线在那里同时自交，"
+              "与直线的交点落在同一点上（共点交叉）。自交按偏移带局部求交切口编织，"
+              "共点这一处会照例给出 REGION-COINCIDENT-CROSSINGS 警告；"
+              "严格交替会让共点的两个交叉互相反向扣除、面积核算失衡"
+              "（REGION-AREA-MISMATCH），因此这里声明自由模式。",
+        tags=("自由模式", "共点交叉", "自交切口"), build=build_infinity, scale=0.8,
     )
 
 
@@ -418,8 +484,9 @@ class ChainGallery(_WeaveGallery):
 
     entry = GalleryEntry(
         key="chain", title="链条",
-        blurb="三个交错排列的圆模拟链环连接，每对相邻圆交叉编织。",
-        tags=("自由模式", "3 路径"), build=build_chain, scale=0.8, run_time=1.8,
+        blurb="三个交错排列的圆模拟链环连接，每对相邻圆交叉编织；"
+              "中间那个圆上的四处交叉逐次上下交替。",
+        tags=("交替模式", "3 路径"), build=build_chain, scale=0.8, run_time=1.8,
     )
 
 

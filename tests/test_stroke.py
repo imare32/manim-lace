@@ -148,9 +148,14 @@ def test_shallow_angle_cut_is_bounded_by_min_sin():
 
 
 def test_unsatisfiable_alternation_is_not_cut_and_keeps_full_pieces():
+    # Under the strict "error" strategy nothing is approximated: no assignment means
+    # nothing is cut, so both strands stay whole. The default strategy would relax the
+    # unsatisfiable parity instead and cut the weave normally.
     bow = np.array([[-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [1.0, -1.0]])
     vertical = np.array([[-1.2, 0.0], [1.2, 0.0]])
-    result = LaceEngine([bow, vertical], offset=0.15, weave_mode="alternating").solve()
+    result = LaceEngine(
+        [bow, vertical], offset=0.15, weave_mode="alternating", conflict_strategy="error"
+    ).solve()
     transverse = [c for c in result.crossings if c.kind == "transverse"]
     assert transverse
     assert result.topology.assignments == {}

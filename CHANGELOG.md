@@ -1,5 +1,143 @@
 # Changelog
 
+## Unreleased — ribbon 环去掉布尔折返尖刺（端点处的"小胡须"）
+
+- Fix: ribbon rings no longer keep the zero-area *folds* a polygon boolean leaves behind when
+  a cut only touches the boundary (the tip of a weave lens is the usual case): the ring runs
+  out along a line and comes straight back to where it started. The fold encloses no area, so
+  the fill always looked right, but the fold is part of the ring — stroking it drew that line
+  as a short whisker poking into the neighbouring ribbon, and a slightly open fold drew as a
+  thin dark sliver inside the ribbon. Both were visible on the trefoil, the 2×2 circle grid
+  and the chain cards.
+- The fix is `regions._drop_folds`, applied wherever a ring is converted for the region
+  backends (``regions._ring_points``, so the boolean and the arrangement backend and their
+  holes all get it): a vertex is dropped only when the ring *turns back into itself* and the
+  triangle it spans holds no area (``<= 1e-12`` world units²), and the removal repeats until
+  none is left because dropping one fold can expose another. A genuine corner — even a thin,
+  sharp one like the cusp where three boundaries meet — turns back but spans area, so it is
+  never touched. Measured on the three cards: 0 of the fold vertices survive, and the total
+  ring area changes by 0.0 (the folds contributed nothing).
+- Tests: `tests/test_regions.py::test_a_zero_area_fold_is_dropped_and_a_real_thin_corner_is_kept`
+  (the rule, including that a real cusp and a degenerate ring are left alone) and
+  `test_a_ribbon_ring_never_keeps_a_folded_vertex` (the chain card's three circles: every ring
+  the backend hands out is fold-free — this one fails without the fix).
+
+## Unreleased — 默认即"尽可能交替编织"（`conflict_strategy` 默认改为 `relax`）
+
+- Change: ``conflict_strategy`` now defaults to ``"relax"`` (engine, ``solve_weave`` and the
+  ``Lace`` facade) instead of ``"error"``. The project's point is a woven pattern, so the
+  default path must weave: strict alternation is kept at every crossing where it can hold and
+  only the constraints that have to give are relaxed, each relaxed crossing carrying
+  ``source="relaxed"`` and a ``TOPOLOGY-ALTERNATION-RELAXED`` warning (with the minimal
+  witnesses and the ``relaxed_crossing_ids`` that were actually relaxed). Before this, an
+  unsatisfiable input fell back to *no assignment at all* by default, which a renderer can
+  only show as an un-woven pattern (every transverse crossing reported as
+  ``REGION-MISSING-ASSIGNMENT``/``RENDER-MISSING-ASSIGNMENT``).
+- ``error`` is unchanged and still available for callers that must not accept an
+  approximation; the tests that pin "no assignment, full pieces, witnesses only" now ask for
+  it explicitly (``tests/test_conflict_strategy.py``, ``tests/test_stroke.py``,
+  ``tests/test_topology.py``).
+- Tests pin the new contract from both ends: ``solve_weave``/``LaceEngine`` default
+  (``test_the_default_strategy_relaxes_the_same_input_instead_of_giving_up``,
+  ``test_the_default_engine_strategy_relaxes_and_marks_instead_of_giving_up``) and the facade
+  default (``test_the_facade_also_weaves_as_far_as_it_can_by_default``: full assignments,
+  ``TOPOLOGY-ALTERNATION-RELAXED`` present, ``TOPOLOGY-ALTERNATION-UNSAT`` absent).
+- The spiral gallery card now uses the default mode too: two of its four crossings are
+  relaxed and reported, the other two keep strict alternation. The lemniscate card stays on
+  ``weave_mode="free"`` because strict alternation there makes the two crossings at the shared
+  point remove their overlap in opposite directions (``REGION-AREA-MISMATCH``), which is a
+  geometry-accounting problem rather than a parity one.
+- Docs updated where they named the old default: README (feature table, 重要语义, gallery
+  section), ``docs/ARCHITECTURE.md`` (conflict strategy) and ``docs/ROADMAP.md``.
+
+## Unreleased — 画廊里的编织图案改用严格交替模式
+
+- Fix: the showcase weaves that can be solved by strict alternation now use it instead of
+  ``weave_mode="free"``. Free mode's deterministic default alternates the *side letter* by
+  crossing index, not the strand (``topology/solver.py``), so a strand could land on the same
+  side twice in a row: the cross grid's vertical line crossed three horizontal lines and came
+  out over, under, under. The same input under the project's default ``alternating`` mode
+  solves cleanly (no ``TOPOLOGY-ALTERNATION-UNSAT``) and gives the expected over, under, over.
+  Fixed on the cross grid, the 2×2 circle grid, the trefoil, the chain, the sine/line card and
+  the pentagram; their gallery tags now say 交替模式 and their prose states what the weave does.
+- The pentagram card no longer claims that strict alternation is impossible for it. A
+  self-crossing path is walked as ten passes (an even number), so the alternation constraint
+  is satisfiable there and the solver assigns all five self-crossings with ``source=
+  'alternating'``; the measured pass sequence is ``OuOuOuOuOu``. The card's output is
+  unchanged, only its description was wrong.
+- The two cards that genuinely cannot alternate keep ``weave_mode="free"`` and now say why on
+  the card: the spiral reports ``TOPOLOGY-ALTERNATION-UNSAT``, and the lemniscate's coincident
+  crossing makes strict alternation remove the shared overlap in opposite directions, which
+  the area accounting reports as ``REGION-AREA-MISMATCH``.
+- The README's ``free`` bullet now spells out what its default really is (side-letter
+  alternation by crossing index), since that is the part that surprises: it does not promise
+  a per-strand over/under sequence.
+
+## Unreleased — 自交分段不再在股线上画横线（ribbon 轮廓修正）
+
+- Fix: a self-crossing ribbon drew a row of short transverse ticks across the strand at every
+  crossing instead of two clean weave edges. The section split that gives a self-crossing its
+  two passes leaves a *seam* — a chord across the strand where two regions of the same strand
+  abut — and that chord was being stroked like a real outline: `_stroke_runs` appended the
+  closing point of a run before checking whether the *next* edge was a seam, so the seam edge
+  itself stayed in the run. The pentagram showed 82 stroked seam edges; it now strokes 54
+  outline runs and no seam at all.
+- Fix: `mark_flush_edges` no longer guesses seams from shared edges. On a self-crossing that
+  heuristic cannot work: the under pass's notch lies exactly on the over pass's outline, so
+  the two kinds of edge are indistinguishable *and* a seam is only ever part of the
+  neighbouring region's edge. Seams are now the edges that lie on a real section cut chord,
+  computed by the new `_cut_lines` from the arcs where the sections were actually split
+  (`_section_boundary_arcs`); both region backends pass their own cuts in.
+- Fix: outline runs no longer contain collinear middle vertices. Boolean subtraction and
+  polygonisation cut one straight edge into several collinear pieces, and stroking each piece
+  on its own is a row of ticks; `_rejoin_collinear` re-joins them first, while keeping a
+  vertex the boundary walks back along (a zero-width spike) so a stroke is never shortened
+  into a gap. Six such midpoints remain on the pentagram and are removed before stroking.
+- `Lace` gains an `outlines` layer: a piece whose exterior carries seams is filled without an
+  outline stroke and stroked through open runs *between* the seams, one mobject per run (one
+  mobject with several subpaths would link them with exactly the seam line this avoids). A
+  scene that draws `lace.ribbons` must draw `lace.outlines` with it — `build_animation` and
+  the gallery scenes do.
+- Two rendering details the seams need: each stroke run's ends are extended by half a stroke
+  width so the runs either side of a seam overlap instead of meeting in a single antialiased
+  point, and each seam is restated in the fill's own colour at `z_index = -0.5`, below every
+  fill, because two abutting polygons each paint only part of the pixels on their shared edge
+  and the background otherwise shows through as a hairline across the strand. Being below the
+  fills as well as below the outlines, that hairline cannot nick either.
+- Tests: `tests/test_regions.py` pins that a self-crossing marks the section cuts as seams and
+  the weave notches are not among them, and `tests/test_arrangement.py` pins the same for the
+  arrangement backend; `tests/test_optional_manim.py` pins that a cross-path crossing needs
+  neither seams nor an outline layer, and that no stroke run keeps a collinear middle vertex.
+- The weave gallery's card titles are drawn in black: `_WeaveGallery` sets a white camera
+  background and left the title text in the default white, so the eight woven-pattern cards
+  had no visible title in the image.
+
+## Unreleased — 自交也按偏移带求交切口编织（ribbon boolean 后端）
+
+- Fix: the Boolean ribbon backend no longer leaves self-crossings to the paint order. A
+  self-crossing's two passes are two different sections of one path, so the under pass is
+  now cut by the local overlap of the two offset bands — the same construction used at a
+  cross-path crossing. On the 90-degree bow and figure eight the hidden area is exactly the
+  analytic ``4 * offset ** 2``; the pentagram's five self-crossings are all cut and its
+  visible pieces cover the ribbon exactly (``painted_area == band_area``, no holes).
+  ``tests/test_regions.py`` pins the cut and that each pass keeps its own material beside
+  the crossing; ``tests/test_arrangement.py`` pins that both backends now hide the same
+  area on a self-crossing instead of disagreeing.
+- ``build_sections`` gains ``pass_windows`` (used by the Boolean backend only): a window
+  either side of every self-crossing pass, so one pass's local material is its own
+  geometry. Without it the piece between a crossing's two split points carries the material
+  of *both* passes, and cutting it would erase the strand that stays on top (this was
+  visible as an ``REGION-AREA-MISMATCH`` and an over-large ``removed_area``). The
+  arrangement backend keeps the plain crossing splits and its output is unchanged.
+- ``REGION-AREA-MISMATCH`` now measures the visible area against the *ribbon* union as soon
+  as a split point lands on a vertex (``REGION-SECTION-SEAM``), where the union of the
+  sections is not the ribbon; before it compared against that smaller union and warned about
+  a mismatch that did not exist. ``REGION-SECTION-SEAM`` and ``REGION-DRAW-ORDER-CYCLE`` now
+  say what they mean (overlap or missing corner area; the cycle no longer decides any
+  crossing), and ``REGION-OVERLAPPING-SECTIONS`` is emitted only when pieces really overlap.
+- Fix: ``_sections_around`` no longer feeds a generator over the list it extends — on a
+  closed path that grew the list without bound and hung the render.
+
 ## Unreleased — 玫瑰线示例（examples/rosette.py）
 
 - Add `examples/scene_rosette.py`, a five-scene gallery for the migrated star-rosette

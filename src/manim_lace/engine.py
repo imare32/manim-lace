@@ -83,11 +83,14 @@ class LaceEngine:
         near-tangents into it.
     conflict_strategy:
         What ``alternating`` mode does when strict alternation has no solution
-        (SPEC FR-045): ``error`` (default) reports the minimal conflict witnesses
-        and returns no assignment, ``manual`` keeps the user's over sides as hard
-        constraints and relaxes the automatic ones that contradict them, ``relax``
-        keeps the automatic solution and relaxes what has to give. Both relaxing
-        strategies mark every relaxed crossing with ``source='relaxed'``.
+        (SPEC FR-045): ``relax`` (default) keeps the automatic alternation
+        everywhere it exists and relaxes only what has to give, so the weave is as
+        alternating as the geometry allows and every exception is marked;
+        ``error`` reports the minimal conflict witnesses and returns no assignment
+        at all (for callers that must not accept an approximation), ``manual``
+        keeps the user's over sides as hard constraints and relaxes the automatic
+        ones that contradict them. All relaxing strategies mark every relaxed
+        crossing with ``source='relaxed'`` and report ``TOPOLOGY-ALTERNATION-RELAXED``.
     cap_style:
         How the visible ends of cut pieces are painted: ``butt`` (default, the
         geometry stops exactly at the cut), ``round`` or ``square`` (the paint
@@ -139,7 +142,7 @@ class LaceEngine:
         candidate_strategy: CandidateStrategy = "grid",
         refine: bool = True,
         event_policy: EventPolicy | dict[str, str] | str | None = None,
-        conflict_strategy: ConflictStrategy = "error",
+        conflict_strategy: ConflictStrategy = "relax",
         cap_style: CapStyle = "butt",
         cover_allowance: float = 0.0,
         join: JoinStyle = "miter",

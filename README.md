@@ -21,7 +21,7 @@
 | 中心线段交叉检测 | 已实现基础版：路径间/自交/重叠/端点/多线共点诊断；顶点交叉、闭合缝、重复顶点与退化路径有回归测试 |
 | 候选加速与性能基准 | 已实现确定性均匀网格剪枝（`candidate_strategy` 可切换网格/暴力，两者逐事件等价），附四类输入的可复现基准集与事件指纹 |
 | 来源曲线上的局部交点精化（FR-036） | 已实现：两侧路径都带可求值来源曲线与来源参数映射时，用阻尼 Newton 解 `gamma_a(t)=gamma_b(u)`，给出曲线参数、真实切向角与曲线弧长；无探针、探针失效、不收敛或路径在该处确实拐折时如实回退到折线估计 |
-| 路径级严格交替求解 | 已实现：约束传播 + 冲突的**最小见证环**（奇偶环 / 自交奇偶间隔）+ FR-045 冲突策略开关（`error` 报错不伪造 / `manual` 手动优先并放宽自动约束 / `relax` 保留自动解并放宽无解处） |
+| 路径级严格交替求解 | 已实现：约束传播 + 冲突的**最小见证环**（奇偶环 / 自交奇偶间隔）+ FR-045 冲突策略开关（默认 `relax`：能交替的都交替、只在必需处放宽并标记 / `error` 报错不伪造、返回空分配 / `manual` 手动优先并放宽自动约束） |
 | 非横穿候选的事件策略 | 已实现：`event_policy` 可按事件类选择"如实诊断 / 提升为普通横穿（`weave`，仅点状接触）/ 只保留几何不报警告（`ignore`）"；重叠与多线共点只能是诊断或忽略，永不变成二元交叉 |
 | 每次交叉手动指定上下关系 | 已实现 `manual` 模式和逐交叉覆盖 |
 | Stroke 几何切分 | 已实现基础版：闭合缝切口、整条被切、浅角受限与片段丢弃都有显式诊断和测试；端帽与精确区域裁剪仍属视觉近似 |
@@ -30,7 +30,7 @@
 | 基于算法轨迹的动画计划 | 已实现 renderer-neutral trace plan；Manim 动画适配器为初始版本，实机渲染已跑通 |
 | 细粒度算法轨迹 | 已完成（M5）：候选对逐条判定、约束传播步骤、自适应细分决策、面域遍历归属全部是真实的 `TraceEvent`，计数精确、记录列表有界（`*_count` / `*_truncated`） |
 | 可视化线宽 | 已实现像素对齐换算：`px_to_stroke_width` / `px_to_units`（`render/pixels.py`）在目标输出分辨率和 Manim 画幅高度之间转换，`Lace` 的 `stroke_width_px` 参数直接以输出像素指定线宽；未指定时仍用 `max(1.0, 200.0 * offset)` 启发式 |
-| 实体 Ribbon、多边形面域与孔洞 | 已实现两套后端（`ribbon_backend`）：`boolean` 用受验证的布尔几何按"该交叉局部"交集精确切除；`arrangement` 走**平面剖分**——把丝带边界（含自交分段边界）noding 后 `polygonize` 出全部面，逐面判定归属，因此区域**永不重叠**、自交不再需要重叠分段、共点交叉也能守恒。两者输出同样的 `RibbonRegion`/`RegionRing`（带 role、外环逆时针、孔洞顺时针）与面积核对 |
+| 实体 Ribbon、多边形面域与孔洞 | 已实现两套后端（`ribbon_backend`）：`boolean` 用受验证的布尔几何按"该交叉局部"交集精确切除，**自交同样按局部交集切被压的那一遍**；`arrangement` 走**平面剖分**——把丝带边界（含自交分段边界）noding 后 `polygonize` 出全部面，逐面判定归属，因此区域**永不重叠**、共点交叉也能守恒。两者输出同样的 `RibbonRegion`/`RegionRing`（带 role、外环逆时针、孔洞顺时针）与面积核对 |
 | 美学策略（M6） | 已实现：`manim_lace.style` 提供可插拔调色板（56 色和色色卡 + 7 套配色）、path/piece/layer/degree 分组、边框设计、切口端处理（覆盖余量 + 真实端头轮廓）与密度感知的视觉简化；样式不改变拓扑（`apply_style` 只读结果），密度简化只影响"画哪些片段"且逐条上报 |
 | 隐式方程直接等值线提取 | 未实现；可先传入 Manim `ImplicitFunction` 的矢量对象 |
 | 鲁棒多线共点分解 | 未实现；当前只能识别并诊断多线共点，不做唯一穿插顺序推断 |
@@ -244,7 +244,9 @@ ribbon = Lace(
     source, offset=0.12, render="ribbon",
     stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
 )
-scene.add(ribbon.ribbons, ribbon.holes)   # 孔洞是独立图层，便于按背景色处理
+scene.add(ribbon.ribbons, ribbon.holes, ribbon.outlines)
+# 孔洞与自交分段的轮廓都是独立图层：孔洞便于按背景色处理，
+# outlines 只在片段带自交接缝时才非空（见"重要语义"）
 for region in sorted(ribbon.result.pieces, key=lambda r: r.draw_index):   # 绘制顺序
     print(region.region_id, round(region.area, 4), [hole.role for hole in region.holes])
 ```
@@ -318,7 +320,7 @@ manim -pql examples/scene_rosette.py RosetteLimits       # 可行域与真实 Va
 两处与仓库自身设定直接相关的地方：
 
 - **可行域是有界的，而且会明说。** 高阶核由"旋转前一阶 + 与 x 轴求交"迭代得到，当旋转后的核线段与 x 轴平行时该阶在数学上不存在，`cal_kernels` 直接抛 `ValueError` 并在消息里给出该组合的最大可用阶，而不是产出 `inf`/`nan` 坐标；偶数 `n` 一律有限（`n = 10` 时 PA/CA 到 5 阶、PR/CR 到 6 阶、PO 到 8 阶），奇数 `n` 宽松得多。`RosetteLimits` 与画廊页面上的表格就是逐阶探测这个边界的真实结果。
-- **玫瑰线可以直接喂给编织器。** `merge_adjacent_petals` 的结果是若干条**闭合自交股线**，于是可以当作 `Lace` 的输入：`RosetteWeave` 把 level 1 与 level 2 两朵玫瑰线（共 3 条股线）在 stroke / ribbon(boolean) / ribbon(arrangement) 三个通道里编织。单条路径没法自己压自己，所以 ribbon 后端仍会照例报 `REGION-DRAW-ORDER-CYCLE` 与 `REGION-OVERLAPPING-SECTIONS`（arrangement 后端对同一输入 0 诊断）。
+- **玫瑰线可以直接喂给编织器。** `merge_adjacent_petals` 的结果是若干条**闭合自交股线**，于是可以当作 `Lace` 的输入：`RosetteWeave` 把 level 1 与 level 2 两朵玫瑰线（共 3 条股线）在 stroke / ribbon(boolean) / ribbon(arrangement) 三个通道里编织。单条路径没法用交替约束解决自己压自己，但 ribbon 后端会把被压的那一遍按偏移带局部交叠切掉：70 个交叉（其中 40 处是自交）全部由几何切口决定，不再依赖绘制顺序；切口之后仍有分段重叠时照例报 `REGION-OVERLAPPING-SECTIONS`。
 
 `rosette.py` 与示例同目录、不在安装包内（`src/` 之外，只是示例的支撑模块）：`scene_rosette.py` 通过显式路径导入它，因此从任意工作目录启动场景都能找到，而它随 `examples/` 一起被 `make lint` 与 CI 检查。
 
@@ -332,7 +334,7 @@ python examples/build_gallery.py --no-render     # 只重算数据与页面，�
 python examples/build_gallery.py -q l            # 更小更快的渲染
 ```
 
-它覆盖五块：编织图案（ribbon 后端 9 例）、玫瑰线（五种花型、阶数阶梯、构造链、交给编织器、可行域，附逐阶探测出的最大可用阶表）、绘制通道对照（stroke / boolean / arrangement 同输入，附面积核算表）、美学策略（调色板、边框、切口端、密度简化）、算法轨迹（两段动画视频 + 真实事件表 + `sampling.subdivision` 的完整载荷）。末尾还有一张"诊断与诚实降级"表，列出本次渲染实际触发的诊断码、级别、说明与出现在哪张卡片上。
+它覆盖五块：编织图案（ribbon 后端 9 例）、玫瑰线（五种花型、阶数阶梯、构造链、交给编织器、可行域，附逐阶探测出的最大可用阶表）、绘制通道对照（stroke / boolean / arrangement 同输入，附面积核算表）、美学策略（调色板、边框、切口端、密度简化）、算法轨迹（两段动画视频 + 真实事件表 + `sampling.subdivision` 的完整载荷）。末尾还有一张"诊断与诚实降级"表，列出本次渲染实际触发的诊断码、级别、说明与出现在哪张卡片上。九例编织图案里只有双纽线用自由模式：严格交替在那个共点交叉上会让两次扣除互相反向、面积核算失衡（`REGION-AREA-MISMATCH`）；其余各例都用默认的交替模式，螺旋那例如实报出两处必须放宽的交叉（`TOPOLOGY-ALTERNATION-RELAXED`）。
 
 实现方式：脚本用探针记录每个场景 `construct` 期间真正创建的 `Lace`（`play`/`wait`/`add` 被替换为空操作，因此数据采集与渲染是两件事），所以交叉数、可见区域数、面积核算、诊断、配色选择、密度省略数、trace 事件统计全部来自对象本身；编织图案的文案取自 `scene_gallery.GALLERY` 里的 `GalleryEntry`，与场景共用同一处定义。这也是它立刻暴露出两处**内容不实**的原因：四圆格栅原本是四个外切圆（0 交叉），五角星原本不自交——现在两者都是真的编织。
 
@@ -351,14 +353,14 @@ python benchmarks/bench_crossings.py --repeat 3
 ## 重要语义
 
 - `offset` 表示半宽，因此总几何宽度目标为 `2 * offset`。
-- 严格 `alternating` 模式只有在约束相容时才能给出解；若不相容，拓扑对象会携带 `TOPOLOGY-ALTERNATION-UNSAT` 诊断，不会假称已满足严格交替。诊断里的 `crossing_ids` 是**最小见证集合**（每个冲突一条"最短替代路径 + 该约束"构成的奇偶环，或一条两次经过奇偶性相同的自交），不再倾倒整个连通分量。此时可以用 `conflict_strategy` 选择近似解：
-  - `error`（默认）：报告见证并返回空分配；
-  - `manual`：手动指定变成硬约束（参与奇偶传播），与之矛盾的自动约束被放宽；
-  - `relax`：尽量保留自动交替解，只放宽无解处，手动指定仍然覆盖。
-  两个放宽策略都会给每个被放宽的交叉写 `source="relaxed"`、按确定性默认值（`a` 侧在上，若用户指定过则用用户值）给出上下关系，并携带 `TOPOLOGY-ALTERNATION-RELAXED` 警告（含见证与 `relaxed_crossing_ids`）。结果不是严格交替编织，但绝不静默。
+- 严格 `alternating` 模式（默认）的目标是**尽可能地交替编织**：约束相容时逐条路径沿经过次序严格交替；不相容时默认策略 `relax` 保留一切还能成立的自动交替，只在必须让步的交叉上放宽，并给每个被放宽的交叉写 `source="relaxed"`、携带 `TOPOLOGY-ALTERNATION-RELAXED` 警告（含最小见证与 `relaxed_crossing_ids`），因此默认永远不会返回一份空分配、也不会静默近似。诊断里的 `crossing_ids` 是**最小见证集合**（每个冲突一条"最短替代路径 + 该约束"构成的奇偶环，或一条两次经过奇偶性相同的自交），不再倾倒整个连通分量。需要"绝不接受近似"的调用方用 `conflict_strategy` 显式选择：
+  - `relax`（默认）：尽量保留自动交替解，只放宽无解处，手动指定仍然覆盖；
+  - `error`：报告见证并返回**空分配**（不伪造任何上下关系）；
+  - `manual`：手动指定变成硬约束（参与奇偶传播），与之矛盾的自动约束被放宽。
+  放宽策略按确定性默认值（`a` 侧在上，若用户指定过则用用户值）给出上下关系；结果不是严格交替编织，但绝不静默。
 - 手动指定在可满足时不会破坏交替：`relax`/`error` 下手动值作为覆盖生效，只有**确实与自动解不同**时才报 `TOPOLOGY-MANUAL-OVERRIDE`（info）；`manual` 下它作为硬约束参与传播，邻居交叉随之调整。同一路径上两次互相矛盾的手动指定会报 `TOPOLOGY-MANUAL-CONFLICT`（warning）并保留交叉 ID 较小的一项。
 - `event_policy` 决定非横穿候选怎么处理，取值 `"diagnose"`（默认，保留分类并报警告）、`"weave"`（把**点状接触**提升为普通横穿进入过／欠求解，并报 `GEOM-CONTACT-WOVEN`）、`"ignore"`（保留几何与分类，只是不报警告）。可传 `EventPolicy(...)`、字段映射（如 `{"endpoint_touch": "weave"}`）或一个统一取值。共线重叠与多线共点只能是 `"diagnose"`/`"ignore"`：前者是区间、后者超过两条股线，都不存在唯一的二元上／下关系。
-- `free` 模式对未手动指定的交叉使用确定性默认分配，但不承诺路径级交替。
+- `free` 模式对未手动指定的交叉按交叉 ID 顺序交替取 `a` / `b` 一侧（确定性默认）：这是**侧**的交替，不是**股线**的交替，同一条股线连着两次落在同一侧是可能的（例如三条水平线加一条垂直线时，垂直线可能"下—下—上"）。要路径级一上一下必须用默认的 `alternating`：它逐条路径沿经过次序交替，无解处按默认策略放宽并标记，绝不冒充严格交替。
 - `manual` 模式需要为每个普通横穿交叉提供 `crossing_id: "a" | "b"`；`a` / `b` 分别指该事件数据中的 `path_a` / `path_b` 一侧。自交的两侧仍由不同弧长经过区分。
 - 当前 `stroke` 后端针对不透明二维描边的视觉呈现。半透明叠色、浅角遮挡端头的精确几何与真实区域裁剪不在保证范围内。
 - `cap_style`（默认 `"butt"`）描述可见端头怎么画：`"butt"` 的几何严格停在切口处；`"round"`/`"square"` 会沿切向多画半个线宽，因此断口会额外加宽 `offset` 并报 `RENDER-CAP-EXTENSION`（info）。端头轮廓现在可以真的取出：`style.caps.stroke_piece_outline` 按端帽样式与 miter 连接算出该片段覆盖的闭合多边形（未切口的闭合中心线输出为带孔环），不再需要猜渲染器怎么画。
@@ -369,10 +371,11 @@ python benchmarks/bench_crossings.py --repeat 3
 - 每个片段都带确定性 `draw_index`：按"被压路径先画"的路径分层（最长路分层）排序，环按路径顺序确定性打破。两条股线交叉偶数次时"谁先画"必然成环，这是正常编织图案，可见性由切口决定，因此只有环上存在被 `min_sin` 钳制的近似断口时才报 `RENDER-DRAW-ORDER-CYCLE`（info）。Manim 侧按该顺序建组、设置对应 cap 与 `z_index`，不会与几何层不一致。
 - `render="ribbon"` 已实现（需要 `pip install 'manim-lace[geometry]'`，即 Shapely；缺失时抛出带安装提示的 `ImportError`）。它把丝带当**有面积的面域**构造：每条路径一条偏移带（`join`/`miter_limit` 控制拐角连接），在交叉处从被压带里扣除"该交叉局部"的 `被压带 ∩ 上方带`——即上方丝带真实覆盖的那块面积，因此没有半径近似、没有浅角钳制，也不需要端帽补偿。`result.pieces` 在 ribbon 模式下是 `RibbonRegion`（外环 + 孔洞环，role 分别为 `exterior` / `source_contour` / `occlusion`，外环逆时针、孔洞顺时针）。两种后端消费**同一份**交叉与拓扑（`FR-040`）。
 - ribbon 模式有两套实现，`ribbon_backend="boolean"`（默认）/`"arrangement"`：
-  - **`boolean`**：按交叉局部交集切除。对**自交**，同一条带不可能既在上又在下，因此带自交的路径按"经过"拆成**分段**输出，分段在交叉处**互相重叠**（面积之和大于可见面积），上下由 `RibbonRegion.draw_index` 绘制顺序决定（与描边后端同款"顺序兜住"策略），并报 `REGION-OVERLAPPING-SECTIONS`（info）。多个交叉共点时各交叉扣除会互相抵消，覆盖面积不再守恒，报 `REGION-COINCIDENT-CROSSINGS` + `REGION-AREA-MISMATCH`。
+  - **`boolean`**：按交叉局部交集切除，**自交走同一条路**。自交的两次经过是同一条路径的两个不同分段，被压的那一遍同样按"两条偏移带在该交叉处的局部交叠"精确切掉，所以上下关系由几何决定、不依赖绘制顺序（在 90° 的 bow／八字上，切除面积正好等于解析值 `4·offset²`）。为了让"某一遍的局部料"成为独立几何、不至于把上方那一遍也挖掉，带自交的路径会在交叉点两侧各多切一刀（就是 `REGION-SECTION-SEAM` 在说的那些切分点）。切口之后相邻分段仍可能重叠一块（面积之和大于可见面积），此时报 `REGION-OVERLAPPING-SECTIONS`（info）；`REGION-DRAW-ORDER-CYCLE` 只说明路径层面的约束成环、顺序被确定性打破，**不再决定任何交叉的结果**。多个交叉落在同一点（`REGION-COINCIDENT-CROSSINGS`）时各交叉的扣除会互相抵消，覆盖面积不再守恒。
   - **`arrangement`**：把全部丝带边界（路径带边界 + 自交分段边界）noding 后剖分成面，每个面按"该处上方的股线"归属唯一所有者——因此区域**永不重叠**（`region_area_sum == painted_area`）、自交的上下关系体现为真实边界、共点交叉仍然守恒（`painted_area == union_area`）。无法从几何唯一确定的面会如实上报：`REGION-CONFLICTING-OVERLAP`（同一面上有互相矛盾的多个交叉，通常是共点）、`REGION-OFF-CROSSING-OVERLAP`（多条丝带平行重叠、附近没有交叉）、`REGION-DROPPED-SLIVER`（近乎相切产生的碎片面）、`REGION-LENS-APPROXIMATION`（自交的局部窗口不足以覆盖重叠）。
-  - 两者在普通交叉上**面积逐位一致**（`tests/test_arrangement.py` 对照断言）；分歧只出现在布尔模型必须近似的场景（自交、共点）——这正是保留两套实现的意义。
+  - 两者在普通交叉与**自交**上都面积逐位一致（`tests/test_arrangement.py` 对照断言）；真正的分歧只剩布尔模型表达不了的情形（残留的重叠分段、共点交叉）——这正是保留两套实现的意义。
 - ribbon 模式其余边界（都有诊断）：交叉没有上下关系时报 `REGION-MISSING-ASSIGNMENT`；偏移轮廓无效时受控修复并报 `REGION-INVALID-OUTLINE`；切分点落在折线顶点上时分段并集比整带少一个拐角连接，报 `REGION-SECTION-SEAM`（info）；过／欠关系成环且存在分段时报 `REGION-DRAW-ORDER-CYCLE`（info）。面积口径：`painted_area`（区域并集＝实际绘制面积）与 `union_area`（构建出的丝带并集）应当相等，`region_area_sum` 是含重叠的求和。Manim 侧孔洞是独立图层（Manim 没有奇偶填充规则），默认用 `hole_color` 涂成背景色，可用 `draw_holes=False` 自行处理。
+- Manim 侧的 ribbon 图层：`lace.ribbons` 与 `result.pieces` 一一对应（按 `draw_index` 排序、`z_index` 同步），`lace.holes` 是独立孔洞层。自交被切成两个分段后，相邻分段之间会留下一条**接缝**（横跨股线的切分弦），记在 `RibbonRegion.flush_edges` 上：它不代表股线的边界，所以带接缝的片段填充不描边，轮廓改由 `lace.outlines` 里逐条**开口折线**（run）描出——沿接缝描边会在一条笔直穿过的股线中间画出一道横线。同一层里还有同一个接缝的"填色重述"（填充色、`z_index = -0.5`，低于所有填充）：相邻两片是各自独立的多边形，共享边上的像素两边都只覆盖一部分，不补一笔就会在股线中间透出一条背景色细线。绘制 `lace.ribbons` 的场景必须同时绘制 `lace.outlines`（`build_animation` 与画廊场景都已如此），否则这些片段会丢掉轮廓。
 - 输入为文字、SVG 时，提取的是矢量轮廓，不是字形的语义中心线笔画。
 - Stroke 片段不变式（有测试保证）：同一路径的片段弧长区间互不重叠、也不超过路径总长；绕闭合缝的切口输出为一个 `piece-seam` 加其余可见弧段；开放路径的切口一旦覆盖整条中心线，就不输出片段并报 `RENDER-PATH-FULLY-CUT`。
 - 样式层的参数同样在构造时校验，不静默退化：`StylePolicy` 的 `group_by`/`color_mode`/`opacity`/`fill_opacity`/`buckets`/`piece_order`/颜色值/配色名，`BorderSpec` 的 `corner`/`margin`/`thickness`/`radius`/`inset`/`bands`/`samples`，`CapTreatment` 的 `style`/`cover_allowance`/`samples`，`DensityPolicy` 的 `cluster_radius`/`cell_size`/`sliver_length`/`sliver_fraction`/`min_cluster_size`，以及 `Lace(palette=..., style_policy=...)` 同时给出。
@@ -408,9 +411,9 @@ python benchmarks/bench_crossings.py --repeat 3
 | 渲染 | `RENDER-DENSITY-SIMPLIFIED` | info | 密度简化隐藏了密集簇内短于阈值的可见片段；`details` 含被隐藏的片段 ID、阈值与簇尺度 |
 | 渲染 | `RENDER-DENSITY-SKIPPED` | info | 密度简化在 ribbon 后端不适用（那里的切口是真实几何），已跳过并上报 |
 | 样式 | `STYLE-DRAW-ORDER-OVERRIDE` | info | 样式策略按非几何顺序重排绘制顺序；`details.moved_pieces` 给出不再处于几何层顺序的片段数 |
-| 区域 | `REGION-OVERLAPPING-SECTIONS` | info | ribbon 模式下自交路径按分段输出，段落互相重叠，重叠处由 `draw_index` 决定上下 |
+| 区域 | `REGION-OVERLAPPING-SECTIONS` | info | ribbon 模式下自交路径按分段输出，切口之后相邻分段仍重叠一块（切分点落在折线顶点上所致），面积之和大于可见面积 |
 | 区域 | `REGION-COINCIDENT-CROSSINGS` | warning | 多个交叉落在同一点，各交叉扣除的重叠区互相抵消，覆盖面积无法保证守恒 |
-| 区域 | `REGION-DRAW-ORDER-CYCLE` | info | 过／欠关系成环且存在分段，绘制顺序按节点顺序确定性打破 |
+| 区域 | `REGION-DRAW-ORDER-CYCLE` | info | 路径层面的过／欠约束成环，绘制顺序按节点顺序确定性打破；交叉处的上下关系已由几何切口决定，该环不再影响编织结果 |
 | 区域 | `REGION-SECTION-SEAM` | info | 切分点落在折线顶点，分段并集比整带少一个拐角连接的面积 |
 | 区域 | `REGION-CONFLICTING-OVERLAP` | warning | 剖分后端：同一个面落在多个上下关系相反的交叉内（多为共点），按路径顺序确定性归属 |
 | 区域 | `REGION-OFF-CROSSING-OVERLAP` | info | 剖分后端：多条丝带平行重叠且附近没有交叉，按路径顺序确定性归属 |

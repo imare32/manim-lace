@@ -41,6 +41,7 @@ from .regions import (
     RegionRing,
     RibbonRegion,
     _arc_points,
+    _cut_lines,
     _hole_roles,
     _local_lens,
     _polygons,
@@ -48,6 +49,7 @@ from .regions import (
     _ring_points,
     build_bands,
     build_sections,
+    mark_flush_edges,
 )
 
 __all__ = ["render_arrangement_regions"]
@@ -403,6 +405,9 @@ def render_arrangement_regions(
         ))
     covered_lenses = [lens for lens in lenses.values() if lens is not None]
     hidden_area = float(unary_union(covered_lenses).area) if covered_lenses else 0.0
+    flush_edge_count = mark_flush_edges(
+        regions, cuts=_cut_lines(paths, sections, offset=offset)
+    )
     return RegionRenderResult(
         regions=regions,
         diagnostics=diagnostics,
@@ -428,6 +433,7 @@ def render_arrangement_regions(
             "conflicting_count": conflicting,
             "off_crossing_count": off_crossing,
             "uncovered_count": uncovered,
+            "flush_edge_count": flush_edge_count,
             **cell_stats,
             **walk.as_payload("steps"),
         },

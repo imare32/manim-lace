@@ -84,7 +84,7 @@ class Lace(VGroup):
         candidate_strategy: str = "grid",
         refine: bool = True,
         event_policy: EventPolicy | dict[str, str] | str | None = None,
-        conflict_strategy: str = "error",
+        conflict_strategy: str = "relax",
         cap_style: str = "butt",
         cover_allowance: float = 0.0,
         join: str = "miter",
@@ -160,7 +160,7 @@ class Lace(VGroup):
             self.density.kept(self.result) if self.density is not None else list(self.result.pieces)
         )
         if self.render_mode == "ribbon":
-            self.ribbons, self.holes = _region_groups(
+            self.ribbons, self.holes, self.outlines = _region_groups(
                 drawn,
                 fill_color=style["fill_color"] if style["fill_color"] is not None else style["stroke_color"],
                 fill_opacity=style["fill_opacity"],
@@ -173,6 +173,7 @@ class Lace(VGroup):
             )
         else:
             self.holes = VGroup()
+            self.outlines = VGroup()
             self.ribbons = _ribbon_group(
                 drawn, color=style["stroke_color"], width=width,
                 opacity=style["stroke_opacity"], cap_style=self.engine.cap_style,
@@ -182,7 +183,9 @@ class Lace(VGroup):
         self.border_layer = self._build_border_layer(style)
         layers = [
             layer
-            for layer in (self.paper_layer, self.ribbons, self.holes, self.border_layer)
+            for layer in (
+                self.paper_layer, self.ribbons, self.holes, self.outlines, self.border_layer,
+            )
             if layer is not None
         ]
         self.add(*layers)
@@ -429,6 +432,10 @@ class Lace(VGroup):
             d = stage_dur["construction"]
             animations.append(FadeOut(source_layer, run_time=d * 0.25))
             animations.append(Create(self.ribbons.copy(), run_time=d))
+            if self.render_mode == "ribbon" and len(self.outlines):
+                # Pieces whose exterior has flush chords are stroked by their runs in the
+                # outline layer, so it has to be created with the fills, not instead of them.
+                animations.append(Create(self.outlines.copy(), run_time=d))
             animations.extend(
                 self._trace_note(plan, "construction", "region.face_walk", mode=mode, run_time=d)
             )
@@ -544,6 +551,13 @@ def _paint_order(pieces: list[Any], plan: StylePlan | None) -> list[Any]:
     )
 
 
+#: ``z_index`` of the fill-coloured hairline that closes the seams between abutting pieces
+#: of one strand. It has to sit below the fills (0 and up) but above the paper (-1): each
+#: fill then covers it again except exactly in the antialiased seam, and, being below the
+#: outlines too, it cannot nick the strokes that are drawn on top.
+_SEAM_FILL_Z = -0.5
+
+
 def _region_groups(
     regions: list[Any],
     *,
@@ -555,11 +569,21 @@ def _region_groups(
     hole_color: Any,
     draw_holes: bool,
     plan: StylePlan | None = None,
-) -> tuple[VGroup, VGroup]:
-    """Turn ribbon regions into a filled VGroup plus a separate hole VGroup.
+) -> tuple[VGroup, VGroup, VGroup]:
+    """Turn ribbon regions into a filled VGroup, a hole VGroup and an outline VGroup.
 
     Manim has no even-odd fill, so a hole is painted as its own polygon on top of the
     ribbon. Ring roles stay available on the geometry side for anything more exact.
+
+    A piece whose exterior has flush edges (see ``RibbonRegion.flush_edges``) is filled
+    without an outline stroke and its outline goes into the returned outline group as open
+    runs instead: those chords are seams of the section split, and stroking them would draw
+    a tick across a strand that runs straight through. The fill of such a piece is closed
+    over the seams with a hairline in the fill's own colour, drawn one layer below the
+    fills — two abutting polygons each paint only part of the pixels on their shared edge,
+    so an unstroked seam would otherwise show the background through as a light line across
+    the strand. That hairline shares the "close what the outline leaves open" job, so it is
+    a member of the outline group too, told apart by its ``z_index``.
 
     A style plan, when given, supplies per-region colours and opacity instead of the
     uniform ones.
@@ -567,18 +591,41 @@ def _region_groups(
     ordered = _paint_order(regions, plan)
     ribbons = VGroup()
     holes = VGroup()
+    outlines = VGroup()
     for index, region in enumerate(ordered):
         assignment = plan.assignment_for(_object_id(region)) if plan is not None else None
+        piece_opacity = assignment.opacity if assignment is not None else stroke_opacity
+        paint_color = assignment.paint_color if assignment is not None else fill_color
+        paint_opacity = assignment.fill_opacity if assignment is not None else fill_opacity
         mob = _polyline_to_vmobject(region.exterior.points, closed=True)
-        mob.set_fill(
-            assignment.paint_color if assignment is not None else fill_color,
-            opacity=assignment.fill_opacity if assignment is not None else fill_opacity,
+        mob.set_fill(paint_color, opacity=paint_opacity)
+        runs = _outline_mobjects(
+            region, color=stroke_color, width=stroke_width,
+            opacity=piece_opacity, z_index=index,
         )
-        mob.set_stroke(
-            stroke_color,
-            width=stroke_width,
-            opacity=assignment.opacity if assignment is not None else stroke_opacity,
-        )
+        if not region.flush_edges:
+            mob.set_stroke(stroke_color, width=stroke_width, opacity=piece_opacity)
+        else:
+            # The seams are seams of the split, not boundaries of the strand: no outline
+            # stroke goes along them and the outline layer draws the runs in between. A piece
+            # whose every edge is a seam has no outline of its own at all, which is correct —
+            # the strand continues on all sides.
+            #
+            # The pieces are still separate polygons, and two polygons paint only part of the
+            # pixels along their shared edge, so an untouched seam would show the background
+            # as a hairline straight through the strand. Stroking the chord itself in the
+            # fill's own colour one layer below the fills closes it: every fill covers that
+            # line again except exactly in the seam. It belongs to no piece's outline, so it
+            # goes into the outline group as well, one layer down.
+            if paint_opacity > 0.0 and stroke_width > 0.0:
+                for chord in _seam_chords(region):
+                    seam = _polyline_to_vmobject(chord, closed=False)
+                    seam.set_fill(opacity=0)
+                    seam.set_stroke(paint_color, width=stroke_width, opacity=paint_opacity)
+                    seam.z_index = _SEAM_FILL_Z
+                    outlines.add(seam)
+            mob.set_stroke(width=0)
+            outlines.add(*runs)
         # Overlapping sections of a self-crossing path are resolved by this order.
         mob.z_index = index
         ribbons.add(mob)
@@ -589,7 +636,7 @@ def _region_groups(
                 hole_mob.set_stroke(width=0)
                 hole_mob.z_index = index
                 holes.add(hole_mob)
-    return ribbons, holes
+    return ribbons, holes, outlines
 
 
 def _paper_group(result: LaceResult, *, color: Any, margin: float) -> VGroup:
@@ -627,6 +674,139 @@ def _polyline_to_vmobject(points: np.ndarray, *, closed: bool = False) -> VMobje
     mob = VMobject()
     mob.set_points_as_corners(xyz)
     return mob
+
+
+def _distance_to_line(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:
+    direction = end - start
+    length = float(np.hypot(direction[0], direction[1]))
+    if length == 0.0:
+        return float(np.hypot(*(point - start)))
+    normal = np.array([-direction[1], direction[0]]) / length
+    return abs(float(np.dot(point - start, normal)))
+
+
+def _rejoin_collinear(points: np.ndarray, tolerance: float = 1e-7) -> np.ndarray:
+    """Drop the vertices that lie on the straight line through their neighbours.
+
+    Boolean subtraction and polygonisation cut one straight edge into several collinear
+    pieces — the corner of a lens, the chord of a section split. Stroking each piece on its
+    own turns what should be a single line across the strand into a row of ticks, so the
+    run is re-joined first. A real corner is nowhere near collinear and survives.
+
+    A vertex the boundary walks *back* along (a zero-width spike, which polygonisation of a
+    self-touching region does produce) is kept even though it is collinear: dropping it
+    would shorten the stroke by the length of the spike and leave a gap in the outline.
+    """
+    if len(points) < 3:
+        return points
+    kept: list[np.ndarray] = [points[0]]
+    for index in range(1, len(points) - 1):
+        previous, current, following = kept[-1], points[index], points[index + 1]
+        reverses = float(np.dot(current - previous, following - current)) <= 0.0
+        if reverses or _distance_to_line(current, previous, following) > tolerance:
+            kept.append(current)
+    kept.append(points[-1])
+    return np.array(kept)
+
+
+def _ring_paths(region: Any, *, seams: bool) -> list[list[np.ndarray]]:
+    """Maximal polylines of a piece's exterior ring, split at the section seams.
+
+    Splitting a self-crossing path into sections leaves chords across the strand where two
+    pieces of the *same* strand carry the same material (``RibbonRegion.flush_edges``). With
+    ``seams=False`` the returned paths are the runs of boundary *between* those chords; with
+    ``seams=True`` they are those chords themselves.
+
+    Callers must look at ``flush_edges`` to tell "no seams at all" from "all seams": a piece
+    without seams has no seam path, and its whole closed ring is its outline, which is not a
+    path this function returns.
+    """
+    flush = set(region.flush_edges)
+    if not flush:
+        return []
+    points = np.asarray(region.exterior.points, dtype=float)
+    count = len(points) - 1  # the exterior repeats its first point at the end
+    start = min(flush)
+    paths: list[list[np.ndarray]] = []
+    current: list[np.ndarray] = []
+    for step in range(count):
+        vertex = (start + 1 + step) % count
+        following = (vertex + 1) % count
+        if (vertex in flush) is seams:
+            if not current:
+                current = [points[vertex]]
+            current.append(points[following])
+        elif current:
+            paths.append(current)
+            current = []
+    if current:
+        paths.append(current)
+    return paths
+
+
+def _stroke_runs(region: Any) -> list[np.ndarray]:
+    """The parts of a piece's outline that are a real boundary, as open polylines.
+
+    The strand runs straight through a seam, so stroking it draws a tick across the ribbon
+    and makes the ribbon look cut although it is not. The outline is therefore drawn as the
+    runs *between* those chords; a piece all of whose edges are seams yields no run at all.
+    """
+    return [_rejoin_collinear(np.array(path)) for path in _ring_paths(region, seams=False)]
+
+
+def _seam_chords(region: Any) -> list[np.ndarray]:
+    """The seams of a piece as open polylines, one per run of seam edges.
+
+    These are the chords the fill has to be closed over: they are not part of the strand's
+    boundary, so nothing may be stroked along them in the outline colour.
+    """
+    return [np.array(path) for path in _ring_paths(region, seams=True)]
+
+
+#: Manim's own line-width multiple: a ``stroke_width`` of 1 is 0.01 world units thick, see
+#: :mod:`manim_lace.render.pixels`.
+_STROKE_WIDTH_TO_UNITS = 0.01
+
+
+def _extend_ends(points: np.ndarray, extension: float) -> np.ndarray:
+    """Push both ends of a stroke run outwards by ``extension`` world units.
+
+    A run stops at a seam and the next run takes over on the far side of it, so their butt
+    caps meet in a single point. Polygon antialiasing leaves that joint partly uncovered and
+    the fill underneath shows through as a dot on the outline; letting the two runs overlap a
+    little closes it. Each end is extended along its own last edge, which is a strand edge
+    rather than the seam, so the extra length lands on the line the outline already draws.
+    """
+    if extension <= 0.0 or len(points) < 2:
+        return points
+    extended = points.copy()
+    for end, neighbour in ((0, 1), (-1, -2)):
+        direction = points[end] - points[neighbour]
+        length = float(np.hypot(direction[0], direction[1]))
+        if length > 0.0:
+            reach = min(extension, 0.5 * length)
+            extended[end] = points[end] + direction * (reach / length)
+    return extended
+
+
+def _outline_mobjects(
+    region: Any, *, color: Any, width: float, opacity: float, z_index: int
+) -> list[VMobject]:
+    """Stroke-only mobjects for the outline runs of a piece, one per run.
+
+    One mobject per run instead of one mobject with several subpaths: ``start_new_path``
+    links the new subpath to the previous one with a line, which is exactly the seam this
+    is meant to leave out.
+    """
+    extension = 0.5 * _STROKE_WIDTH_TO_UNITS * max(float(width), 0.0)
+    mobjects = []
+    for run in _stroke_runs(region):
+        mob = _polyline_to_vmobject(_extend_ends(run, extension), closed=False)
+        mob.set_fill(opacity=0)
+        mob.set_stroke(color, width=width, opacity=opacity)
+        mob.z_index = z_index
+        mobjects.append(mob)
+    return mobjects
 
 
 #: Manim's name for each cap style the geometry layer knows about.

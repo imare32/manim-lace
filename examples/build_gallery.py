@@ -479,15 +479,16 @@ def _code_cell(codes: list[str]) -> str:
     return f"<span class='codes'>{html.escape('、'.join(codes) or '—')}</span>"
 
 
-def backend_table(laces: list[Lace]) -> str:
+def backend_table(entries: list[tuple[str, Lace]]) -> str:
     """The accounting each backend reported in its own trace events (no re-computation)."""
     rows = []
-    for lace in laces:
+    for label, lace in entries:
         if lace.render_mode != "ribbon":
             continue
         accounting = _event_data(lace, "region.accounting")
         walk = _event_data(lace, "region.face_walk")
         rows.append((
+            html.escape(label),
             f"<code>{lace.engine.ribbon_backend}</code>",
             f"{len(lace.result.pieces)}",
             f"{accounting.get('region_area_sum', 0.0):.6f}",
@@ -500,7 +501,7 @@ def backend_table(laces: list[Lace]) -> str:
             _code_cell(sorted({diagnostic.code for diagnostic in lace.diagnostics})),
         ))
     return _table(
-        ("后端", "可见区域", "区域面积和", "可见面积", "丝带并集", "被隐藏", "遍历节点",
+        ("场景", "后端", "可见区域", "区域面积和", "可见面积", "丝带并集", "被隐藏", "遍历节点",
          "归属数", "遍历面数", "诊断"),
         rows,
     )
@@ -738,8 +739,16 @@ def write_page(collected: list[Collected], *, quality: str, rendered_now: bool) 
         items = [by_key[card.key] for card in section.cards if card.key in by_key]
         blocks.append(f"<h2>{html.escape(section.title)}<span>{html.escape(section.subtitle)}</span></h2>")
         if section.key == "backend":
-            for item in items:
-                blocks.append(backend_table(item.laces))
+            # One table for the whole section, so the sub-backends can be compared row
+            # by row (including the areas each of them hid).
+            entries = [
+                (item.card.title, lace)
+                for item in items
+                for lace in item.laces
+                if lace.render_mode == "ribbon"
+            ]
+            if entries:
+                blocks.append(backend_table(entries))
         if section.key == "rosette":
             blocks.append(rosette_limits_table())
         if section.key == "style":
