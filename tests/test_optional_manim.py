@@ -78,7 +78,8 @@ def test_ribbon_mode_builds_filled_regions():
     assert len(lace.ribbons) == len(lace.result.pieces) >= 2
     assert all(mob.get_fill_opacity() == pytest.approx(1.0) for mob in lace.ribbons)
     assert all(mob.get_stroke_width() > 0 for mob in lace.ribbons)
-    for mob, region in zip(lace.ribbons, lace.result.pieces, strict=True):
+    expected = sorted(lace.result.pieces, key=lambda item: (item.draw_index, item.region_id))
+    for mob, region in zip(lace.ribbons, expected, strict=True):
         corners = np.asarray(mob.points)[:, :2]
         assert np.allclose(corners[0], region.exterior.points[0], atol=1e-12)
         assert np.allclose(corners.min(axis=0), region.exterior.points.min(axis=0), atol=1e-9)

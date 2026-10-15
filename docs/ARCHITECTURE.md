@@ -59,26 +59,42 @@ instead of breaking the core import.
 
 - One offset band per path (`LineString.buffer` with the configured cap/join strategy and
   miter limit) is the ribbon area.
-- At each woven crossing the *under* band loses the Boolean intersection with the *over*
-  band, restricted to the connected component that contains the crossing point. That
-  component is the exact local footprint of the over ribbon: no radius, no shallow-angle
-  clamp, no cap compensation. Intersecting the whole bands instead would cut the under
-  ribbon at every crossing the two paths share, which the area-conservation test catches.
+- At each woven crossing between two paths the *under* band loses the Boolean intersection
+  with the *over* band, restricted to the connected component that contains the crossing
+  point. That component is the exact local footprint of the over ribbon: no radius, no
+  shallow-angle clamp, no cap compensation. Intersecting the whole bands instead would cut
+  the under ribbon at every crossing the two paths share, which the area test catches.
+- A self-crossing cannot be expressed that way: both passes are the same band, and a band
+  cannot be over and under itself. Such a path is therefore cut into *sections* at its two
+  passes (`_StripBuilder`), emitted as separate overlapping regions, and the crossing is
+  resolved by the painter order: `RibbonRegion.draw_index` puts the sections of the under
+  pass before the sections of the over pass. This is the same "order covers the crossing"
+  strategy the stroke backend uses, and it is disclosed through
+  `REGION-OVERLAPPING-SECTIONS` (the area sum is then larger than the painted area).
+- The order itself comes from `render/order.py::paint_order`, shared with the stroke
+  backend, so both backends derive the painter sequence from the same assignments. A
+  cyclic relation is broken deterministically and reported (`REGION-DRAW-ORDER-CYCLE`
+  when sections are involved, `RENDER-DRAW-ORDER-CYCLE` when a clamped cut is).
 - `RibbonRegion` exposes an exterior ring plus hole rings, each tagged `exterior`,
   `source_contour` (an interior contour the source shape already had) or `occlusion` (a
   gap the weave created), with exteriors counter-clockwise and holes clockwise. Faces and
   holes are therefore defined by geometry, not by a fill rule or ring size (FR-058).
-- Validation is explicit: an invalid offset outline is repaired through `make_valid` and
-  reported as `REGION-INVALID-OUTLINE`; a zero-length path reports `REGION-EMPTY-RIBBON`;
-  and the result carries `band_area`, `removed_area`, `union_area` and `covered_area` so
-  the invariant "visible areas = union of the bands" is checkable
-  (`REGION-AREA-MISMATCH` when three or more ribbons overlap away from a crossing).
-- Known limit, reported rather than hidden: a self-crossing's two passes share one band,
-  and this backend does not split bands per pass yet, so those crossings stay unwoven
-  (`REGION-SELF-CROSSING-UNSUPPORTED`). A crossing without an assignment reports
-  `REGION-MISSING-ASSIGNMENT`.
+- Validation is explicit and the accounting is checkable: an invalid offset outline is
+  repaired through `make_valid` and reported as `REGION-INVALID-OUTLINE`; a zero-length
+  path reports `REGION-EMPTY-RIBBON`; a section that does not tile the band (a split on a
+  polyline vertex) reports `REGION-SECTION-SEAM`; a crossing without an assignment reports
+  `REGION-MISSING-ASSIGNMENT`. The invariant is `painted_area == union_area` (the union of
+  the visible regions equals the ribbon that was built), with `region_area_sum` exposed
+  separately because sections of one self-crossing path overlap by design.
+- Known limit, reported rather than hidden: when several crossings land on the *same*
+  point (three strands at one spot), each crossing removes the overlap it sees and the
+  removals cancel out, so coverage is no longer conserved. That is reported as
+  `REGION-COINCIDENT-CROSSINGS` together with `REGION-AREA-MISMATCH`, rather than being
+  smoothed over. A planar arrangement with per-face strand labels is the principled fix
+  and is the remaining M4 item.
 - Manim has no even-odd fill, so the facade paints hole rings as its own layer
-  (`Lace.holes`) with `hole_color`; the geometry result is independent of that choice.
+  (`Lace.holes`) with `hole_color`, and paints regions in `draw_index` order with a
+  matching `z_index`; the geometry result is independent of both choices.
 
 ## Event policy and conflict strategy
 

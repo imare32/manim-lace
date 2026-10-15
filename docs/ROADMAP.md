@@ -115,13 +115,19 @@ cap/order and region-backend work.
 - [~] Prototype Shapely-based Boolean regions vs a dedicated half-edge arrangement: the
       Shapely prototype is implemented (`render/regions.py`, `render_mode='ribbon'`, the
       optional `geometry` extra). Each path becomes one offset band; at every woven
-      crossing the under band loses the exact Boolean intersection with the over band
-      *local to that crossing* (component containing the crossing point), so no radius,
-      no shallow-angle clamp and no cap compensation is involved. Self-crossings are
-      reported as unsupported (`REGION-SELF-CROSSING-UNSUPPORTED`) because their two
-      passes share one band, and a crossing without an assignment reports
-      `REGION-MISSING-ASSIGNMENT`; neither is silently un-woven. A half-edge/planar
-      arrangement comparison has not been started.
+      crossing between two paths the under band loses the exact Boolean intersection with
+      the over band *local to that crossing* (component containing the crossing point), so
+      no radius, no shallow-angle clamp and no cap compensation is involved. A path that
+      crosses itself is cut into sections at its two passes and emitted as overlapping
+      regions whose painter order (`RibbonRegion.draw_index`, computed by
+      `render/order.py::paint_order`, shared with the stroke backend) decides which pass is
+      on top — the same strategy the stroke backend uses, and disclosed through
+      `REGION-OVERLAPPING-SECTIONS`. Two situations are reported instead of smoothed over:
+      a crossing without an assignment (`REGION-MISSING-ASSIGNMENT`) and several crossings
+      landing on one point, where the per-crossing removals cancel out and coverage is no
+      longer conserved (`REGION-COINCIDENT-CROSSINGS` + `REGION-AREA-MISMATCH`). The
+      remaining work is the half-edge/planar arrangement comparison itself, which would
+      also give per-face strand labels for the coincident case.
 - [x] Define faces and holes independently of rendering fill rules: `RibbonRegion` holds
       an exterior ring plus tagged hole rings (`exterior` / `source_contour` /
       `occlusion`), exteriors counter-clockwise and holes clockwise; the Manim facade

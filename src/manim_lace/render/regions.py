@@ -2,9 +2,14 @@
 
 The stroke backend cuts centerlines with a heuristic radius. This backend builds the
 actual ribbon areas instead and removes, at every woven crossing, the exact Boolean
-intersection of the two ribbons: no radius, no shallow-angle clamp, no cap
-compensation. The removed lens is precisely the footprint of the ribbon that is over,
-which is what "the over strand hides the under strand" means geometrically.
+intersection of the two ribbons: no radius, no shallow-angle clamp, no cap compensation.
+The removed lens is precisely the footprint of the ribbon that is over, which is what
+"the over strand hides the under strand" means geometrically.
+
+Each path's band is cut at the crossings it takes part in, so the two passes of a
+self-crossing become *sections* that can be over and under each other — a single band
+cannot be both. Sections meet exactly on the split line, so their union is the whole
+band again and no seam is introduced.
 
 Regions are extracted with a validated Boolean engine (Shapely), as SPEC FR-054
 requires, instead of a cycle-basis polygon heuristic. Ring roles are reported
@@ -24,6 +29,7 @@ import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
 from ..model import CapStyle, CrossingEvent, JoinStyle, PolylinePath, WeaveTopology
+from .order import paint_order
 
 __all__ = [
     "RegionRenderResult",
@@ -69,13 +75,19 @@ class RegionRing:
 
 @dataclass(slots=True)
 class RibbonRegion:
-    """The visible area of one path after the weave has been applied."""
+    """The visible area of one path, or of one section of a self-crossing path.
+
+    ``draw_index`` orders the regions: a region of an under strand always comes before
+    the regions over it. Overlaps only occur between sections of one self-crossing
+    path, where the paint order is what shows which strand is on top.
+    """
 
     region_id: str
     path_id: str
     exterior: RegionRing
     holes: list[RegionRing] = field(default_factory=list)
     area: float = 0.0
+    draw_index: int = 0
 
     @property
     def rings(self) -> list[RegionRing]:
@@ -84,31 +96,62 @@ class RibbonRegion:
 
 @dataclass(slots=True)
 class RegionRenderResult:
-    """Regions plus the accounting that makes them checkable (SPEC FR-059)."""
+    """Regions plus the accounting that makes them checkable (SPEC FR-059).
+
+    ``painted_area`` is the union of the visible regions, i.e. what a renderer shows
+    when it honours ``draw_index``; ``region_area_sum`` is the plain sum, which is
+    larger wherever sections of one self-crossing path overlap. The invariant to check
+    is ``painted_area == union_area`` (the ribbon that was built), and
+    ``union_area == band_area`` for everything that was not divided into sections.
+    """
 
     regions: list[RibbonRegion]
     diagnostics: list[Diagnostic] = field(default_factory=list)
     removed_area: float = 0.0
     band_area: float = 0.0
     union_area: float = 0.0
+    painted_area: float = 0.0
+    region_area_sum: float = 0.0
 
     @property
     def covered_area(self) -> float:
-        return float(sum(region.area for region in self.regions))
+        """The painted area, i.e. the union of the regions."""
+        return self.painted_area
 
     @property
     def holes(self) -> list[RegionRing]:
         """Every hole ring of every region, for adapters that paint them separately."""
         return [ring for region in self.regions for ring in region.holes]
 
+    def ordered_regions(self) -> list[RibbonRegion]:
+        """Regions in the deterministic paint order (see ``RibbonRegion.draw_index``)."""
+        return sorted(self.regions, key=lambda region: (region.draw_index, region.region_id))
+
     def regions_for(self, path_id: str) -> list[RibbonRegion]:
         return [region for region in self.regions if region.path_id == path_id]
 
 
-def _require_shapely() -> tuple[Any, Any, Any, Any, Any]:
+@dataclass(frozen=True, slots=True)
+class _Strip:
+    """One ribbon section of a path, between two of the crossings it takes part in.
+
+    Sections are needed only where a single band cannot answer the question: the two
+    passes of a self-crossing share one band, and a band cannot be both over and under
+    itself. Elsewhere the whole band stays one geometry, which keeps the exact
+    subtraction of the current crossing independent of every other one.
+    """
+
+    strip_id: str
+    path_id: str
+    start_arc: float
+    end_arc: float
+    band: Any
+
+
+def _require_shapely() -> tuple[Any, Any, Any, Any, Any, Any]:
     """Import the optional Boolean engine, with the install hint when it is missing."""
     try:
-        from shapely.geometry import LineString, Point
+        from shapely.geometry import LineString, Point, Polygon
         from shapely.geometry.polygon import orient
         from shapely.ops import unary_union
         from shapely.validation import make_valid
@@ -116,7 +159,7 @@ def _require_shapely() -> tuple[Any, Any, Any, Any, Any]:
         raise ImportError(
             "render_mode='ribbon' 需要可选依赖 shapely：pip install 'manim-lace[geometry]'"
         ) from exc
-    return LineString, Point, unary_union, make_valid, orient
+    return LineString, Point, Polygon, unary_union, make_valid, orient
 
 
 def _ring_points(ring: Any) -> np.ndarray:
@@ -173,16 +216,18 @@ def _hole_roles(polygon: Any, source_hole_areas: list[float]) -> list[RingRole]:
     return roles
 
 
-def _local_lens(under_band: Any, over_band: Any, point: tuple[float, float], point_class: Any) -> Any | None:
+def _local_lens(
+    under_region: Any, over_region: Any, point: tuple[float, float], point_class: Any
+) -> Any | None:
     """The overlap component that belongs to one crossing, and only that one.
 
-    Two bands meet once per crossing, but intersecting them as whole geometries
-    returns every overlap the two ribbons share. Subtracting all of it would cut the
-    under ribbon at the other crossings too, so the component that contains this
-    crossing point — the exact local footprint of the over ribbon — is selected
-    instead. No radius or angle heuristic is involved.
+    Two ribbons can meet more than once, and intersecting them as whole geometries
+    returns every overlap they share. Subtracting all of it would cut the under ribbon
+    at the other crossings too, so the component that contains this crossing point —
+    the exact local footprint of the over ribbon — is selected instead. No radius or
+    angle heuristic is involved.
     """
-    intersection = under_band.intersection(over_band)
+    intersection = under_region.intersection(over_region)
     if intersection.is_empty:
         return None
     probe = point_class(point[0], point[1])
@@ -196,8 +241,225 @@ def _local_lens(under_band: Any, over_band: Any, point: tuple[float, float], poi
     if containing:
         return max(containing, key=lambda polygon: polygon.area)
     nearest = min(candidates, key=lambda polygon: polygon.distance(probe))
-    scale = max(abs(float(under_band.bounds[2] - under_band.bounds[0])), 1.0)
+    scale = max(abs(float(under_region.bounds[2] - under_region.bounds[0])), 1.0)
     return nearest if nearest.distance(probe) <= 1e-9 * scale else None
+
+
+def _point_at(path: PolylinePath, arc: float) -> np.ndarray:
+    return _arc_frame(path, arc)[0]
+
+
+def _arc_points(path: PolylinePath, start: float, end: float) -> np.ndarray:
+    """The polyline of a path between two arcs; closed paths may wrap past the seam."""
+    length = float(path.length)
+    cumulative = path.cumulative_lengths
+    inner: list[float] = []
+    if path.closed:
+        base = cumulative[:-1]
+        low = int(np.floor(start / max(length, 1e-30))) - 1
+        high = int(np.ceil(end / max(length, 1e-30))) + 1
+        for step in range(low, high + 1):
+            inner.extend((base + step * length).tolist())
+    else:
+        inner = cumulative.tolist()
+    sequence = [start, *[value for value in inner if start + 1e-10 < value < end - 1e-10], end]
+    points = [_point_at(path, value) for value in sequence]
+    compact = [points[0]]
+    for point in points[1:]:
+        if float(np.linalg.norm(point - compact[-1])) > 1e-12:
+            compact.append(point)
+    if len(compact) == 1:
+        compact.append(compact[0].copy())
+    return np.asarray(compact)
+
+
+def _arc_frame(path: PolylinePath, arc: float) -> tuple[np.ndarray, np.ndarray]:
+    """Point and unit tangent at an arc length, wrapped or clamped like the path."""
+    length = float(path.length)
+    if path.closed and length > 0:
+        value = float(arc) % length
+    else:
+        value = float(np.clip(arc, 0.0, length))
+    cumulative = path.cumulative_lengths
+    index = int(np.clip(np.searchsorted(cumulative, value, side="right") - 1, 0, len(cumulative) - 2))
+    segment = path.points[index + 1] - path.points[index]
+    norm = float(np.linalg.norm(segment))
+    if norm <= 0:
+        return path.points[index].copy(), np.array([1.0, 0.0])
+    ratio = (value - float(cumulative[index])) / norm
+    return path.points[index] + ratio * segment, segment / norm
+
+
+def _half_plane(point: np.ndarray, tangent: np.ndarray, extent: float, polygon_class: Any) -> Any:
+    """A large box covering the forward side of the line through ``point``.
+
+    The box edge lies exactly on that line, which is what makes the two sides of a
+    split meet without a gap or an overlap.
+    """
+    normal = np.array([-tangent[1], tangent[0]])
+    across = normal * extent
+    along = tangent * extent
+    return polygon_class([
+        point - across, point + along - across, point + along + across, point + across,
+    ])
+
+
+def _split_arcs(path: PolylinePath, arcs: list[float]) -> list[float]:
+    """Sorted, de-duplicated split positions that actually divide the path."""
+    length = float(path.length)
+    tolerance = 1e-9 * max(length, 1.0)
+    unique: list[float] = []
+    for arc in sorted(float(value) % length if path.closed else float(value) for value in arcs):
+        if unique and arc - unique[-1] <= tolerance:
+            continue
+        unique.append(arc)
+    if not path.closed:
+        # The two path ends are already boundaries of the band.
+        unique = [arc for arc in unique if tolerance < arc < length - tolerance]
+    return unique
+
+
+class _StripBuilder:
+    """Builds and looks up the ribbon sections of the paths that need them.
+
+    A path needs sections only when it crosses itself: its two passes share one band,
+    and one band cannot be both over and under. Everywhere else the whole band stays a
+    single geometry, so the exact subtraction at one crossing stays independent of all
+    the others.
+    """
+
+    def __init__(
+        self,
+        *,
+        offset: float,
+        cap_style: CapStyle,
+        join: JoinStyle,
+        miter_limit: float,
+        point_class: Any,
+        polygon_class: Any,
+        line_class: Any,
+        unary_union: Any,
+    ) -> None:
+        self.offset = float(offset)
+        self.cap_style = cap_style
+        self.miter_limit = float(miter_limit)
+        self.join_style = _JOIN_STYLES[join]
+        self.point_class = point_class
+        self.polygon_class = polygon_class
+        self.line_class = line_class
+        self.unary_union = unary_union
+        self._cache: dict[str, list[_Strip]] = {}
+
+    def _cap_shape(self, point: np.ndarray, tangent: np.ndarray, *, forward: bool) -> Any | None:
+        """The paint the configured cap adds beyond a path end, as its own geometry."""
+        if self.cap_style == "butt":
+            return None
+        direction = tangent if forward else -tangent
+        if self.cap_style == "square":
+            along = direction * self.offset
+            across = np.array([-direction[1], direction[0]]) * self.offset
+            return self.polygon_class([
+                point - across, point + along - across, point + along + across, point + across,
+            ])
+        disc = self.point_class(point[0], point[1]).buffer(self.offset)
+        return disc.intersection(_half_plane(point, direction, 2.0 * self.offset, self.polygon_class))
+
+    def _band(self, path: PolylinePath, start_arc: float, end_arc: float, *, at_start: bool, at_end: bool) -> Any:
+        strip = self.line_class(_arc_points(path, start_arc, end_arc)).buffer(
+            self.offset, cap_style="flat", join_style=self.join_style,
+            mitre_limit=self.miter_limit,
+        )
+        shapes = [strip]
+        for arc, forward, wanted in ((0.0, False, at_start), (float(path.length), True, at_end)):
+            if not wanted or path.closed:
+                continue
+            point, tangent = _arc_frame(path, arc)
+            cap = self._cap_shape(point, tangent, forward=forward)
+            if cap is not None and not cap.is_empty:
+                shapes.append(cap)
+        return strip if len(shapes) == 1 else self.unary_union(shapes)
+
+    def for_path(self, path: PolylinePath, arcs: list[float]) -> list[_Strip]:
+        """The sections of one path, built once and cached."""
+        if path.path_id in self._cache:
+            return self._cache[path.path_id]
+        length = float(path.length)
+        strips: list[_Strip] = []
+        if arcs:
+            if path.closed:
+                for index, start in enumerate(arcs):
+                    wraps = index + 1 == len(arcs)
+                    end = arcs[(index + 1) % len(arcs)] + (length if wraps else 0.0)
+                    strips.append(_Strip(
+                        strip_id=f"{path.path_id}#{index}", path_id=path.path_id,
+                        start_arc=start, end_arc=end,
+                        band=self._band(path, start, end, at_start=False, at_end=False),
+                    ))
+            else:
+                boundaries = [0.0, *arcs, length]
+                for index in range(len(boundaries) - 1):
+                    strips.append(_Strip(
+                        strip_id=f"{path.path_id}#{index}", path_id=path.path_id,
+                        start_arc=boundaries[index], end_arc=boundaries[index + 1],
+                        band=self._band(
+                            path, boundaries[index], boundaries[index + 1],
+                            at_start=index == 0, at_end=index == len(boundaries) - 2,
+                        ),
+                    ))
+        self._cache[path.path_id] = strips
+        return strips
+
+    @staticmethod
+    def adjacent(strips: list[_Strip], arc: float, *, closed: bool, length: float) -> list[_Strip]:
+        """Sections that meet the path at ``arc``: there the under/over strand lives."""
+        tolerance = 1e-9 * max(length, 1.0)
+        targets = [arc, arc + length] if closed else [arc]
+        found: list[_Strip] = []
+        for strip in strips:
+            if any(
+                abs(strip.start_arc - target) <= tolerance or abs(strip.end_arc - target) <= tolerance
+                for target in targets
+            ):
+                found.append(strip)
+        return found
+
+
+def _nodes_for(
+    path_id: str, arc: float, strips: dict[str, list[_Strip]], geometry_by_id: dict[str, PolylinePath]
+) -> list[str]:
+    """Paint-order nodes that represent a path at one crossing.
+
+    A divided path is represented by the sections that meet the crossing; everything
+    else by the path itself.
+    """
+    group = strips.get(path_id)
+    path = geometry_by_id.get(path_id)
+    if not group or path is None:
+        return [path_id]
+    found = _StripBuilder.adjacent(
+        group, arc, closed=path.closed, length=float(path.length)
+    )
+    return [strip.strip_id for strip in found] or [path_id]
+
+
+def _boxes_overlap(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
+    return not (
+        second[2] < first[0] or second[0] > first[2]
+        or second[3] < first[1] or second[1] > first[3]
+    )
+
+
+def _subtract_from_strips(strips: list[_Strip], visible: dict[str, Any], lens: Any) -> float:
+    """Remove one lens from the sections it actually overlaps."""
+    removed = 0.0
+    for strip in strips:
+        current = visible[strip.strip_id]
+        if current.is_empty or not _boxes_overlap(current.bounds, lens.bounds):
+            continue
+        before = float(current.area)
+        visible[strip.strip_id] = current.difference(lens)
+        removed += before - float(visible[strip.strip_id].area)
+    return removed
 
 
 def render_region_geometry(
@@ -213,16 +475,16 @@ def render_region_geometry(
 ) -> RegionRenderResult:
     """Build area-based ribbon regions and weave them by exact Boolean subtraction.
 
-    Every path becomes one offset band (``offset`` is the ribbon half-width). At each
-    woven crossing the *under* band loses the intersection with the *over* band, which
-    is exactly the area the over ribbon covers there. ``join`` selects the offset
-    connection strategy (``miter`` obeys ``miter_limit``); ``cap_style`` has the same
-    meaning as in the stroke backend, but here the caps are real geometry rather than a
-    widened heuristic gap.
+    Every path becomes one offset band (``offset`` is the ribbon half-width), cut into
+    sections at the crossings it takes part in. At each woven crossing the sections of
+    the under strand lose the intersection with the sections of the over strand that
+    are local to that crossing — exactly the area the over ribbon covers there.
+    ``join`` selects the offset connection strategy (``miter`` obeys ``miter_limit``);
+    ``cap_style`` has the same meaning as in the stroke backend, but here the caps are
+    real geometry rather than a widened heuristic gap.
 
-    Two situations are reported instead of guessed: a self-crossing, whose two passes
-    share one band (splitting a band per pass is a separate step), and a crossing
-    without an assignment, which cannot be woven at all.
+    A crossing whose under or over arc cannot be located in the section structure is
+    reported as ``REGION-CROSSING-SKIPPED`` instead of being woven wrongly.
     """
     if not np.isfinite(offset) or offset <= 0:
         raise ValueError("offset must be positive and finite")
@@ -234,11 +496,12 @@ def render_region_geometry(
         raise ValueError("miter_limit must be positive and finite")
     if not np.isfinite(area_tolerance) or area_tolerance < 0:
         raise ValueError("area_tolerance must be finite and non-negative")
-    LineString, Point, unary_union, make_valid, orient = _require_shapely()
+    LineString, Point, Polygon, unary_union, make_valid, orient = _require_shapely()
 
     diagnostics: list[Diagnostic] = []
     bands: dict[str, Any] = {}
     source_hole_areas: dict[str, list[float]] = {}
+    geometry_by_id = {path.path_id: path for path in paths}
     for path in paths:
         if path.length <= 0:
             diagnostics.append(Diagnostic(
@@ -270,25 +533,31 @@ def render_region_geometry(
             _ring_area(ring) for polygon in _polygons(band) for ring in polygon.interiors
         ]
 
-    visible = dict(bands)
+    # A path is cut into sections only when it crosses itself: its two passes share one
+    # band, and one band cannot be over and under itself. Everything else keeps the
+    # whole band, which is what makes an ordinary crossing exactly local.
+    weavable = [crossing for crossing in crossings if crossing.kind == "transverse"]
+    self_crossings = [crossing for crossing in weavable if crossing.path_a == crossing.path_b]
+    split_arcs: dict[str, list[float]] = {path_id: [] for path_id in bands}
+    for crossing in self_crossings:
+        split_arcs[crossing.path_a].extend((crossing.s_a, crossing.s_b))
+    builder = _StripBuilder(
+        offset=offset, cap_style=cap_style, join=join, miter_limit=miter_limit,
+        point_class=Point, polygon_class=Polygon, line_class=LineString, unary_union=unary_union,
+    )
+    strips: dict[str, list[_Strip]] = {}
+    for path in paths:
+        if path.path_id not in bands or not split_arcs.get(path.path_id):
+            continue
+        strips[path.path_id] = builder.for_path(
+            path, _split_arcs(path, split_arcs[path.path_id])
+        )
+    visible_band: dict[str, Any] = dict(bands)
+    visible_strip: dict[str, Any] = {
+        strip.strip_id: strip.band for group in strips.values() for strip in group
+    }
     removed_area = 0.0
-    for crossing in crossings:
-        if crossing.kind != "transverse":
-            continue
-        if crossing.path_a == crossing.path_b:
-            diagnostics.append(Diagnostic(
-                code="REGION-SELF-CROSSING-UNSUPPORTED",
-                severity=Severity.WARNING,
-                message=(
-                    f"自交 {crossing.crossing_id} 的两次经过属于同一条带，区域后端尚不能"
-                    "把它们拆成两个面，因此该处未做切除（丝带保持完整）。"
-                ),
-                path_ids=(crossing.path_a,),
-                crossing_id=crossing.crossing_id,
-                point=crossing.point,
-                hints=("需要按经过把中心线拆成子带；在那之前该事件不会被静默处理。",),
-            ))
-            continue
+    for crossing in weavable:
         assignment = topology.assignment_for(crossing.crossing_id)
         if assignment is None:
             diagnostics.append(Diagnostic(
@@ -300,46 +569,163 @@ def render_region_geometry(
                 point=crossing.point,
             ))
             continue
+        if crossing.path_a == crossing.path_b:
+            # One path: both passes are sections of the same ribbon, and the sections
+            # already overlap at the crossing. Painting the over section after the under
+            # one shows the same result as cutting, without removing area that belongs
+            # to the strand on top.
+            continue
         under_id = crossing.path_a if assignment.under_side == "a" else crossing.path_b
         over_id = crossing.path_b if assignment.under_side == "a" else crossing.path_a
-        under_band, over_band = visible.get(under_id), bands.get(over_id)
-        if under_band is None or over_band is None or under_band.is_empty:
+        current = visible_band.get(under_id)
+        over_band = bands.get(over_id)
+        if current is None or over_band is None or current.is_empty:
             continue
-        lens = _local_lens(under_band, over_band, crossing.point, Point)
+        lens = _local_lens(current, over_band, crossing.point, Point)
         if lens is None:
             continue
-        before = float(under_band.area)
-        visible[under_id] = under_band.difference(lens)
-        removed_area += before - float(visible[under_id].area)
+        if under_id in strips:
+            # A divided path is cut section by section; the lens is local, so the
+            # bounding boxes keep this to the one or two sections it touches.
+            removed_area += _subtract_from_strips(strips[under_id], visible_strip, lens)
+            continue
+        before = float(current.area)
+        visible_band[under_id] = current.difference(lens)
+        removed_area += before - float(visible_band[under_id].area)
 
+    path_position = {path.path_id: index for index, path in enumerate(paths)}
+    node_of: dict[str, str] = {}
+    order_nodes: list[str] = []
+    for path in paths:
+        if strips.get(path.path_id):
+            for strip in strips[path.path_id]:
+                node_of[strip.strip_id] = path.path_id
+                order_nodes.append(strip.strip_id)
+        elif path.path_id in bands:
+            node_of[path.path_id] = path.path_id
+            order_nodes.append(path.path_id)
+    order_edges: list[tuple[str, str]] = []
+    for crossing in weavable:
+        assignment = topology.assignment_for(crossing.crossing_id)
+        if assignment is None:
+            continue
+        under_id = crossing.path_a if assignment.under_side == "a" else crossing.path_b
+        over_id = crossing.path_b if assignment.under_side == "a" else crossing.path_a
+        under_arc = crossing.s_a if assignment.under_side == "a" else crossing.s_b
+        over_arc = crossing.s_b if assignment.under_side == "a" else crossing.s_a
+        under_nodes = _nodes_for(under_id, under_arc, strips, geometry_by_id)
+        over_nodes = _nodes_for(over_id, over_arc, strips, geometry_by_id)
+        order_edges.extend((under, over) for under in under_nodes for over in over_nodes)
+    layers, congested = paint_order(order_nodes, order_edges)
+    ordered = sorted(order_nodes, key=lambda node: (layers[node], path_position[node_of[node]], node))
+    draw_index = {node: index for index, node in enumerate(ordered)}
+    if congested and strips:
+        diagnostics.append(Diagnostic(
+            code="REGION-DRAW-ORDER-CYCLE",
+            severity=Severity.INFO,
+            message=(
+                "过／欠关系存在环，且其中有路径被拆成分段（自交必须靠绘制顺序解决）；"
+                "顺序按节点顺序确定性打破，可能有个别交叉的上下关系与几何期望相反。"
+            ),
+            details={"constraints": [[under, over] for under, over in congested]},
+            hints=("两条股线交叉偶数次时该环必然出现；不透明填充顺序仍需遵守 draw_index。",),
+        ))
+    overlapping_paths = sorted({
+        crossing.path_a for crossing in self_crossings
+        if topology.assignment_for(crossing.crossing_id) is not None
+    })
+    if overlapping_paths:
+        diagnostics.append(Diagnostic(
+            code="REGION-OVERLAPPING-SECTIONS",
+            severity=Severity.INFO,
+            message=(
+                "自交路径按分段输出互相重叠的面域，重叠处（交叉）由 draw_index 决定谁在上，"
+                "因此区域面积之和会大于可见面积。"
+            ),
+            path_ids=tuple(overlapping_paths),
+            details={"path_ids": overlapping_paths},
+            hints=("填充时按 RibbonRegion.draw_index 递增绘制；可见面积请用 painted_area。",),
+        ))
+    coincident: dict[tuple[float, float], list[str]] = {}
+    for crossing in weavable:
+        key = (round(float(crossing.point[0]), 9), round(float(crossing.point[1]), 9))
+        coincident.setdefault(key, []).append(crossing.crossing_id)
+    groups = [ids for ids in coincident.values() if len(ids) > 1]
+    if groups:
+        diagnostics.append(Diagnostic(
+            code="REGION-COINCIDENT-CROSSINGS",
+            severity=Severity.WARNING,
+            message=(
+                "多个交叉落在同一点上：各交叉各自扣除的重叠区会互相抵消，"
+                "该方法在这种退化配置下无法保证覆盖面积相等。"
+            ),
+            details={"crossing_ids": sorted(cid for ids in groups for cid in ids)},
+            hints=("把丝带错开、减小 offset，或改用描边后端（它按中心线切口，不受该限制）。",),
+        ))
+
+    ribbon_parts: list[Any] = [
+        strip.band for group in strips.values() for strip in group if not strip.band.is_empty
+    ]
+    ribbon_parts.extend(
+        band for path_id, band in bands.items() if path_id not in strips and not band.is_empty
+    )
+    painted_parts: list[Any] = [
+        visible_strip[strip.strip_id] for group in strips.values() for strip in group
+        if not visible_strip[strip.strip_id].is_empty
+    ]
+    painted_parts.extend(
+        band for path_id, band in visible_band.items()
+        if path_id not in strips and not band.is_empty
+    )
     regions: list[RibbonRegion] = []
     for path in paths:
-        geometry = visible.get(path.path_id)
-        if geometry is None or geometry.is_empty:
-            continue
-        for index, polygon in enumerate(_polygons(geometry)):
-            polygon = orient(polygon, 1.0)
-            holes = [
-                RegionRing(points=_ring_points(ring), role=role)
-                for ring, role in zip(
-                    polygon.interiors,
-                    _hole_roles(polygon, source_hole_areas.get(path.path_id, [])),
-                    strict=True,
-                )
+        if strips.get(path.path_id):
+            parts = [
+                (strip.strip_id, visible_strip[strip.strip_id]) for strip in strips[path.path_id]
+                if not visible_strip[strip.strip_id].is_empty
             ]
-            regions.append(RibbonRegion(
-                region_id=f"{path.path_id}.region{index}",
-                path_id=path.path_id,
-                exterior=RegionRing(points=_ring_points(polygon.exterior), role="exterior"),
-                holes=holes,
-                area=float(polygon.area),
-            ))
+        else:
+            band = visible_band.get(path.path_id)
+            parts = [(path.path_id, band)] if band is not None and not band.is_empty else []
+        for node, geometry in parts:
+            for index, polygon in enumerate(_polygons(geometry)):
+                polygon = orient(polygon, 1.0)
+                holes = [
+                    RegionRing(points=_ring_points(ring), role=role)
+                    for ring, role in zip(
+                        polygon.interiors,
+                        _hole_roles(polygon, source_hole_areas.get(path.path_id, [])),
+                        strict=True,
+                    )
+                ]
+                label = path.path_id if node == path.path_id else node
+                regions.append(RibbonRegion(
+                    region_id=f"{label}.region{index}",
+                    path_id=path.path_id,
+                    exterior=RegionRing(points=_ring_points(polygon.exterior), role="exterior"),
+                    holes=holes,
+                    area=float(polygon.area),
+                    draw_index=draw_index.get(node, 0),
+                ))
 
     band_area = float(sum(band.area for band in bands.values()))
-    union_area = float(unary_union(list(bands.values())).area) if bands else 0.0
-    covered = float(sum(region.area for region in regions))
+    union_area = float(unary_union(ribbon_parts).area) if ribbon_parts else 0.0
+    painted_area = float(unary_union(painted_parts).area) if painted_parts else 0.0
+    region_area_sum = float(sum(region.area for region in regions))
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-12)
-    if bands and abs(covered - union_area) > tolerance:
+    whole_union = float(unary_union(list(bands.values())).area) if bands else 0.0
+    if strips and abs(union_area - whole_union) > tolerance:
+        diagnostics.append(Diagnostic(
+            code="REGION-SECTION-SEAM",
+            severity=Severity.INFO,
+            message=(
+                "分段并集与整条丝带并集有差异：某个切分点落在折线顶点上，两段之间少了"
+                "拐角连接的面积。"
+            ),
+            details={"section_area": union_area, "band_area": whole_union},
+            hints=("提高采样密度让交叉落在段中，或减小 offset，可让差异消失。",),
+        ))
+    if ribbon_parts and abs(painted_area - union_area) > tolerance:
         diagnostics.append(Diagnostic(
             code="REGION-AREA-MISMATCH",
             severity=Severity.WARNING,
@@ -348,9 +734,9 @@ def render_region_geometry(
                 "（通常是三条以上丝带在非交叉点处互相重叠）。"
             ),
             details={
-                "covered_area": covered,
+                "painted_area": painted_area,
                 "union_area": union_area,
-                "difference": covered - union_area,
+                "difference": painted_area - union_area,
                 "tolerance": tolerance,
             },
             hints=("检查是否有三条以上丝带在同一区域重叠；必要时减小 offset 或改回描边后端。",),
@@ -361,6 +747,8 @@ def render_region_geometry(
         removed_area=removed_area,
         band_area=band_area,
         union_area=union_area,
+        painted_area=painted_area,
+        region_area_sum=region_area_sum,
     )
 
 

@@ -12,7 +12,7 @@ from manim_lace.render.regions import RibbonRegion, render_region_geometry
 
 shapely = pytest.importorskip("shapely")
 
-from shapely.geometry import LineString, Polygon  # noqa: E402
+from shapely.geometry import LineString, Point, Polygon  # noqa: E402
 
 
 def _paths(*arrays):
@@ -136,15 +136,92 @@ def test_cap_style_changes_open_ribbon_geometry():
     assert square_area == pytest.approx(butt_area + 2 * 0.2 * 0.4, abs=1e-9)
 
 
-def test_self_crossings_are_reported_instead_of_silently_unwoven():
+def test_a_self_crossing_path_is_emitted_as_overlapping_ordered_sections():
     bow = np.array([[-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [1.0, -1.0]])
     result = LaceEngine([bow], offset=0.1, render_mode="ribbon").solve()
     codes = [d.code for d in result.diagnostics]
-    assert "REGION-SELF-CROSSING-UNSUPPORTED" in codes
-    # The band is kept whole, so the reported area is still the band area.
+    # One band cannot be both over and under itself, so the path is split into sections
+    # whose overlap is resolved by the paint order instead of by cutting area.
+    assert "REGION-OVERLAPPING-SECTIONS" in codes
+    assert "REGION-AREA-MISMATCH" not in codes
     accounting = next(event for event in result.trace if event.event_type == "region.accounting").data
     assert accounting["removed_area"] == 0.0
-    assert accounting["covered_area"] == pytest.approx(accounting["band_area"], abs=1e-9)
+    assert accounting["region_area_sum"] > accounting["painted_area"]
+    assert accounting["painted_area"] == pytest.approx(accounting["union_area"], abs=1e-9)
+    assert sorted(region.draw_index for region in result.pieces) == list(range(len(result.pieces)))
+    traced = [
+        event.object_ids[0] for event in result.trace if event.event_type == "region.polygon"
+    ]
+    assert traced == [
+        region.region_id
+        for region in sorted(result.pieces, key=lambda item: (item.draw_index, item.region_id))
+    ]
+
+
+def test_the_paint_order_puts_the_over_pass_of_a_self_crossing_last():
+    # A figure eight with its crossing in the middle of straight runs: both passes are
+    # clean sections, so the paint order must follow the solver's assignment.
+    from manim_lace.render.regions import _arc_frame
+
+    figure = np.array([[-1.0, -1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, 1.0]])
+    engine = LaceEngine([figure], offset=0.1, render_mode="ribbon", weave_mode="free")
+    result = engine.solve()
+    crossing = result.crossings[0]
+    assignment = result.topology.assignments[crossing.crossing_id]
+    assert assignment is not None
+    path = engine.paths[0]
+
+    index = {region.region_id: region.draw_index for region in result.pieces}
+
+    def owners(side) -> set[str]:
+        arc = crossing.s_a if side == "a" else crossing.s_b
+        point, tangent = _arc_frame(path, arc)
+        found: set[str] = set()
+        for direction in (1.0, -1.0):
+            probe = Point(*(point + tangent * 1.0 * direction))
+            found.update(
+                region.region_id for region in result.pieces
+                if Polygon(region.exterior.points).contains(probe)
+            )
+        return found
+
+    under_side = assignment.under_side
+    over_side = "b" if under_side == "a" else "a"
+    under_regions = owners(under_side)
+    over_regions = owners(over_side)
+    shared = under_regions & over_regions
+    under_only = under_regions - shared
+    over_only = over_regions - shared
+    assert under_only and over_only
+    assert max(index[region_id] for region_id in under_only) < min(
+        index[region_id] for region_id in over_only
+    )
+    # The section that both passes share carries material of both strands, so it sits
+    # between them instead of being ordered strictly before or after itself.
+    if shared:
+        assert max(index[region_id] for region_id in under_only) < min(
+            index[region_id] for region_id in shared
+        )
+        assert max(index[region_id] for region_id in shared) < min(
+            index[region_id] for region_id in over_only
+        )
+
+
+def test_coincident_crossings_are_reported_because_they_cannot_conserve_area():
+    # The bow-tie self-crosses exactly where the line crosses it, so three strands meet
+    # at one point. Each crossing removes the overlap it sees, and the two removals
+    # cancel each other out, which the backend reports instead of hiding.
+    bow = np.array([[-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [1.0, -1.0]])
+    line = np.array([[-1.2, 0.0], [1.2, 0.0]])
+    result = LaceEngine(
+        [bow, line], offset=0.12, render_mode="ribbon", conflict_strategy="relax"
+    ).solve()
+    codes = [d.code for d in result.diagnostics]
+    assert "REGION-COINCIDENT-CROSSINGS" in codes
+    assert "REGION-AREA-MISMATCH" in codes
+    mismatch = next(d for d in result.diagnostics if d.code == "REGION-AREA-MISMATCH")
+    assert mismatch.details["difference"] < 0
+    assert mismatch.details["tolerance"] > 0
 
 
 def test_missing_assignments_are_reported_per_crossing():

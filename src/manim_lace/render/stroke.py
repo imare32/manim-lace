@@ -13,6 +13,7 @@ import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
 from ..model import CapStyle, CrossingEvent, PolylinePath, WeaveTopology
+from .order import paint_order
 
 
 @dataclass(slots=True)
@@ -102,51 +103,6 @@ def _merge_intervals(intervals: list[tuple[float, float]], tol: float = 1e-10) -
         else:
             out.append((start, end))
     return out
-
-
-def _path_layers(
-    path_ids: list[str], edges: list[tuple[str, str]]
-) -> tuple[dict[str, int], list[tuple[str, str]]]:
-    """Layer paths so that every under path is drawn before the paths over it.
-
-    ``edges`` are ``(under, over)`` pairs. A cycle has no consistent painter order;
-    the edges that forced the deterministic break are returned so the caller can report
-    them instead of hiding the fact.
-    """
-    incoming: dict[str, list[str]] = {path_id: [] for path_id in path_ids}
-    seen: set[tuple[str, str]] = set()
-    for under, over in edges:
-        if under == over or (under, over) in seen:
-            continue
-        seen.add((under, over))
-        incoming.setdefault(over, []).append(under)
-    layers = {path_id: 0 for path_id in path_ids}
-    remaining = [path_id for path_id in path_ids]
-    resolved: set[str] = set()
-    congested: list[tuple[str, str]] = []
-    while remaining:
-        progressed = False
-        for path_id in list(remaining):
-            if any(u not in resolved for u in incoming[path_id]):
-                continue
-            layers[path_id] = max((layers[u] + 1 for u in incoming[path_id]), default=0)
-            resolved.add(path_id)
-            remaining.remove(path_id)
-            progressed = True
-        if progressed:
-            continue
-        # Every remaining path waits for something inside a cycle: break it in path
-        # order and remember which constraints had to give.
-        path_id = remaining.pop(0)
-        for blocker in incoming[path_id]:
-            if blocker not in resolved:
-                congested.append((blocker, path_id))
-        layers[path_id] = max(
-            (layers[u] + 1 for u in incoming[path_id] if u in resolved), default=0
-        )
-        resolved.add(path_id)
-    congested.sort()
-    return layers, congested
 
 
 def _fully_cut_diagnostic(path: PolylinePath, *, closed_seam: bool) -> Diagnostic:
@@ -349,7 +305,7 @@ def render_stroke_geometry(
             ),
             hints=("改用 cap_style='butt' 可让断口严格停在切口位置。",),
         ))
-    layers, congested = _path_layers([path.path_id for path in paths], over_edges)
+    layers, congested = paint_order([path.path_id for path in paths], over_edges)
     exact_edges = [edge for edge in congested if edge not in approximate_edges]
     if congested and len(exact_edges) != len(congested):
         # A cyclic over/under relation is the normal case for two strands that cross an

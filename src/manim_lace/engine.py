@@ -347,12 +347,13 @@ class LaceEngine:
             offset=self.offset, cap_style=self.cap_style,
             join=self.join, miter_limit=self.miter_limit,
         )
-        for region in regions.regions:
+        for region in regions.ordered_regions():
             trace.emit(
                 "construction", "region.polygon", f"生成区域 {region.region_id}。",
                 object_ids=(region.region_id, region.path_id),
                 data={
                     "area": region.area,
+                    "draw_index": region.draw_index,
                     "hole_count": len(region.holes),
                     "hole_roles": [hole.role for hole in region.holes],
                     "point_count": len(region.exterior.points),
@@ -365,7 +366,13 @@ class LaceEngine:
                              "details": diagnostic.details, "hints": diagnostic.hints})
         trace.emit(
             "construction", "region.accounting", "区域面积核对完成。",
-            data={"removed_area": regions.removed_area, "band_area": regions.band_area,
-                  "union_area": regions.union_area, "covered_area": regions.covered_area},
+            data={
+                "removed_area": regions.removed_area,
+                "band_area": regions.band_area,
+                "union_area": regions.union_area,
+                "painted_area": regions.painted_area,
+                "covered_area": regions.covered_area,
+                "region_area_sum": regions.region_area_sum,
+            },
         )
         return list(regions.regions), list(regions.diagnostics)

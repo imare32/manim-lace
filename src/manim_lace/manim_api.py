@@ -298,20 +298,23 @@ def _region_groups(
     Manim has no even-odd fill, so a hole is painted as its own polygon on top of the
     ribbon. Ring roles stay available on the geometry side for anything more exact.
     """
+    ordered = sorted(regions, key=lambda region: (region.draw_index, region.region_id))
     ribbons = VGroup()
-    for region in regions:
+    holes = VGroup()
+    for index, region in enumerate(ordered):
         mob = _polyline_to_vmobject(region.exterior.points, closed=True)
         mob.set_fill(fill_color, opacity=fill_opacity)
         mob.set_stroke(stroke_color, width=stroke_width, opacity=stroke_opacity)
+        # Overlapping sections of a self-crossing path are resolved by this order.
+        mob.z_index = index
         ribbons.add(mob)
-    holes = VGroup()
-    if draw_holes:
-        for region in regions:
+        if draw_holes:
             for hole in region.holes:
-                mob = _polyline_to_vmobject(hole.points, closed=True)
-                mob.set_fill(hole_color, opacity=1.0)
-                mob.set_stroke(width=0)
-                holes.add(mob)
+                hole_mob = _polyline_to_vmobject(hole.points, closed=True)
+                hole_mob.set_fill(hole_color, opacity=1.0)
+                hole_mob.set_stroke(width=0)
+                hole_mob.z_index = index
+                holes.add(hole_mob)
     return ribbons, holes
 
 

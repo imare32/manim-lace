@@ -29,7 +29,7 @@
 | Manim `Lace` VGroup 封装 | 已提供，并在 Manim CE `0.22.0` 上实机渲染通过（`examples/scene_weave.py`） |
 | 基于算法轨迹的动画计划 | 已实现 renderer-neutral trace plan；Manim 动画适配器为初始版本，实机渲染已跑通 |
 | 可视化线宽 | 采用 `max(1.0, 200.0 * offset)` 的启发式映射；Manim 的 `stroke_width` 随画幅变化，尚未做严格的像素对齐换算 |
-| 实体 Ribbon、多边形面域与孔洞 | 已实现原型：`render_mode="ribbon"` 用受验证的布尔几何（Shapely，可选 `geometry` extra）构造实体面域——每条路径一条偏移带，在交叉处按"被压带 ∩ 上方带"的**该交叉局部**交集精确切除（无半径猜测、无浅角钳制），输出带 role 的闭合环（外环逆时针、孔洞顺时针）与面积核对；自交（两次经过共用一条带）如实报 `REGION-SELF-CROSSING-UNSUPPORTED` |
+| 实体 Ribbon、多边形面域与孔洞 | 已实现原型：`render_mode="ribbon"` 用受验证的布尔几何（Shapely，可选 `geometry` extra）构造实体面域——路径间交叉按"被压带 ∩ 上方带"的**该交叉局部**交集精确切除（无半径猜测、无浅角钳制）；自交路径按经过拆成分段、以重叠面域 + `draw_index` 绘制顺序表达上下关系；输出带 role 的闭合环（外环逆时针、孔洞顺时针）与面积核对 |
 | 隐式方程直接等值线提取 | 未实现；可先传入 Manim `ImplicitFunction` 的矢量对象 |
 | 鲁棒多线共点分解 | 未实现；当前只能识别并诊断多线共点，不做唯一穿插顺序推断 |
 
@@ -181,7 +181,7 @@ ribbon = Lace(
     stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
 )
 scene.add(ribbon.ribbons, ribbon.holes)   # 孔洞是独立图层，便于按背景色处理
-for region in ribbon.result.pieces:        # RibbonRegion：外环 + 带 role 的孔洞环
+for region in sorted(ribbon.result.pieces, key=lambda r: r.draw_index):   # 绘制顺序
     print(region.region_id, round(region.area, 4), [hole.role for hole in region.holes])
 ```
 
@@ -217,7 +217,8 @@ python benchmarks/bench_crossings.py --repeat 3
 - `cap_style`（默认 `"butt"`）描述可见端头怎么画：`"butt"` 的几何严格停在切口处；`"round"`/`"square"` 会沿切向多画半个线宽，因此断口会额外加宽 `offset` 并报 `RENDER-CAP-EXTENSION`（info）。端头轮廓本身不建模，由描边渲染器决定。
 - 每个片段都带确定性 `draw_index`：按"被压路径先画"的路径分层（最长路分层）排序，环按路径顺序确定性打破。两条股线交叉偶数次时"谁先画"必然成环，这是正常编织图案，可见性由切口决定，因此只有环上存在被 `min_sin` 钳制的近似断口时才报 `RENDER-DRAW-ORDER-CYCLE`（info）。Manim 侧按该顺序建组、设置对应 cap 与 `z_index`，不会与几何层不一致。
 - `render="ribbon"` 已实现（需要 `pip install 'manim-lace[geometry]'`，即 Shapely；缺失时抛出带安装提示的 `ImportError`）。它把丝带当**有面积的面域**构造：每条路径一条偏移带（`join`/`miter_limit` 控制拐角连接），在交叉处从被压带里扣除"该交叉局部"的 `被压带 ∩ 上方带`——即上方丝带真实覆盖的那块面积，因此没有半径近似、没有浅角钳制，也不需要端帽补偿。`result.pieces` 在 ribbon 模式下是 `RibbonRegion`（外环 + 孔洞环，role 分别为 `exterior` / `source_contour` / `occlusion`，外环逆时针、孔洞顺时针）。两种后端消费**同一份**交叉与拓扑（`FR-040`）。
-- ribbon 模式的已知边界（都有诊断，不会静默）：**自交**的两次经过共用同一条带，尚不能按经过拆带，因此该处不切除并报 `REGION-SELF-CROSSING-UNSUPPORTED`；交叉没有上下关系时报 `REGION-MISSING-ASSIGNMENT`；偏移轮廓无效时受控修复并报 `REGION-INVALID-OUTLINE`；三条以上丝带在非交叉点处重叠会让"可见面积 = 丝带并集面积"不成立，报 `REGION-AREA-MISMATCH`（含差值与容差）。Manim 侧孔洞是独立图层（Manim 没有奇偶填充规则），默认用 `hole_color` 涂成背景色，可用 `draw_holes=False` 自行处理。
+- ribbon 模式对**自交**的处理：同一条带不可能既在上又在下，因此带自交的路径会按"经过"拆成**分段**输出，分段在交叉处**互相重叠**（面积之和大于可见面积），上下关系由 `RibbonRegion.draw_index` 的绘制顺序决定——这是与描边后端一致的"顺序兜住"策略，并报 `REGION-OVERLAPPING-SECTIONS`（info）说明重叠是设计而非缺陷。若多个交叉落在同一点（如蝴蝶结自交处同时被直线穿过，三条股线共点），各交叉各自扣除的重叠区会互相抵消，覆盖面积不再守恒，此时报 `REGION-COINCIDENT-CROSSINGS` 与 `REGION-AREA-MISMATCH`（含差值与容差），绝不静默。
+- ribbon 模式其余边界（都有诊断）：交叉没有上下关系时报 `REGION-MISSING-ASSIGNMENT`；偏移轮廓无效时受控修复并报 `REGION-INVALID-OUTLINE`；切分点落在折线顶点上时分段并集比整带少一个拐角连接，报 `REGION-SECTION-SEAM`（info）；过／欠关系成环且存在分段时报 `REGION-DRAW-ORDER-CYCLE`（info）。面积口径：`painted_area`（区域并集＝实际绘制面积）与 `union_area`（构建出的丝带并集）应当相等，`region_area_sum` 是含重叠的求和。Manim 侧孔洞是独立图层（Manim 没有奇偶填充规则），默认用 `hole_color` 涂成背景色，可用 `draw_holes=False` 自行处理。
 - 输入为文字、SVG 时，提取的是矢量轮廓，不是字形的语义中心线笔画。
 - Stroke 片段不变式（有测试保证）：同一路径的片段弧长区间互不重叠、也不超过路径总长；绕闭合缝的切口输出为一个 `piece-seam` 加其余可见弧段；开放路径的切口一旦覆盖整条中心线，就不输出片段并报 `RENDER-PATH-FULLY-CUT`。
 - 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`、`refine` 必须是布尔值、`conflict_strategy ∈ {"error","manual","relax"}`、`event_policy` 是 `EventPolicy`/字段映射/统一取值或 `None` 且取值合法（`endpoint_touch`、`near_tangent` 取 `"diagnose"|"weave"|"ignore"`，`collinear_overlap`、`multiway` 取 `"diagnose"|"ignore"`）、`cap_style ∈ {"butt","round","square"}`、`join ∈ {"miter","bevel","round"}` 且 `miter_limit > 0`。
@@ -247,11 +248,14 @@ python benchmarks/bench_crossings.py --repeat 3
 | 渲染 | `RENDER-PATH-FULLY-CUT` | warning | 切口覆盖整条中心线（闭合或开放） |
 | 渲染 | `RENDER-PIECE-DROPPED` | info | 可见弧段短于 `min_piece_length` 而未输出 |
 | 渲染 | `RENDER-SHALLOW-ANGLE-APPROXIMATION` | info | 至少一个浅角交叉的断口使用了受限近似 |
-| 区域 | `REGION-SELF-CROSSING-UNSUPPORTED` | warning | ribbon 模式下自交的两次经过共用一条带，该处不切除 |
+| 区域 | `REGION-OVERLAPPING-SECTIONS` | info | ribbon 模式下自交路径按分段输出，段落互相重叠，重叠处由 `draw_index` 决定上下 |
+| 区域 | `REGION-COINCIDENT-CROSSINGS` | warning | 多个交叉落在同一点，各交叉扣除的重叠区互相抵消，覆盖面积无法保证守恒 |
+| 区域 | `REGION-DRAW-ORDER-CYCLE` | info | 过／欠关系成环且存在分段，绘制顺序按节点顺序确定性打破 |
+| 区域 | `REGION-SECTION-SEAM` | info | 切分点落在折线顶点，分段并集比整带少一个拐角连接的面积 |
 | 区域 | `REGION-MISSING-ASSIGNMENT` | warning | ribbon 模式下交叉缺少上下关系，该处没有扣除面积 |
 | 区域 | `REGION-INVALID-OUTLINE` | warning | 偏移轮廓自交或塌缩，已受控修复 |
 | 区域 | `REGION-EMPTY-RIBBON` | info | 路径没有长度或偏移区域为空，不产生面域 |
-| 区域 | `REGION-AREA-MISMATCH` | warning | 可见区域总面积与丝带并集面积不一致（多条丝带非交叉点重叠） |
+| 区域 | `REGION-AREA-MISMATCH` | warning | 绘制面积与丝带并集面积不一致（多条丝带非交叉点重叠，或多个交叉共点） |
 
 ## 项目结构
 
@@ -288,7 +292,7 @@ python benchmarks/bench_crossings.py --repeat 3
 
 与 `docs/ROADMAP.md` 的里程碑顺序保持一致（当前 M1 收尾 → M4 收尾 → M5）：
 
-1. 区域后端收尾（M4）：按"经过"把中心线拆成子带，让自交也能在区域模式下编织；再做 half-edge/planar arrangement 对照，与 Shapely 原型比较面积与拓扑一致性。
+1. 区域后端收尾（M4）：做 half-edge / planar arrangement 对照，与 Shapely 原型比较面积与拓扑一致性；并用 face/半边表示消除两个现有近似——自交分段的重叠（改由面标签决定上下）与共点交叉的守恒失效。另可对外提供"无内部接缝的并集轮廓"图层，便于描边（目前分段轮廓会画出分段端头）。
 2. 视觉线宽的像素对齐换算，以及 Manim CE `0.19`~`0.22` 的适配器兼容矩阵（M1 版本矩阵项）。
 3. 把算法 TraceEvent 扩展成采样细分、逐候选线段对、约束传播步骤和区域遍历的细粒度记录（M5；目前候选阶段只有聚合计数、冲突只有见证环、区域只有面域与面积）。
 4. 验证动画高亮与最终几何使用同一批 ID/坐标（M5 剩余项）。

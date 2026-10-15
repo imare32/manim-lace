@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — self-crossings in the region backend (M4)
+
+- Weave self-crossings in `render_mode='ribbon'`. A path that crosses itself is cut into
+  sections at its two passes (`_StripBuilder`, flat caps at interior splits, the configured
+  cap at real path ends) and emitted as separate overlapping regions: the crossing is then
+  resolved by the painter order instead of by cutting area, because removing the overlap
+  from one band is a no-op when both passes are that same band. This is the same strategy
+  the stroke backend uses, now shared: `render/order.py::paint_order` (moved out of
+  `stroke.py`) computes the order for both backends from the same assignments.
+- `RibbonRegion` gains `draw_index` and `RegionRenderResult` gains `ordered_regions()`,
+  `painted_area` and `region_area_sum`. The invariant is now `painted_area == union_area`
+  (the union of the visible regions equals the ribbon that was built); the plain sum is
+  larger wherever sections of one self-crossing path overlap, which is by design and
+  reported as `REGION-OVERLAPPING-SECTIONS` (info). `covered_area` remains as an alias of
+  `painted_area`, and the Manim facade paints regions in `draw_index` order with a matching
+  `z_index`.
+- Report the situations this model cannot make exact instead of smoothing them over: a
+  cyclic over/under relation with sections becomes `REGION-DRAW-ORDER-CYCLE` (info), a
+  split that lands on a polyline vertex makes the sections tile slightly less than the band
+  (`REGION-SECTION-SEAM`, info), and several crossings on one point make the per-crossing
+  removals cancel each other out (`REGION-COINCIDENT-CROSSINGS` warning plus the existing
+  `REGION-AREA-MISMATCH` with the difference and tolerance). `REGION-SELF-CROSSING-UNSUPPORTED`
+  is gone: self-crossings are woven now, and the honest limits that remain are named.
+- Extend `tests/test_regions.py`: a self-crossing path is emitted as overlapping ordered
+  sections with `region_area_sum > painted_area` and unchanged coverage, the paint order
+  puts the under pass before the over pass (probing both passes' material), and coincident
+  crossings are reported with the mismatch they cause.
+
 ## Unreleased — area-based ribbon regions (M4)
 
 - Implement the region backend (SPEC FR-052, FR-053, FR-054, FR-055, FR-057, FR-058):
