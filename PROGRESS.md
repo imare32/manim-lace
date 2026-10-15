@@ -396,6 +396,9 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
   守住"压上方连续 / 被压方断开"的切口不变量、线宽与不透明是硬约束、无解时退化成整条描边、
   以及默认通道的片段数据不变。验收: **489 passed**、`ruff` 全绿、**A/B 4/4 逐字节一致**、
   全矩阵指纹 20 行变化**全部是原本降级的配置**(健康 0 行)。
+  **端到端像素验收**(`media/_review/stroke_acceptance.py`, 走 `Lace(render="stroke")` 正式 API 渲染后
+  在 PNG 上取像素): `X 形两线` **6/6**、`两圆相交` **11/11**、`密采样利萨如 dt=0.01` 的
+  "中心线处处有墨"通过(它是单色, 颜色判据退化, 切口正确性由 `tests/test_stroke.py` 的几何不变量守)。
 
 ### P1(覆盖与简化)
 
@@ -489,6 +492,7 @@ uv run python tools/ab_render.py --root .                       --out media/_rev
 | **已删除**(结论留 §4) | 归因类: `attribute_missing` / `reason_probe` / `miss_probe` / `where_missing` / `shift_probe` / `seam_count`;匹配类: `match_fail` / `match_debug` / `pair_shape` / `reject_reason`;事件三分类: `step4_*`;判别力: `step3_scoping` / `policy_compare` / `controlled`;对比拼图: `compare` / `step2_effect` / `step31_effect`;杂项: `diagnose` / `probe_input` / `overlap_detail` / `rail_signals` / `per_rail` / `corner_aware` / `render_lace_scenes` |
 | **2026-10-14 收尾再删** | **26 个文件**(23 个脚本 + 3 个附带产物),均为"已被否决的做法"或"已被定案取代"的一次性推导脚本: `why_curve_not_woven` / `mirror_probe`(+txt) / `odd_event_probe` / `gt_corners_probe` / `orphan_zoom`(+png) / `tangency_probe` / `cross_centerline_probe` / `cross_centerline_matrix`(+txt) / `drop_candidate_eval` / `lissajous_relax_guard_probe` / `lissajous_crossing_pair_probe` / `lissajous_guard_diag` / `lissajous_crossing_dump` / `phase1_group_dump` / `_patch_report` / `check_defects_parse` / `find_d6_case` / `pick_d4_case` / `show_card` / `v020_api_probe` / `validate_report_page` / `report_cases_check` / `report_meta_check` |
 | **第二条通道原型**(2026-10-15) | `proto_stroke_weave.py`("中心线 + `stroke_width` + 顺序"的编织原型: 交替二着色 / 断口 `offset/|sinθ|` / 按参数切片 / 拓扑序 / 光栅判据 C1~C4, 产出 `media/proto_stroke/images/*.png` 与 polygon 版并排对照)、`phase1_guard_audit.py`(启用护栏体检: 每条轨记录落到几个交叉锚点内 —— 量出 CR/PR/PO 卡在"歧义"而非"孤立") |
+| **第二条通道端到端验收**(2026-10-15) | `stroke_acceptance.py`(走 `Lace(render="stroke")` 正式 API 渲染, 再在 PNG 上取像素: C1 交叉点=压上方 / C2 压上方两侧可见 / C3 被压方断口外恢复 / C4 中心线处处有墨; 产出 `media/stroke_check/images/acceptance_*.png`) |
 
 复现任一实验: `uv run python media/_review/<脚本>.py`(仓库根目录执行)。
 
