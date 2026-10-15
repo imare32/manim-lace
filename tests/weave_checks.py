@@ -620,6 +620,86 @@ def check_rotational_symmetry(
     return 1
 
 
+def weave_feasible(paths: Sequence[np.ndarray]) -> tuple[bool, dict]:
+    """**交替织法可解性**: "沿每条曲线过/欠严格交替"(D) + "每个交叉恰好一方压上"(C) 是否有解。
+
+    把上下文里的"过/欠"写成 XOR 约束系统(节点 = 一次通过)然后判定一致性:
+
+    * 沿路径相邻两次通过必须一压一让; 闭合路径还要"绕一圈回到自身"(所以通过数必须为偶数);
+    * 同一次交叉的两次通过必须一压一让(自交点的两次通过也算一次交叉)。
+
+    **不可解 = 在交替织法下不存在任何正确的上下压分配** —— 此时"整条路径诚实降级"不是欠债,
+    而是唯一正确的行为(与 `PROGRESS.md` §3 P1-8 的"奇环无解"同一类结构性限制)。
+    实测(2026-10-15, 全矩阵 1166 行; 见 `PROGRESS.md` §3 P0-5 与 §6 的
+    `phase3_feasibility_matrix_probe.py`):
+
+    * 533 组健康配置**全部可解**(0 例误判) ⇒ 判据与"画面对了"这一事实一致;
+    * 428 组降级配置不可解 ⇒ 诚实降级是**终局**;
+    * 201 组降级配置可解 ⇒ 这些才是"表示层改造"真正的欠债。
+
+    返回 ``(是否可解, 诊断)``; 诊断含 ``crossings`` / ``nodes`` / ``constraints`` / ``conflicts``。
+    实现是"并查集 + 到根奇偶"; 独立实现(GF(2) 秩判定)在
+    `media/_review/phase3_feasibility_verify_probe.py` 里对同一批配置给出一致结论。
+    """
+    crossings = all_centerline_crossings(paths)
+    events: dict[int, list[tuple[float, int, int]]] = {i: [] for i in range(len(paths))}
+    for index, crossing in enumerate(crossings):
+        events[crossing["i"]].append((float(crossing["s_i"]), index, 0))
+        events[crossing["j"]].append((float(crossing["s_j"]), index, 1))
+    node_of: dict[tuple[int, int, int], int] = {}
+    chains: dict[int, list[int]] = {}
+    nodes = 0
+    for i, entries in sorted(events.items()):
+        entries.sort()
+        chains[i] = []
+        for _arc, index, side in entries:
+            node_of[(i, index, side)] = nodes
+            chains[i].append(nodes)
+            nodes += 1
+    constraints: list[tuple[int, int, int]] = []
+    for i, chain in chains.items():
+        for first, second in zip(chain, chain[1:]):
+            constraints.append((first, second, 1))
+        closed = bool(np.allclose(np.asarray(paths[i], dtype=float)[0], np.asarray(paths[i], dtype=float)[-1]))
+        if closed and chain:
+            if len(chain) % 2:
+                constraints.append((chain[0], chain[0], 1))  # 奇数个通过: 交替绕不回来
+            elif len(chain) > 1:
+                constraints.append((chain[-1], chain[0], 1))
+    for index, crossing in enumerate(crossings):
+        first = node_of.get((crossing["i"], index, 0))
+        second = node_of.get((crossing["j"], index, 1))
+        if first is None or second is None or first == second:
+            continue
+        constraints.append((first, second, 1))
+
+    parent = list(range(nodes))
+    parity = [0] * nodes
+
+    def find(node: int) -> tuple[int, int]:
+        root, acc = node, 0
+        while parent[root] != root:
+            acc ^= parity[root]
+            root = parent[root]
+        return root, acc
+
+    conflicts = 0
+    for first, second, expected in constraints:
+        root_a, parity_a = find(first)
+        root_b, parity_b = find(second)
+        if root_a == root_b:
+            conflicts += (parity_a ^ parity_b) != expected
+            continue
+        parent[root_b] = root_a
+        parity[root_b] = parity_a ^ parity_b ^ expected
+    return conflicts == 0, {
+        "crossings": len(crossings),
+        "nodes": nodes,
+        "constraints": len(constraints),
+        "conflicts": conflicts,
+    }
+
+
 def check_picture(
     interlacing,
     *,

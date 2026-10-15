@@ -32,6 +32,7 @@ from tests.weave_checks import (
     check_holes_visible,
     check_picture,
     check_rotational_symmetry,
+    weave_feasible,
 )
 
 
@@ -447,3 +448,79 @@ class TestCrossingWeave:
         assert not Interlacing._is_valid_fragment(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]))
         assert not Interlacing._is_valid_fragment(np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [0.0, 0.0]]))
         assert not Interlacing._is_valid_fragment(np.array([[0.0, 0.0], [np.nan, 0.0], [0.0, 1.0], [0.0, 0.0]]))
+
+
+class TestAlternationFeasibility:
+    """**交替织法可解性**: 判定"降级"到底是欠债还是终局(见 `weave_feasible`)。
+
+    判据本身是 C(每个交叉恰好一方压上) + D(沿曲线过/欠严格交替)的代数形式, 而这两条正是
+    "编织正确"的定义。所以:
+
+    * 判"可解"的配置现在却被降级 ⇒ **欠债**, 表示层改造的目标;
+    * 判"不可解"的配置 ⇒ 在交替织法下**不存在**正确的上下压分配, 降级是**终局**
+      (与 `PROGRESS.md` §3 P1-8 的"奇环无解"同一类结构性限制)。
+
+    实测(2026-10-15, 全矩阵 1166 行): 533 组健康配置**全部可解**(0 例误判), 428 组降级配置
+    不可解, 201 组降级配置可解 —— 证据 `media/_review/phase3_feasibility_matrix_probe.py`。
+    """
+
+    #: 渲染正确、可见性 0 问题的配置 ⇒ 必须"可解"(0 例误判是判据可信的前提)。
+    FEASIBLE = [
+        ("PA", 12, 2),
+        ("CA", 9, 1),
+        ("PA", 9, 5),
+        ("PA", 12, 5),
+    ]
+
+    #: 接头/切触退化的一族 ⇒ "不可解", 降级是终局(不是欠债)。
+    INFEASIBLE = [
+        ("CR", 10, 3),
+        ("PR", 13, 3),
+        ("PO", 5, 2),
+        ("PA", 5, 4),
+        ("CA", 9, 7),
+    ]
+
+    @pytest.mark.parametrize(("star_type", "n", "level"), FEASIBLE)
+    def test_feasible_configs(self, star_type, n, level):
+        paths, offset = rosette_paths(n, level, star_type)
+        solver = build(paths, offset)
+        feasible, diagnostics = weave_feasible(solver.paths)
+        assert feasible, f"{star_type} n={n} L={level} 判了不可解(诊断 {diagnostics})"
+
+    @pytest.mark.parametrize(("star_type", "n", "level"), INFEASIBLE)
+    def test_infeasible_configs_stay_degraded(self, star_type, n, level):
+        paths, offset = rosette_paths(n, level, star_type)
+        solver = build(paths, offset)
+        feasible, diagnostics = weave_feasible(solver.paths)
+        assert not feasible, f"{star_type} n={n} L={level} 居然可解: {diagnostics}"
+        # "不可解"必须表现为诚实降级(而不是静默画错)
+        assert solver._degraded_paths
+        assert solver.rail_issues
+
+    def test_feasible_but_degraded_is_a_real_debt(self):
+        """有解却还降级 ⇒ 这是"表示层改造"真正要救的那一类(欠债而非终局)。"""
+        paths, offset = rosette_paths(13, 7, "PA")
+        solver = build(paths, offset)
+        feasible, _diagnostics = weave_feasible(solver.paths)
+        assert feasible
+        assert solver._degraded_paths == {0}
+
+    def test_crossing_lines_feasible(self):
+        """最基础的基准: X 形两线只有一个交叉, 必然可解。"""
+        solver = build(crossing_lines(2.0), 0.2)
+        assert weave_feasible(solver.paths)[0]
+
+    def test_odd_number_of_passes_on_a_closed_path_is_infeasible(self):
+        """闭合路径被**奇数次**穿过 ⇒ "绕一圈交替"自相矛盾 ⇒ 交替织法无解。
+
+        极小样例: 圆环 + 一条从环内穿到环外的开放直线(只与圆相交 1 次)。沿闭合的圆环遍历,
+        那唯一的交叉既是"第一个"也是"最后一个", 要求它同时是"压"又是"让" —— 无解。
+        这不是实现缺陷: 该配置在交替织法下**不存在**正确解(本例现在也是诚实降级)。
+        """
+        paths = [ring_path(32), np.array([[0.0, 0.1], [3.0, 0.1]])]
+        solver = build(paths, 0.1)
+        feasible, diagnostics = weave_feasible(solver.paths)
+        assert diagnostics["crossings"] == 1
+        assert not feasible and diagnostics["conflicts"] == 1
+        assert solver._degraded_paths  # 相应地: 诚实降级

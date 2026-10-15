@@ -75,7 +75,7 @@
     <h1>manim-lace 现状报告</h1>
     <div class="sub">一个基于 Manim 的"丝带编织交错 + 星形玫瑰"Python 库 · 快照 2026-10-15 · 版本 0.3.0 · 分支 <code style="background:rgba(255,255,255,.18);color:#fff">master</code> HEAD <code style="background:rgba(255,255,255,.18);color:#fff">d02c417</code></div>
     <div class="badges">
-      <span class="badge ok">627 tests passed（实测）</span>
+      <span class="badge ok">639 tests passed（实测）</span>
       <span class="badge ok">ruff check / format 全绿</span>
       <span class="badge ok">A/B 4 场景逐字节一致</span>
       <span class="badge">缺陷 1~11 已修</span>
@@ -108,7 +108,7 @@
 </div>
 
 <div class="cards">
-  <div class="card"><div class="n">627</div><div class="l">pytest 通过（0 失败）</div></div>
+  <div class="card"><div class="n">639</div><div class="l">pytest 通过（0 失败）</div></div>
   <div class="card"><div class="n">11 / 11</div><div class="l">缺陷已修（缺陷 3 部分修复）</div></div>
   <div class="card"><div class="n">4 / 4</div><div class="l">A/B 展示场景 png 逐字节一致</div></div>
   <div class="card"><div class="n indigo">1166</div><div class="l">全矩阵指纹覆盖的配置行数</div></div>
@@ -125,7 +125,7 @@
   <div class="it"><div class="w">e639831</div><strong>缺陷 9 / 10 修复 + 环形丝带描边收尾</strong>：按事件重归属 + 引用校验回滚；端点容差尺度无关 + <code>_has_joint_crossing</code> 结构判据；环带拆双 subpath，狭缝细线消失。</div>
   <div class="it"><div class="w">53a9593 / 59fcfa8</div><strong>按"交叉身份"切分</strong>：让密采样自交曲线（利萨如）真正织起来 —— <code>r=7</code> 且 C/D/E/F 全过；布局抽成 <code>_crossing_layout</code> 供丝带片段与孔洞共用。</div>
   <div class="it"><div class="w">6b4d73e / d02c417</div><strong>第二条编织通道 <code>Lace(render="stroke")</code></strong>：中心线 + <code>stroke_width</code> + 绘制顺序，绕开"区域切分"的全部难点；端到端像素验收通过。</div>
-  <div class="it"><div class="w">本轮（待提交）</div><strong>缺陷 11：闭合路径起始顶点上的"幻影自交"</strong>：自交枚举的相邻段判据写反 → 每条闭合路径在起始顶点多一个假交叉。它此前在"按交叉身份"的分组里是个<strong>空组</strong>，使该通道对需要它的配置<strong>一次都没生效过</strong>，还造成了 <code>CR n=10 L3</code> 的假"歧义"（修复后记录命中锚点数分布 <code>{1: 160}</code>）；配套 <code>_is_valid_fragment()</code>（片段的 A 级有效性）接住原先靠幻影"意外实现"的诚实降级 —— <strong>全矩阵指纹 1166 行逐字节不变</strong>。同一轮把<strong>类二/类三/类四测试矩阵固化成 <code>tests/</code> 回归</strong>（<code>tests/cases.py</code> + <code>tests/test_cases.py</code>，36 个配置钉成合格 / 诚实降级 / 已知短板三类）。</div>
+  <div class="it"><div class="w">本轮（待提交）</div><strong>缺陷 11 + 矩阵固化 + 交替织法可解性判定</strong>：① 缺陷 11 —— 自交枚举的相邻段判据写反，每条闭合路径在起始顶点多一个假交叉；它此前在"按交叉身份"的分组里是个<strong>空组</strong>，使该通道对需要它的配置<strong>一次都没生效过</strong>，还造成了 <code>CR n=10 L3</code> 的假"歧义"（修复后命中分布 <code>{1: 160}</code>）；配套 <code>_is_valid_fragment()</code> 接住原先靠幻影"意外实现"的诚实降级，<strong>全矩阵指纹 1166 行逐字节不变</strong>。② 类二/类三/类四矩阵固化成 <code>tests/</code> 回归（36 个配置钉成合格 / 诚实降级 / 已知短板三类）。③ <strong><code>weave_feasible()</code></strong>：把 C/D 写成 XOR 约束系统，全矩阵 1166 行扫出"健康 533 行<strong>全部可解</strong> / 降级 <strong>428 行无解</strong>（交替织法下不存在正确解 ⇒ 降级是终局）/ 降级 <strong>201 行有解</strong>（真欠账）" —— CR/PR/PO 拐点一族"修不动"由此从猜测变成可计算的结论。</div>
 </div>
 </div>
 
@@ -220,7 +220,7 @@ uv run python tools/defect_report.py</pre>
     <tr><td>P0-2</td><td>残差收敛：<code>CA n=9 L5</code> D3+E1 等</td><td>量级 ≈0.05% 采样点，优先级低</td></tr>
     <tr><td>P0-3</td><td>浅角 / 近平行交叉（θ ≲ 42°）没有自动检查</td><td>需要尺度无关判据（比较"两侧可见片段是否同一片"）</td></tr>
     <tr><td>P0-4</td><td><code>merge_paths</code> 会改写开放路径起点/方向</td><td>几何不变，影响 <code>by_path</code> 分组与 D 的遍历方向</td></tr>
-    <tr><td>P0-5</td><td>表示层改造：把"一次交叉的四个角点"当整体事件</td><td>阶段 0/1 已完成（只读结构 + 按交叉身份切分已接线，密采样利萨如 <code>r=7</code> 且 C/D/E/F 全过）；<strong>缺陷 11 定案后口径更正</strong>：该通道此前因"幻影锚点"造成的空组而<strong>一次都没生效</strong>，修掉后 <code>CR n=10 L3</code> 等 28 组真的会走它、但切出的片段通不过 A 级有效性（已由显式判据挡回诚实降级）；剩下的仍是这里的表示层改造</td></tr>
+    <tr><td>P0-5</td><td>表示层改造：把"一次交叉的四个角点"当整体事件</td><td>阶段 0/1 已完成（只读结构 + 按交叉身份切分已接线，密采样利萨如 <code>r=7</code> 且 C/D/E/F 全过）；<strong>缺陷 11 定案后口径更正</strong>：该通道此前因"幻影锚点"造成的空组而<strong>一次都没生效</strong>，修掉后 <code>CR n=10 L3</code> 等 28 组真的会走它、但切出的片段通不过 A 级有效性（已由显式判据挡回诚实降级）；<strong>2026-10-15 可解性判定</strong>：全矩阵 1166 行 = 健康 533 行<strong>全部可解</strong> + 降级 <strong>428 行无解</strong>（交替织法下不存在正确解 ⇒ 降级是终局）+ 降级 <strong>201 行有解</strong>（真欠账，下一刀 = 放松"左右轨计数相等"前提）</td></tr>
     <tr><td>P0-6</td><td>第二条通道（中心线 + stroke）</td><td>✅ 已接入（<code>Lace(render="stroke")</code> + 18 个测试）；后续：自适应采样、护栏</td></tr>
   </tbody>
 </table>
@@ -229,7 +229,7 @@ uv run python tools/defect_report.py</pre>
 <span class="pill">P1-5 类五变体 B 扩展（≥3 圈 / 其它正多边形 / Kaplan 第 3 步）</span>
 <span class="pill">P1-6 共线重合按"双股带"处理（96 组）</span>
 <span class="pill">P1-7 类二/三/四矩阵已固化成 tests 回归（<code>tests/cases.py</code> + <code>test_cases.py</code>）；类五（平铺/Kaplan）待搬</span>
-<span class="pill">P1-8 结构性限制：奇环无解（三圆链等）需"非交替织法"</span>
+<span class="pill">P1-8 结构性限制：奇环 / 奇数次穿过等"交替织法无解"，已有可计算判据（<code>weave_feasible</code>）</span>
 <span class="pill">P1-9 星形多边形自交处的织法重测</span>
 <span class="pill">P1-10 玫瑰线"物理搬走"</span>
 <span class="pill">P2-11 check_picture 空间索引（检查比求解慢 60~100 倍）</span>
@@ -283,10 +283,10 @@ uv run python tools/defect_report.py</pre>
 
 <footer>
   本报告由仓库内的 <code>PROGRESS.md</code> / <code>DEFECTS.md</code> / <code>CHANGELOG.md</code> / <code>AGENTS.md</code> 与
-  <code>media/</code> 下已渲染的验收产物汇总而成，未修改任何项目代码（测试数 627 为本次实测）。
+  <code>media/</code> 下已渲染的验收产物汇总而成，未修改任何项目代码（测试数 639 为本次实测）。
   报告位于 <code>docs/index.html</code>；渲染产物与探针脚本仍留在 <code>media/</code>（不入库），
   报告里的图片与浏览页链接需要 <code>media/</code> 存在才能显示（缺失的图会自动隐藏）。
-  注：文档快照与测试数于 2026-10-15 对齐（<code>PROGRESS.md</code> 记 471 / 489 passed 的旧快照已刷新为 627；
+  注：文档快照与测试数于 2026-10-15 对齐（<code>PROGRESS.md</code> 记 471 / 489 / 627 passed 的旧快照已刷新为 639；
   本轮 = 缺陷 11 + 类二/类三/类四矩阵固化，改动已在工作区完成并跑完全部红线，尚未提交）。
 </footer>
 

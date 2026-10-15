@@ -118,6 +118,7 @@ manim_lace/          # 包源码
 tools/               # 入库的验证工具: ab_render.py(A/B 逐字节底线)、matrix_digest.py(全矩阵指纹)、
                      #   defect_report.py(缺陷对照报告 + 网页)
 tests/               # pytest 测试套件(含 helpers.py 构造器、weave_checks.py 可见性模型)
+                     #   weave_checks.weave_feasible(): 交替织法可解性判定(降级是欠账还是终局)
                      #   cases.py + test_cases.py: 类二~类四测试矩阵的固化回归(合格 / 诚实降级 / 已知短板)
 examples/            # 可运行的渲染示例与预览工具, 不参与打包
                      #   rosette_gallery.py + gallery_page.html(图形大全与浏览页模板)

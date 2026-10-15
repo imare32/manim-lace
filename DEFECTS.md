@@ -21,6 +21,7 @@
 | (附)曲线输入保真 | ✅ 已修 | `mobject_paths()` 按贝塞尔重采样(取代"控制点当折线");直线输入几何不变 | `TestDenseCurves::test_curve_polyline_lies_on_the_curve` |
 | (附)输入退化检查(第 1 步) | ✅ 已修 | `validate_paths()` + `validate="ignore"/"warn"/"raise"` | 判别力表见 `PROGRESS.md` §1.4 |
 | (附)派生几何自检 + 降级(第 2 步) | ✅ 已修 | `_check_rail_geometry()` + 整路径降级 + 汇总 `UserWarning` | 同上 §1.5 |
+| (附)交替织法可解性判定 | ✅ 已建 | `weave_feasible()` 把 C/D 写成 XOR 约束系统, 判定"降级"是欠债还是终局 | `TestAlternationFeasibility` + 全矩阵 533/428/201 分类 |
 
 ---
 
@@ -318,6 +319,26 @@
     不再有任何自交; 开放路径的 `(0, num_seg-1)` 真实自交**被登记**(旧实现漏掉);
   - `tests/test_weave.py::TestCrossingWeave::test_joint_crossing_configs_stay_degraded`:
     `PA n=5 L4` / `CR n=10 L3` / `PR n=13 L3` 仍整体降级(由显式判据而非幻影接管)。
+
+## 附: 交替织法可解性(判定"降级"是欠债还是终局)
+
+- **问题**: 降级分两种 —— "本该织出来但实现没做到"(欠债)与 "在交替织法下**不存在**
+  正确解"(终局)。不区分这两类, 会把结构性限制当成实现欠债反复投入。
+- **判据**(`tests/weave_checks.weave_feasible(paths)`): 把上下文里的"过/欠"写成 XOR 约束系统
+  (节点 = 一次通过) —— 沿路径相邻两次通过必须一压一让(闭合路径还要绕一圈回来 ⇒ 通过数须为
+  偶数); 同一次交叉的两次通过必须一压一让。并查集 + 到根奇偶判定一致性; 独立实现(GF(2) 秩判定)
+  在 `media/_review/phase3_feasibility_verify_probe.py` 里给出一致结论。
+- **全矩阵实测(2026-10-15, 1166 行)**: 健康 533 行**全部可解**(0 例误判, 判据可信);
+  降级 **428 行不可解**(PA 22 / CA 28 / PR 136 / CR 134 / PO 108 ⇒ 终局);
+  降级 **201 行可解**(PA 68 / CA 47 / PR 30 / CR 23 / PO 33 ⇒ 真欠账)。
+- **两条口径提醒**:
+  ① 交叉枚举本身无重复(坐标归并后点数分布全 1, `phase3_crossing_enum_probe.py`), 所以
+  "无解"不是枚举假象; ② `CR n=10 L3` 在"严格口径"下无解、在"校验器口径"(跳过 2 个探针不可
+  判定的交叉)下**有解** —— 救它只能是"过校验器", 立项时必须写明, 不许偷偷放宽判据。
+- **新的结构性限制样例**: 闭合路径被**奇数次**穿过 ⇒ "绕一圈交替"自相矛盾(圆环 + 一条从环内
+  穿到环外的直线, 实测 1 个交叉 / 1 条矛盾约束)。已固化成 `TestAlternationFeasibility` 用例。
+- **验收**: `tests/test_weave.py::TestAlternationFeasibility`(4 组可解 + 5 组不可解 + 欠账样例 +
+  奇数次穿过样例); 欠账的 201 组按失败层级归类见 `PROGRESS.md` §3 P0-5 第 7 条。
 
 ## 附: 曲线输入保真(✅)
 
