@@ -49,7 +49,11 @@
   变成什么样"(缺陷 9 / 10 的影响面就是靠它量出来的);
 - `tools/defect_report.py`: **缺陷对照报告** —— 用 `git archive` 取出 `795a5bb` / `7ede551` /
   `ea1fea3` 三棵历史源码树, 同一场景在各树 + 当前工作区各渲一遍, 文案直接解析 `DEFECTS.md`
-  (不另维护副本), 产出可浏览的 `media/defect_report/index.html`。
+  (不另维护副本), 产出可浏览的 `media/defect_report/index.html`;
+- **第二条编织通道**(`Lace(render="stroke")`, 新模块 `manim_lace/stroke.py`): 把丝带当作
+  **中心线 + `stroke_width`** —— 事件取中心线交叉的弧长参数、断口取 `offset / |sinθ|`、
+  孔洞**不需要构造**(没被描边盖住的地方自然是背景)。默认仍是 `render="ribbon"`(区域切分),
+  两条通道并存; 代价与边界见 `README.md` 与 `PROGRESS.md` §3 P0-6(必须不透明、无孔洞/无 3D)。
 
 ### 修复
 

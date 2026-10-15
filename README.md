@@ -95,6 +95,7 @@ lace = Lace(rosette, offset=0.1, stroke_color=BLACK, stroke_width=1)
 | `hole_color` | `Color \| None` | `None` | 指定后所有孔洞使用同一颜色, 忽略分组配色 |
 | `hole_swatch` | `Sequence[Color] \| None` | `None` | 自动着色使用的调色板, 缺省从内置色卡随机取 |
 | `hole_group_method` | `str` | `"by_area"` | 孔洞分组方法, 见下表 |
+| `render` | `str` | `"ribbon"` | 编织通道: `"ribbon"`(区域切分)或 `"stroke"`(中心线 + 描边), 见"两条编织通道" |
 | `**kwargs` | - | - | 透传给丝带片段的 `Polygon` 参数(`stroke_color` / `stroke_width` / `fill_color` / `fill_opacity` 等) |
 
 常用属性与方法:
@@ -115,6 +116,24 @@ lace = Lace(rosette, offset=0.1, stroke_color=BLACK, stroke_width=1)
 | `"by_distance"` | 孔心到整体中心的距离 | 径向对称图形(曼陀罗), 产生由中心向外的渐变 |
 | `"by_hole_index"` | 每个孔洞自成一组 | 需要随机/逐孔区分颜色 |
 | `"by_vertex_count"` | 孔洞边数 | 只需按形状复杂度区分 |
+
+### 两条编织通道(`render`)
+
+| 取值 | 丝带是什么 | 孔洞 | 透明度 | 3D 挤出 |
+| --- | --- | --- | --- | --- |
+| `"ribbon"`(默认) | **区域**: 用偏移线交点切成片段多边形 | 显式构造(可配色) | 可半透明 | 支持 |
+| `"stroke"` | **中心线 + `stroke_width`** | 不需要构造(没被盖住的地方就是背景) | **必须不透明** | 不支持 |
+
+`render="stroke"` 用"中心线 + 描边宽度"表达丝带: 交叉处**把被压的一方切开**(断口 = 交点两侧
+`offset / |sinθ|`), 于是压上方自然可见。它的好处是**与折线采样密度解耦** —— 密采样曲线、贝塞尔
+输入也能织起来; 代价是线宽被强制为 `2 * offset / 0.01`(冲突的 `stroke_width` / `stroke_opacity` /
+`fill_opacity` 会被忽略并告警), 没有孔洞色块与 3D 挤出, 且当"谁压谁"的约束成奇环时退化成
+"每条路径一根完整描边"并发出告警。两条通道并存, 默认仍是 `"ribbon"`。
+
+```python
+# 曲线/贝塞尔输入推荐走 stroke 通道: 与折线采样密度解耦, 且不需要构造孔洞
+lace = Lace(rosette, offset=0.1, render="stroke", ribbon_swatch=(BLUE, GREEN))
+```
 
 ### `StarRosette`
 
@@ -251,7 +270,8 @@ solver.overlaps           # 交错重叠区域(需 compute_overlaps=True)
 ```
 manim_lace/
 ├── manim_lace/            # 包源码
-│   ├── interlacing.py     # 纯几何内核: 清洗/合并/偏移/求交/拓扑
+│   ├── interlacing.py     # 纯几何内核: 清洗/合并/偏移/求交/拓扑(第一条通道)
+│   ├── stroke.py          # 纯几何: 第二条通道 "中心线 + stroke_width + 顺序"
 │   ├── lace.py            # 渲染层: Lace(VGroup) 与参数校验
 │   ├── rosette.py         # 可选模块: 星形玫瑰(核计算 + StarRosette), 核心不依赖它
 │   ├── swatches.py        # 内置配色色卡

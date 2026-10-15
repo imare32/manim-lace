@@ -18,7 +18,7 @@
 
 代码严格分为两层, 便于分别测试:
 
-- **纯几何层** (`manim_lace/interlacing.py`): 只依赖 `numpy` / `scipy` / `networkx`,
+- **纯几何层** (`manim_lace/interlacing.py` / `manim_lace/stroke.py`): 只依赖 `numpy` / `scipy` / `networkx`,
   负责路径清洗合并、偏移线生成、交点计算与拓扑求解, 与 Manim 解耦。
 - **渲染层** (`manim_lace/lace.py`, `manim_lace/rosette.py`): 把几何结果包装成
   `VGroup` / `Polygram`, 并做参数校验。
@@ -29,6 +29,7 @@
 | --- | --- |
 | `manim_lace/interlacing.py` | `Interlacing` 求解器与 `clear_paths` / `merge_paths` / `generate_offset_lines` / `vectorized_intersection` / `right_handed` / `longest_chain` / `is_cycle` / `is_open_walk` |
 | `manim_lace/lace.py` | `Lace`(继承 `VGroup`)与 `mobject_paths`(曲线折线化, `CURVE_SAMPLES`)、`to_3d`、`HOLE_GROUP_METHODS`、`RIBBON_GROUP_METHODS`(丝带分组配色) |
+| `manim_lace/stroke.py` | **第二条通道**(`Lace(render="stroke")`): `StrokeWeave` / `centerline_crossings` —— 中心线交叉(路径间 + 自交, 相邻线段不算)、交替二着色(`flags` / `upper_path`)、断口 `offset / |sinθ|`、按弧长切片与片段顺序。纯几何, 不 import manim; 必须**不透明**, 见 `PROGRESS.md` §3 P0-6 |
 | `manim_lace/rosette.py` | **可选模块**: `StarRosette`(继承 `Polygram`)与 `cal_kernels` / `get_petals_by_kernel` / `sort_petals` / `merge_adjacent_petals` / `transform_reps`。只依赖 `numpy` + `manim`, 与核心零耦合, 由 `__init__.py` 惰性转发 |
 | `manim_lace/swatches.py` | 84 张日式配色色卡与 `random_swatch` |
 
