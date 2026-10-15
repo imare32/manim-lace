@@ -851,9 +851,13 @@ class Interlacing:
                 points, mask = vectorized_intersection(a0, a1, b0, b1)
                 for m in np.flatnonzero(mask):
                     m = int(m)
-                    if q == i and (m <= j + 1 or (j == 0 and m == num_seg - 1 and not self.paths_closed[i])):
-                        # 自交: 只数一次(避免 (j, m) / (m, j) 重复), 并跳过相邻线段(共享端点);
-                        # 闭合路径的首尾线段相邻(绕回), 开放路径的 0 号与末号段不算相邻
+                    if q == i and (m <= j + 1 or (self.paths_closed[i] and {j, m} == {0, num_seg - 1})):
+                        # 自交: 只数一次(避免 (j, m) / (m, j) 重复), 并跳过相邻线段(共享端点)。
+                        # ⚠️ 缺陷 11: 闭合路径的**首段与末段共享起始顶点**(``path[-1] == path[0]``),
+                        # 是相邻的; 开放路径的 0 号与末号段不相邻, 必须保留。这里原先写成
+                        # ``... and not self.paths_closed[i]`` 才跳过 —— 恰好相反, 于是每条闭合
+                        # 路径的起始顶点上都多出一个**幻影自交锚点**(证据见
+                        # ``media/_review/phantom_start_crossing_probe.py``)。
                         continue
                     d1, d2 = a1 - a0, b1[m] - b0[m]
                     scale = float(np.linalg.norm(d1) * np.linalg.norm(d2))
@@ -1984,6 +1988,29 @@ class Interlacing:
             return None
         return chains, passes
 
+    @staticmethod
+    def _is_valid_fragment(coords: np.ndarray) -> bool:
+        """片段是否通过 **A 级有效性**(与 `tests/weave_checks.check_polygons_valid` 同口径)。
+
+        为什么这层兜底是设计的一部分而不是"顺手加的": 按交叉身份切分时, 一次交叉的四个角点
+        在**退化配置**(拐点重合 / 切触)上会被拆到拐点两侧的不同线段上, 切出来的片段可能带
+        **重复的连续顶点**(描边会画出退化边, 也说明片段构造没对上)。
+
+        缺陷 11 修复前, 这类配置被"幻影锚点"意外挡住(交叉分组里多出一个空组 → 整条路径放弃);
+        修掉幻影之后必须由**显式判据**继续挡住它 —— 实测全矩阵 28 组配置的新片段全部落在这里
+        (`media/_review/phantom_matrix_probe.py`: 加判据后全矩阵指纹逐字节不变)。
+        """
+        arr = np.asarray(coords, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 4:
+            return False
+        if not np.all(np.isfinite(arr)):
+            return False
+        if not np.allclose(arr[0], arr[-1], atol=1e-7):
+            return False
+        if np.any(np.all(np.isclose(arr[1:], arr[:-1], atol=1e-12), axis=1)):
+            return False
+        return bool(abs(_signed_area(arr)) > DEFAULT_ATOL)
+
     def _crossing_ribbon_cycles(self, i: int) -> list[np.ndarray] | None:
         """按**交叉身份**切分路径 ``i`` 的丝带(阶段 1 第三步, 只用于现行降级路径)。
 
@@ -2069,12 +2096,12 @@ class Interlacing:
             coords = np.array([nodes[index] for index in [*cycle, cycle[0]]])
             if not right_handed(coords):
                 coords = coords[::-1]
-            if len(coords) < 4 or abs(_signed_area(coords)) <= DEFAULT_ATOL:
-                # 退化片段(顶点不足 / 面积为零): 说明这次切分没对上, **整体放弃**保持降级。
-                # 这是"宁缺勿滥"的运行期兜底 —— 实测 PR n=6 L=3 会切出退化的零面积片段,
-                # 画面 A/C/D/E 全亮(证据见 PROGRESS §3 P0-5)。
+            if not self._is_valid_fragment(coords):
+                # 退化片段(顶点不足 / 面积为零 / 含重复的连续顶点): 说明这次切分没对上,
+                # **整体放弃**保持降级。这是"宁缺勿滥"的运行期兜底 —— 实测 PR n=6 L=3 会切出
+                # 退化的零面积片段, 画面 A/C/D/E 全亮(证据见 PROGRESS §3 P0-5)。
                 logger.debug(
-                    "Interlacing: 路径 %d 按交叉切分得到退化片段(顶点 %d, 面积 %.3g), 放弃。",
+                    "Interlacing: 路径 %d 按交叉切分得到无效片段(顶点 %d, 面积 %.3g), 放弃。",
                     i,
                     len(coords),
                     abs(_signed_area(coords)),

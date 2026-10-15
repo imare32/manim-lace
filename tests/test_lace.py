@@ -27,7 +27,7 @@ from manim import (
 from manim_lace import HOLE_GROUP_METHODS, RIBBON_GROUP_METHODS, Lace
 from manim_lace.interlacing import Interlacing, annulus_polygon
 from manim_lace.lace import _annulus_loops, _signed_area, mobject_paths, to_3d
-from tests.helpers import polygon_area, ring_path
+from tests.helpers import polygon_area, ring_path, square_ring
 from tests.weave_checks import points_in_polygon
 
 
@@ -566,13 +566,18 @@ class TestCrossingGroups:
             assert inter._crossing_groups(i) is not None
             assert inter._crossing_attribution(i) is not None
 
-    def test_dense_lissajous_has_near_coincident_crossings(self):
+    def test_dense_lissajous_merges_coincident_crossings(self):
         # (2,3) 利萨如的采样点正好落在交叉上(离散化使然) → 同一位置被两条相邻线段对各枚举一次,
         # 出现两个几乎重合的锚点; `_merge_crossings` 必须把它们并成一组, 否则记录会"命中两个锚点"
         # 而被判歧义(见 PROGRESS §3 P0-5)。
+        #
+        # ⚠️ 采样密度的选取很关键: ``dt=0.05`` 时**没有**重合锚点(实测最小间距 15.9×offset),
+        # 真正重合的是 ``dt=0.02``(最小间距 1.4e-10 = 采样顶点恰好落在交叉上)。
+        # 缺陷 11 修复前, ``dt=0.05`` 那个"相距 1.7e-5 的锚点对"其实来自闭合路径起始顶点上的
+        # **幻影自交**(利萨如的起点正好是原点、且曲线多次穿过原点), 不是离散化。
         curve = ParametricFunction(
             lambda t: np.array([np.sin(2 * t), np.sin(3 * t), 0.0]),
-            t_range=(0, TAU, 0.05),
+            t_range=(0, TAU, 0.02),
             use_smoothing=False,
         )
         inter = Interlacing(mobject_paths(curve), 0.05, validate="ignore")
@@ -584,6 +589,22 @@ class TestCrossingGroups:
         anchors, _limits, merged = inter._merge_crossings(crossings)
         assert len(anchors) < len(crossings)  # 合并后锚点变少
         assert any(len(group) > 1 for group in merged)  # 确实合并了
+
+    def test_coarse_lissajous_has_no_coincident_crossings(self):
+        # 缺陷 11 的回归(反面): 去掉幻影之后, dt=0.05 的 7 个交叉两两相距很远(> 10×offset),
+        # 不再有"贴着起点"的假锚点。
+        curve = ParametricFunction(
+            lambda t: np.array([np.sin(2 * t), np.sin(3 * t), 0.0]),
+            t_range=(0, TAU, 0.05),
+            use_smoothing=False,
+        )
+        inter = Interlacing(mobject_paths(curve), 0.05, validate="ignore")
+        crossings = inter._centerline_crossings(0)
+        assert len(crossings) == 7
+        points = np.array([crossing["point"] for crossing in crossings])
+        gaps = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+        np.fill_diagonal(gaps, np.inf)
+        assert gaps.min() > 10 * inter.offset
 
     def test_dense_lissajous_is_degraded_and_groups_cleanly(self):
         # 新路径的启用前提: ① 现行实现确实降级; ② 分组干净(合并 + 绕回感知分簇之后)。
@@ -604,6 +625,46 @@ class TestCrossingGroups:
         inter = Interlacing(self.crossing_lines(), 0.2, validate="ignore")
         assert inter._degraded_paths == set()
         assert inter.rail_issues == []
+
+
+class TestPhantomStartCrossing:
+    """缺陷 11: 闭合路径的**首末相邻段**共享起始顶点, 不该被登记成自交(幻影锚点)。
+
+    ``_centerline_crossings`` 的跳过条件原先写成"``not closed`` 才跳过", 恰好写反了:
+
+    * 闭合路径的首段与末段共享起始顶点(``path[-1] == path[0]``), 是相邻的, 必须跳过 ——
+      原先却登记成自交, 于是**每条闭合路径**的起始顶点上都多出一个幻影锚点。它在交叉分组里
+      是一个**空组**, 让"按交叉身份"的切分无条件放弃(``_crossing_attribution`` /
+      ``_crossing_layout`` 遇空组返回 ``None``), 并把附近真实交叉的轨记录判成"歧义";
+    * 开放路径的 0 号与末号段不相邻, 必须保留 —— 原先反而跳过, 漏掉真实自交。
+
+    证据: ``media/_review/phantom_start_crossing_probe.py``(逐配置列出落在起始顶点上的假自交)、
+    ``phantom_matrix_probe.py``(全矩阵 1166 行的真实影响面)。
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "path"),
+        [
+            ("正方形环", square_ring(3.0)),
+            ("65 边形环", ring_path(65)),
+            ("矩形环", np.array([[0.0, 0.0], [3.0, 0.0], [3.0, 2.0], [0.0, 2.0], [0.0, 0.0]])),
+        ],
+    )
+    def test_closed_paths_have_no_self_crossing_at_the_start(self, name, path):
+        inter = Interlacing([path], 0.2, validate="ignore")
+        assert inter.paths_closed[0]
+        self_crossings = [crossing for crossing in inter._centerline_crossings(0) if crossing["q"] == 0]
+        assert self_crossings == [], f"{name} 不该有任何自交(包括起始顶点上的幻影)"
+
+    def test_open_path_counts_the_first_last_segment_pair(self):
+        # 开放路径的首末段不相邻: 它们的真实自交**必须**被登记(原先被误跳过)
+        path = np.array([[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [2.0, 3.0], [2.0, -1.0]])
+        inter = Interlacing([path], 0.2, validate="ignore")
+        assert not inter.paths_closed[0]
+        pairs = {(crossing["i_seg"], crossing["q_seg"]) for crossing in inter._centerline_crossings(0)}
+        assert (0, 3) in pairs
+        crossing = next(item for item in inter._centerline_crossings(0) if (item["i_seg"], item["q_seg"]) == (0, 3))
+        np.testing.assert_allclose(crossing["point"], [2.0, 0.0])
 
 
 class TestAnnulusLoops:

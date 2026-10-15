@@ -17,6 +17,7 @@
 | **8** 稠密折线输入的角点事件丢失(输出空白) | ✅ 已修 | 求交平行判据尺度无关 + `_fill_rail_corners()` 按结构补角点 | `TestDenseCurves` + A/B 4/4 |
 | **9** 重归属留下"查不到坐标的引用"(求解崩溃) | ✅ 已修 | `_commit_rail_reattribution()` 按**事件**改写对方标识 + `_rail_references_are_consistent()` 校验回滚 | `TestReattributionConsistency` + `tools/matrix_digest.py` |
 | **10** 落在端点的交点被固定参数容差丢掉(类型 B 真因) | ✅ 已修 | 端点容差改尺度无关(`DEFAULT_ATOL` ÷ 线段长度) + `_has_joint_crossing()` 结构化退化判据 | `TestConcentricRosetteAlignment` 新增 4 例 + 全矩阵指纹"两态 deg=0 零变化" |
+| **11** 闭合路径起始顶点上的"幻影自交" | ✅ 已修 | `_centerline_crossings` 的相邻段跳过条件取反(闭合跳过首末段、开放保留) + `_is_valid_fragment()` A 级有效性兜底 | `TestPhantomStartCrossing` / `TestCrossingWeave::test_joint_crossing_configs_stay_degraded` + 全矩阵指纹 1166 行逐字节不变 |
 | (附)曲线输入保真 | ✅ 已修 | `mobject_paths()` 按贝塞尔重采样(取代"控制点当折线");直线输入几何不变 | `TestDenseCurves::test_curve_polyline_lies_on_the_curve` |
 | (附)输入退化检查(第 1 步) | ✅ 已修 | `validate_paths()` + `validate="ignore"/"warn"/"raise"` | 判别力表见 `PROGRESS.md` §1.4 |
 | (附)派生几何自检 + 降级(第 2 步) | ✅ 已修 | `_check_rail_geometry()` + 整路径降级 + 汇总 `UserWarning` | 同上 §1.5 |
@@ -285,6 +286,38 @@
   - 被新判据打成降级的 54 组配置**在改动前就全部违反可见性检查**(逐个核对, 0 误伤:
     `media/_review/guard_false_positive_audit.py`);
   - 判据对 7 组"已知良好"配置一律不触发(`tests/test_weave.py` 的参数化用例)。
+
+## 11. 闭合路径起始顶点上的"幻影自交"(✅)
+
+- **症状(隐蔽)**: `_centerline_crossings(i)` 为**每条闭合路径**在它的起始顶点上多登记一个
+  "自交"(`i_seg=0` 与 `q_seg=num_seg-1`)。它本身不画错任何东西, 却有两处实质危害:
+  1. 在"按交叉身份"的交叉分组里, 它是一个**空组**(没有轨记录属于这个假交叉), 而
+     `_crossing_attribution` / `_crossing_layout` 遇到空组就**放弃整条路径** →
+     阶段 1 的"按交叉身份切分"对所有需要它的配置**一律不生效**(无论几何多干净);
+  2. 它把附近真实交叉的轨记录判成"歧义"(同时落进两个锚点的阈值内), 抬高了启用护栏的拒绝率
+     —— `CR n=10 L3` 那 4 条(共 160 条)被记录的"歧义"就是它造成的, 与"两轨相切"无关。
+- **根因**: 自交枚举里"相邻线段共享端点"的跳过条件写反了:
+  ```
+  m <= j + 1 or (j == 0 and m == num_seg - 1 and not self.paths_closed[i])
+  ```
+  闭合路径的**首段与末段共享起始顶点**(`path[-1] == path[0]`), 是相邻的, 必须跳过 ——
+  条件却写成"**开放**路径才跳过"; 反之开放路径的首末段不相邻(真自交必须保留), 却被误跳过。
+- **修法**:
+  - 判据改为 `self.paths_closed[i] and {j, m} == {0, num_seg - 1}`(闭合跳过、开放保留);
+  - **配套**(必须同时有): 幻影锚点原先还起着"意外保护"的作用 —— 它让退化配置的交叉分组
+    出现空组从而整体放弃, 于是这些配置"诚实降级"。修掉幻影后, 实测 **28 组**配置会立刻
+    变成"编织但画面不合格"(切出的片段带重复的连续顶点 + C/D/E 失败, 见
+    `media/_review/phantom_matrix_probe.py`), 也就是**静默画错**。因此新增
+    `Interlacing._is_valid_fragment(coords)`: 片段须满足 A 级有效性(顶点 ≥ 4、闭合、有限、
+    无重复的连续顶点、面积为正), 不满足即整体放弃、保持降级。加上它之后 28 组全部回到
+    "诚实降级", 且全矩阵指纹**逐字节不变**。
+- **验收**:
+  - `tools/matrix_digest.py`: 全矩阵 1166 行与 `media/_review/digest_stroke.txt` **逐字节相同**;
+  - A/B 4 个示例场景 **4/4** png md5 一致; `pytest` 627 passed; `ruff check` / `format` 全绿;
+  - `tests/test_lace.py::TestPhantomStartCrossing`: 闭合路径(正方形环 / 65 边形环 / 矩形环)
+    不再有任何自交; 开放路径的 `(0, num_seg-1)` 真实自交**被登记**(旧实现漏掉);
+  - `tests/test_weave.py::TestCrossingWeave::test_joint_crossing_configs_stay_degraded`:
+    `PA n=5 L4` / `CR n=10 L3` / `PR n=13 L3` 仍整体降级(由显式判据而非幻影接管)。
 
 ## 附: 曲线输入保真(✅)
 

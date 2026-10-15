@@ -415,3 +415,35 @@ class TestCrossingWeave:
         # 少一条镜像记录 / 对方轨道凑不齐 {1, 2} 时都不构成一次穿越
         assert Interlacing._cluster_pass_records(cluster[:3]) is None
         assert Interlacing._cluster_pass_records([*cluster[:3], (2, {"tgt": (0, 1, 9)})]) is None
+
+    #: 缺陷 11 修复后**仍然**降级的配置: 它们的片段通不过 A 级有效性。
+    #: 修复前它们是被"幻影锚点"意外挡住的(交叉分组里多出一个空组), 修复后由显式判据接管 ——
+    #: 全矩阵指纹逐字节不变(`media/_review/phantom_matrix_probe.py`: 28 组新增片段全部落在这里)。
+    JOINT_CROSSING_CONFIGS = [
+        ("PA", 5, 4),
+        ("CR", 10, 3),
+        ("PR", 13, 3),
+    ]
+
+    @pytest.mark.parametrize(("star_type", "n", "level"), JOINT_CROSSING_CONFIGS)
+    def test_joint_crossing_configs_stay_degraded(self, star_type, n, level):
+        paths, offset = rosette_paths(n, level, star_type)
+        solver = build(paths, offset)
+        assert solver._woven_paths == {}  # A 级有效性兜底拦下, 不产出无效片段
+        assert solver._degraded_paths == set(range(len(paths)))
+        assert solver.rail_issues
+        assert len(solver.ribbons) == len(paths)  # 退化成"不编织"的整条丝带
+
+    def test_fragment_validity_rejects_degenerate_polygons(self):
+        """A 级有效性判据(缺陷 11 的配套兜底)要能挡住切分没对上的片段。"""
+        valid = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+        assert Interlacing._is_valid_fragment(valid)
+        # 重复的连续顶点: 描边会画出退化边, 也说明片段构造没对上
+        assert not Interlacing._is_valid_fragment(
+            np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]),
+        )
+        # 顶点不足 / 未闭合 / 面积为零 / 非有限坐标
+        assert not Interlacing._is_valid_fragment(valid[:3])
+        assert not Interlacing._is_valid_fragment(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]))
+        assert not Interlacing._is_valid_fragment(np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [0.0, 0.0]]))
+        assert not Interlacing._is_valid_fragment(np.array([[0.0, 0.0], [np.nan, 0.0], [0.0, 1.0], [0.0, 0.0]]))
