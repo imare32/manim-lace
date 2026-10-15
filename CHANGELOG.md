@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — candidate indexing and benchmark set
+
+- Add a deterministic uniform-grid candidate index (`geometry/index.py`) and
+  separate candidate enumeration from the exact segment test. `grid` prunes;
+  `brute_force` checks every pair. Both report identical events, diagnostics and
+  piece geometry, which the tests assert scenario by scenario (SPEC FR-035).
+- Report candidate pruning through `CrossingStats` (`LaceEngine(..., detection_stats)`,
+  `CrossingDetectionResult.stats`) and a `crossing.candidates` trace event with
+  strategy, segment, candidate and narrow-phase counters.
+- Replace the O(crossings²) multiway clustering scan with bucketed neighbourhood
+  clustering. Semantics are unchanged — verified against the previous O(n²)
+  formulation on randomized point sets — while a 286-crossing fan drops from
+  ~76 ms to ~7 ms. Also remove the unused O(n²) `adjacency` map that was built and
+  never read.
+- Add `min_piece_length`-style configurability for candidate enumeration:
+  `candidate_strategy` on `LaceEngine` and `Lace`.
+- Add a reproducible benchmark set (`manim_lace.benchmarks`, covering the four
+  SPEC §10.2 input classes) plus `benchmarks/bench_crossings.py`, which times
+  detection, compares grid against brute force and prints a stable event digest.
+  `make bench` runs it; CI now lints the `benchmarks/` directory too.
+- Use the benchmark to drive one more fix: the narrow-phase bounding-box
+  rejection now compares scalar values instead of NumPy scalars. Dense curves
+  drop from ~15 ms to ~4.5 ms and the reference strategy from ~190 ms to ~12.5 ms,
+  with event digests unchanged.
+
 ## Unreleased — crossing stability and stroke boundaries
 
 - Fix stroke geometry when a cut wraps the seam of a closed path: the visible arc

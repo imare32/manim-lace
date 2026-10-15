@@ -51,6 +51,7 @@ class Lace(VGroup):
         sample_error: float = 1e-3,
         min_sin: float = 0.2,
         min_piece_length: float = 1e-7,
+        candidate_strategy: str = "grid",
         **extra: Any,
     ) -> None:
         super().__init__()
@@ -72,6 +73,7 @@ class Lace(VGroup):
             render_mode=render,
             min_sin=min_sin,
             min_piece_length=min_piece_length,
+            candidate_strategy=candidate_strategy,  # type: ignore[arg-type]
         )
         self.result: LaceResult = self.engine.solve()
         self.interlacing = self.result.topology  # migration-friendly discoverability

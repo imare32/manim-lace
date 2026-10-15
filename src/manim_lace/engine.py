@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Sequence
 import numpy as np
 
 from .animation.trace import TraceRecorder
-from .geometry.intersections import detect_crossings
+from .geometry.intersections import CandidateStrategy, detect_crossings
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import LaceResult, PathSource, PolylinePath
 from .render.stroke import render_stroke_geometry
@@ -33,6 +33,10 @@ class LaceEngine:
     min_piece_length:
         Visible centerline pieces shorter than this arc length are dropped and
         reported through a ``RENDER-PIECE-DROPPED`` diagnostic.
+    candidate_strategy:
+        ``grid`` (deterministic uniform-grid pruning, the default) or
+        ``brute_force`` (every segment pair). Both must yield identical events;
+        the strategy only changes how many exact tests are executed.
     """
 
     def __init__(
@@ -48,6 +52,7 @@ class LaceEngine:
         min_sin: float = 0.2,
         overshoot: float = 0.03,
         min_piece_length: float = 1e-7,
+        candidate_strategy: CandidateStrategy = "grid",
     ) -> None:
         if not np.isfinite(offset) or offset <= 0:
             raise ValueError("offset must be positive and finite")
@@ -55,6 +60,8 @@ class LaceEngine:
             raise ValueError("render_mode must be 'stroke' or 'ribbon'")
         if not np.isfinite(min_piece_length) or min_piece_length < 0:
             raise ValueError("min_piece_length must be finite and non-negative")
+        if candidate_strategy not in ("grid", "brute_force"):
+            raise ValueError("candidate_strategy must be 'grid' or 'brute_force'")
         if render_mode == "ribbon":
             raise NotImplementedError(
                 "render_mode='ribbon' is reserved for the future region backend. "
@@ -70,6 +77,7 @@ class LaceEngine:
         self.min_sin = float(min_sin)
         self.overshoot = float(overshoot)
         self.min_piece_length = float(min_piece_length)
+        self.candidate_strategy: CandidateStrategy = candidate_strategy
         self.result: LaceResult | None = None
 
     @staticmethod
@@ -148,8 +156,27 @@ class LaceEngine:
                       "sampling_error": path.sampling_error},
             )
         detected = detect_crossings(
-            self.paths, position_tol=self.position_tol, angle_tol=self.angle_tol,
+            self.paths,
+            position_tol=self.position_tol,
+            angle_tol=self.angle_tol,
+            candidate_strategy=self.candidate_strategy,
         )
+        if detected.stats is not None:
+            trace.emit(
+                "crossings", "crossing.candidates",
+                (
+                    f"候选筛选（{detected.stats.strategy}）："
+                    f"{detected.stats.candidate_pairs}/{detected.stats.all_pairs} 对进入精确判定。"
+                ),
+                data={
+                    "strategy": detected.stats.strategy,
+                    "segment_count": detected.stats.segment_count,
+                    "candidate_pairs": detected.stats.candidate_pairs,
+                    "pair_checks": detected.stats.pair_checks,
+                    "grid_cells": detected.stats.grid_cells,
+                    "all_pairs": detected.stats.all_pairs,
+                },
+            )
         for crossing in detected.crossings:
             trace.emit(
                 "crossings", "crossing.detected", f"识别交叉候选 {crossing.crossing_id}（{crossing.kind}）。",
@@ -208,5 +235,6 @@ class LaceEngine:
             diagnostics=[*detected.diagnostics, *topology.diagnostics, *rendered.diagnostics],
             trace=trace.events,
             render_mode=self.render_mode,
+            detection_stats=detected.stats,
         )
         return self.result

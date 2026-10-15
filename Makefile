@@ -1,4 +1,4 @@
-.PHONY: test demo lint
+.PHONY: test demo bench lint
 
 test:
 	pytest -q
@@ -6,5 +6,8 @@ test:
 demo:
 	python examples/demo_core.py
 
+bench:
+	python benchmarks/bench_crossings.py --repeat 3
+
 lint:
-	ruff check src tests examples
+	ruff check src tests examples benchmarks

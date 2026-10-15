@@ -18,7 +18,11 @@ The topology layer must not depend on either rendering backend. In particular, c
 ## Numeric assumptions in v0.1
 
 1. Current intersection computation is between sampled straight segments, not exact Bezier curves.
-2. It uses deterministic all-pairs segment candidate checks. Replace candidate enumeration with a sweep line, uniform grid, or BVH after profiling.
+2. Candidate enumeration is pluggable: `candidate_strategy="grid"` uses a deterministic
+   uniform grid over segment boxes expanded by `position_tol`, `"brute_force"` checks
+   every pair. Both are asserted to yield identical events, diagnostics and pieces;
+   the grid only reduces the number of exact tests. A sweep line or BVH can replace it
+   behind the same seam.
 3. Crossings classified as endpoint-touch or near-tangent are retained as diagnostics, but not sent to strict alternating assignment.
 4. Collinear overlap is diagnostic-only; no automatic crossing relationship is invented.
 5. Stroke cutting is a visual approximation. It cannot ensure exact area coverage around every shallow-angle crossing.
@@ -40,5 +44,10 @@ These are asserted by tests, not just intentions:
 ## Suggested extension contracts
 
 A future `CrossingDetector` implementation should return `CrossingDetectionResult`, preserving `CrossingEvent` semantics. A future `RibbonRegionRenderer` must consume `WeaveTopology` instead of recomputing assignments. Every renderer should report diagnostics for dropped pieces or geometric repair.
+
+Anything that changes *which* pairs are examined must keep the reported events
+identical; `candidate_strategy="brute_force"` is the reference oracle for that, and
+`manim_lace.benchmarks.event_digest` plus the golden values in
+`tests/test_benchmarks.py` freeze the observable output per input class.
 
 A future detailed trace should record the same IDs used by final geometry. Trace events are not permitted to fabricate geometry for pedagogical reasons.

@@ -14,7 +14,15 @@
       `transverse`, a crossing at a closed seam is reported once at arc 0, and a
       zero-length path is reported as `GEOM-DEGENERATE-PATH` instead of being
       silently ignored. Regression tests live in `tests/test_crossings.py`.
-- Add a deterministic spatial index and performance benchmarks.
+- [x] Add a deterministic spatial index and performance benchmarks: a uniform
+      grid over expanded segment boxes prunes candidates, results are asserted to
+      be identical to the brute-force strategy, and `manim_lace.benchmarks` plus
+      `benchmarks/bench_crossings.py` cover the four input classes of SPEC §10.2.
+- [x] Act on what the benchmark measured: the per-pair bounding-box rejection now
+      runs on scalar values instead of NumPy scalars, which cut the dense-curve
+      scenario from ~15 ms to ~4.5 ms and the reference strategy from ~190 ms to
+      ~12.5 ms. Remaining work here: candidate index construction and per-segment
+      bookkeeping, plus crossing refinement for sampled curves (FR-036).
 
 ## M2 — Weave topology robustness
 - Add explicit endpoint and multiway event policies.

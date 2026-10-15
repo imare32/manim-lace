@@ -11,6 +11,7 @@ from .engine import LaceEngine
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import (
     CrossingEvent,
+    CrossingStats,
     LaceResult,
     Pass,
     PathSource,
@@ -23,9 +24,10 @@ from .model import (
 __version__ = "0.1.0"
 
 __all__ = [
-    "CrossingEvent", "Diagnostic", "InputPathError", "LaceEngine", "LaceError",
-    "LaceResult", "Pass", "PathSource", "PolylinePath", "Severity", "TraceEvent",
-    "WeaveAssignment", "WeaveConflictError", "WeaveTopology", "sample_graph", "sample_parametric",
+    "CrossingEvent", "CrossingStats", "Diagnostic", "InputPathError", "LaceEngine",
+    "LaceError", "LaceResult", "Pass", "PathSource", "PolylinePath", "Severity",
+    "TraceEvent", "WeaveAssignment", "WeaveConflictError", "WeaveTopology",
+    "sample_graph", "sample_parametric",
 ]
 if find_spec("manim") is not None:
     __all__.append("Lace")

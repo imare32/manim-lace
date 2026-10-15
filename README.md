@@ -19,6 +19,7 @@
 | 显式图像 `y=f(x)` 采样 | 已实现，跳跃阈值可选 |
 | 从 Manim `VMobject` / `VGroup` 读取路径 | 已提供可选适配器；需安装 Manim 后实测特定版本 |
 | 中心线段交叉检测 | 已实现基础版：路径间/自交/重叠/端点/多线共点诊断；顶点交叉、闭合缝、重复顶点与退化路径有回归测试 |
+| 候选加速与性能基准 | 已实现确定性均匀网格剪枝（`candidate_strategy` 可切换网格/暴力，两者逐事件等价），附四类输入的可复现基准集与事件指纹 |
 | 路径级严格交替求解 | 已实现基础版与冲突诊断 |
 | 每次交叉手动指定上下关系 | 已实现 `manual` 模式和逐交叉覆盖 |
 | Stroke 几何切分 | 已实现基础版：闭合缝切口、整条被切、浅角受限与片段丢弃都有显式诊断和测试；端帽与精确区域裁剪仍属视觉近似 |
@@ -153,8 +154,10 @@ src/manim_lace/
   model.py                 # 不依赖 Manim 的核心数据模型
   engine.py                # 数据流编排
   diagnostics.py           # 结构化诊断和领域异常
+  benchmarks.py            # 可复现的基准输入集与事件指纹
   geometry/
     sampling.py            # 显式函数 / 参数曲线采样
+    index.py               # 确定性候选索引与邻域聚类
     intersections.py       # 折线交叉事件检测
   topology/solver.py       # Pass 排序与 over/under 约束
   render/stroke.py         # 中心线切分几何
@@ -163,11 +166,18 @@ src/manim_lace/
   manim_api.py             # 可选的 Manim VGroup Facade
   animation/trace.py       # 真实算法阶段轨迹
   animation/plan.py        # renderer-neutral 动画阶段计划
+benchmarks/bench_crossings.py  # 计时 + 网格/暴力等价校验
+```
+
+运行基准（会打印剪枝比、耗时与事件指纹，并在两套候选策略不一致时返回非零退出码）：
+
+```bash
+python benchmarks/bench_crossings.py --repeat 3
 ```
 
 ## 建议的下一步开发顺序
 
-1. 交叉事件已覆盖顶点交叉、闭合缝、自交、近距离双交叉、重复顶点与退化路径（见 `tests/test_crossings.py`）；下一步是稳定的空间索引与非邻近候选剪枝。
+1. 交叉候选已用确定性网格剪枝，且与暴力枚举逐事件等价（见 `tests/test_index.py`）；下一步是窄相位包围盒的向量化，以及采样曲线的交点局部精化（FR-036）。
 2. 用实际 Manim CE 版本做适配器和视频视觉测试。
 3. 为 Stroke 补齐端帽策略、片段绘制依赖顺序与视觉回归样例（闭合路径切口与浅角近似已有测试与诊断）。
 4. 建立 half-edge / planar arrangement 或验证几何库的区域后端。

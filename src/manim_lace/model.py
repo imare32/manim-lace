@@ -158,6 +158,22 @@ class WeaveTopology:
 
 
 @dataclass(frozen=True, slots=True)
+class CrossingStats:
+    """Observable counters for candidate pruning and the crossing narrow phase."""
+
+    strategy: str
+    segment_count: int
+    candidate_pairs: int
+    pair_checks: int
+    grid_cells: int
+
+    @property
+    def all_pairs(self) -> int:
+        """Number of pairs a brute-force detector would consider."""
+        return self.segment_count * (self.segment_count - 1) // 2
+
+
+@dataclass(frozen=True, slots=True)
 class TraceEvent:
     """A deterministic record of an actual algorithm step."""
 
@@ -178,3 +194,4 @@ class LaceResult:
     diagnostics: list[Diagnostic]
     trace: list[TraceEvent]
     render_mode: str = "stroke"
+    detection_stats: CrossingStats | None = None
