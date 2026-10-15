@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — planar-arrangement region backend and the backend comparison (M4 done)
+
+- Add the second region implementation, `ribbon_backend='arrangement'`
+  (`render/arrangement.py`, SPEC FR-054's "planar embedding or verified boolean
+  algorithms"): all ribbon boundaries — band rings *plus* the section boundaries that put a
+  real edge through a self-crossing overlap — are noded with GEOS and turned into faces with
+  `polygonize` (nested faces are reduced so an annulus stays an annulus), and every face is
+  assigned exactly one owner: the single covering strand, or the strand the local crossing
+  says is on top, or the deterministic path order where geometry cannot decide.
+- Properties this backend adds, each asserted in `tests/test_arrangement.py`: regions never
+  overlap (`region_area_sum == painted_area`), `painted_area == union_area` even when several
+  crossings share one point, a self-crossing needs no overlapping sections, and no painter
+  order is needed for visibility (the layer numbers stay as `draw_index` for renderers).
+- What it cannot compute from geometry is reported instead of smoothed over:
+  `REGION-CONFLICTING-OVERLAP` (one face inside crossings with contradictory assignments,
+  typically coincident crossings), `REGION-OFF-CROSSING-OVERLAP` (parallel strands with no
+  crossing nearby), `REGION-DROPPED-SLIVER` (near-tangent face fragments, with count and
+  area) and `REGION-LENS-APPROXIMATION` (a self-crossing whose local window is too short to
+  contain its overlap, checked against the analytic `4 * offset^2 / sin(theta)`).
+- Engine knob `ribbon_backend` (`boolean`, the default, or `arrangement`), validated at
+  construction, with the public `RibbonBackend` type and a pass-through in the Manim facade.
+  `build_bands` / `build_sections` are now shared helpers so "the ribbon" means the same
+  thing in both backends.
+- The comparison the milestone asked for: on ordinary crossings the backends agree exactly
+  (same painted area, same hidden area, same region area sum, for circle × line and a
+  three-line chain), and they differ exactly where the Boolean model has to approximate — a
+  self-crossing shows hidden area `0` there (overlapping sections instead) against the
+  analytic lens in the arrangement, and coincident crossings lose coverage only in the
+  Boolean one. Both are kept on purpose; the tests pin the agreement *and* the differences.
+
 ## Unreleased — self-crossings in the region backend (M4)
 
 - Weave self-crossings in `render_mode='ribbon'`. A path that crosses itself is cut into

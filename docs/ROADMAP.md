@@ -3,7 +3,7 @@
 Markers: `[x]` done and covered by tests, `[~]` partially done, `[ ]` not started.
 Last reviewed 2026-10-15 against the state of `main` after the crossing, stroke-boundary,
 candidate-index, intersection-refinement, event-policy, conflict-strategy, stroke
-cap/order and region-backend work.
+cap/order and both region-backend work.
 
 ## Where we are
 
@@ -14,12 +14,12 @@ cap/order and region-backend work.
   strategy switch are implemented and tested.
 - **M3 done** — seam handling, dropped-geometry diagnostics, stated limitations, cap
   policy, draw dependency order and the renderable/geometry regression pair.
-- **M4 in progress** — 2 of 3 bullets done: the Shapely region backend ships behind
-  `render_mode='ribbon'` with tagged faces/holes and validated area conservation; the
-  half-edge comparison and per-pass bands for self-crossings are open.
+- **M4 done** — all three bullets: the Boolean region backend with tagged faces/holes and
+  validated area conservation, the planar-arrangement backend, and the comparison between
+  them (including what each one reports instead of approximating).
 - **M5 partially scaffolded**, **M6 not started**.
-- Next in line: finish M4 (self-crossing bands, half-edge comparison) → M5 fine-grained
-  traces and verified animation coordinates.
+- Next in line: M5 fine-grained traces and verified animation coordinates, plus the two
+  remaining M1 items (pixel-aligned stroke widths, Manim CE version matrix).
 
 ## M0 — Starter kit (done)
 - Core data model, graph/parametric samplers, line-segment crossing detector.
@@ -112,22 +112,25 @@ cap/order and region-backend work.
       (`README.md` 重要语义 and the numeric assumptions in `docs/ARCHITECTURE.md`).
 
 ## M4 — Region renderer
-- [~] Prototype Shapely-based Boolean regions vs a dedicated half-edge arrangement: the
-      Shapely prototype is implemented (`render/regions.py`, `render_mode='ribbon'`, the
-      optional `geometry` extra). Each path becomes one offset band; at every woven
-      crossing between two paths the under band loses the exact Boolean intersection with
-      the over band *local to that crossing* (component containing the crossing point), so
-      no radius, no shallow-angle clamp and no cap compensation is involved. A path that
-      crosses itself is cut into sections at its two passes and emitted as overlapping
-      regions whose painter order (`RibbonRegion.draw_index`, computed by
-      `render/order.py::paint_order`, shared with the stroke backend) decides which pass is
-      on top — the same strategy the stroke backend uses, and disclosed through
-      `REGION-OVERLAPPING-SECTIONS`. Two situations are reported instead of smoothed over:
-      a crossing without an assignment (`REGION-MISSING-ASSIGNMENT`) and several crossings
-      landing on one point, where the per-crossing removals cancel out and coverage is no
-      longer conserved (`REGION-COINCIDENT-CROSSINGS` + `REGION-AREA-MISMATCH`). The
-      remaining work is the half-edge/planar arrangement comparison itself, which would
-      also give per-face strand labels for the coincident case.
+- [x] Prototype Shapely-based Boolean regions vs a dedicated half-edge arrangement: both
+      implementations ship behind `ribbon_backend` (`render_mode='ribbon'`, the optional
+      `geometry` extra) and are compared by `tests/test_arrangement.py`.
+      The Boolean one (`render/regions.py`) cuts the exact crossing-local intersection out
+      of the under band, and cuts self-crossing paths into section pairs whose overlapping
+      regions are resolved by the painter order (`render/order.py::paint_order`, shared with
+      the stroke backend). It reports what it cannot express:
+      `REGION-OVERLAPPING-SECTIONS`, `REGION-COINCIDENT-CROSSINGS` +
+      `REGION-AREA-MISMATCH`, `REGION-SECTION-SEAM`, `REGION-MISSING-ASSIGNMENT`.
+      The arrangement one (`render/arrangement.py`) nodes all ribbon boundaries (band rings
+      plus the section boundaries that put a real edge through a self-crossing overlap),
+      extracts faces with `polygonize`, and gives every face exactly one owner, so regions
+      never overlap (`region_area_sum == painted_area`) and coverage stays exact even for
+      coincident crossings. What it cannot decide from geometry is reported:
+      `REGION-CONFLICTING-OVERLAP`, `REGION-OFF-CROSSING-OVERLAP`,
+      `REGION-DROPPED-SLIVER`, `REGION-LENS-APPROXIMATION`.
+      The comparison result: identical painted/hidden areas on ordinary crossings, and
+      disagreement exactly where the Boolean model approximates (self-crossing hidden area
+      `0` vs the analytic lens; coincident crossings lose coverage only in the Boolean one).
 - [x] Define faces and holes independently of rendering fill rules: `RibbonRegion` holds
       an exterior ring plus tagged hole rings (`exterior` / `source_contour` /
       `occlusion`), exteriors counter-clockwise and holes clockwise; the Manim facade

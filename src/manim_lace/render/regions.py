@@ -442,6 +442,88 @@ def _nodes_for(
     return [strip.strip_id for strip in found] or [path_id]
 
 
+def build_bands(
+    paths: list[PolylinePath],
+    *,
+    offset: float,
+    cap_style: CapStyle,
+    join: JoinStyle,
+    miter_limit: float,
+    diagnostics: list[Diagnostic],
+) -> tuple[dict[str, Any], dict[str, list[float]]]:
+    """One offset band per path, plus the interior-ring areas it started with.
+
+    Shared by both region backends so that "the ribbon" means the same thing in each.
+    """
+    LineString, _Point, _Polygon, _union, make_valid, orient = _require_shapely()
+    bands: dict[str, Any] = {}
+    source_hole_areas: dict[str, list[float]] = {}
+    for path in paths:
+        if path.length <= 0:
+            diagnostics.append(Diagnostic(
+                code="REGION-EMPTY-RIBBON",
+                severity=Severity.INFO,
+                message=f"路径 {path.path_id} 没有长度，因此不产生区域。",
+                path_ids=(path.path_id,),
+            ))
+            continue
+        band = LineString(np.asarray(path.points, dtype=float)).buffer(
+            offset,
+            cap_style=_CAP_STYLES[cap_style],
+            join_style=_JOIN_STYLES[join],
+            mitre_limit=float(miter_limit),
+        )
+        band = _repair(band, make_valid, path, diagnostics)
+        if getattr(band, "geom_type", "") == "Polygon":
+            band = orient(band, 1.0)
+        if band.is_empty:
+            diagnostics.append(Diagnostic(
+                code="REGION-EMPTY-RIBBON",
+                severity=Severity.INFO,
+                message=f"路径 {path.path_id} 的偏移区域为空，没有可见面。",
+                path_ids=(path.path_id,),
+            ))
+            continue
+        bands[path.path_id] = band
+        source_hole_areas[path.path_id] = [
+            _ring_area(ring) for polygon in _polygons(band) for ring in polygon.interiors
+        ]
+    return bands, source_hole_areas
+
+
+def build_sections(
+    paths: list[PolylinePath],
+    bands: dict[str, Any],
+    self_crossings: list[CrossingEvent],
+    *,
+    offset: float,
+    cap_style: CapStyle,
+    join: JoinStyle,
+    miter_limit: float,
+    line_class: Any,
+    point_class: Any,
+    polygon_class: Any,
+    unary_union: Any,
+) -> dict[str, list[_Strip]]:
+    """Sections of the paths that cross themselves, keyed by path ID."""
+    split_arcs: dict[str, list[float]] = {path_id: [] for path_id in bands}
+    for crossing in self_crossings:
+        split_arcs[crossing.path_a].extend((crossing.s_a, crossing.s_b))
+    builder = _StripBuilder(
+        offset=offset, cap_style=cap_style, join=join, miter_limit=miter_limit,
+        point_class=point_class, polygon_class=polygon_class,
+        line_class=line_class, unary_union=unary_union,
+    )
+    sections: dict[str, list[_Strip]] = {}
+    for path in paths:
+        if path.path_id not in bands or not split_arcs.get(path.path_id):
+            continue
+        sections[path.path_id] = builder.for_path(
+            path, _split_arcs(path, split_arcs[path.path_id])
+        )
+    return sections
+
+
 def _boxes_overlap(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
     return not (
         second[2] < first[0] or second[0] > first[2]
@@ -499,59 +581,22 @@ def render_region_geometry(
     LineString, Point, Polygon, unary_union, make_valid, orient = _require_shapely()
 
     diagnostics: list[Diagnostic] = []
-    bands: dict[str, Any] = {}
-    source_hole_areas: dict[str, list[float]] = {}
+    bands, source_hole_areas = build_bands(
+        paths, offset=offset, cap_style=cap_style, join=join,
+        miter_limit=miter_limit, diagnostics=diagnostics,
+    )
     geometry_by_id = {path.path_id: path for path in paths}
-    for path in paths:
-        if path.length <= 0:
-            diagnostics.append(Diagnostic(
-                code="REGION-EMPTY-RIBBON",
-                severity=Severity.INFO,
-                message=f"路径 {path.path_id} 没有长度，因此不产生区域。",
-                path_ids=(path.path_id,),
-            ))
-            continue
-        band = LineString(np.asarray(path.points, dtype=float)).buffer(
-            offset,
-            cap_style=_CAP_STYLES[cap_style],
-            join_style=_JOIN_STYLES[join],
-            mitre_limit=float(miter_limit),
-        )
-        band = _repair(band, make_valid, path, diagnostics)
-        if getattr(band, "geom_type", "") == "Polygon":
-            band = orient(band, 1.0)
-        if band.is_empty:
-            diagnostics.append(Diagnostic(
-                code="REGION-EMPTY-RIBBON",
-                severity=Severity.INFO,
-                message=f"路径 {path.path_id} 的偏移区域为空，没有可见面。",
-                path_ids=(path.path_id,),
-            ))
-            continue
-        bands[path.path_id] = band
-        source_hole_areas[path.path_id] = [
-            _ring_area(ring) for polygon in _polygons(band) for ring in polygon.interiors
-        ]
 
     # A path is cut into sections only when it crosses itself: its two passes share one
     # band, and one band cannot be over and under itself. Everything else keeps the
     # whole band, which is what makes an ordinary crossing exactly local.
     weavable = [crossing for crossing in crossings if crossing.kind == "transverse"]
     self_crossings = [crossing for crossing in weavable if crossing.path_a == crossing.path_b]
-    split_arcs: dict[str, list[float]] = {path_id: [] for path_id in bands}
-    for crossing in self_crossings:
-        split_arcs[crossing.path_a].extend((crossing.s_a, crossing.s_b))
-    builder = _StripBuilder(
-        offset=offset, cap_style=cap_style, join=join, miter_limit=miter_limit,
-        point_class=Point, polygon_class=Polygon, line_class=LineString, unary_union=unary_union,
+    strips = build_sections(
+        paths, bands, self_crossings, offset=offset, cap_style=cap_style, join=join,
+        miter_limit=miter_limit, line_class=LineString, point_class=Point,
+        polygon_class=Polygon, unary_union=unary_union,
     )
-    strips: dict[str, list[_Strip]] = {}
-    for path in paths:
-        if path.path_id not in bands or not split_arcs.get(path.path_id):
-            continue
-        strips[path.path_id] = builder.for_path(
-            path, _split_arcs(path, split_arcs[path.path_id])
-        )
     visible_band: dict[str, Any] = dict(bands)
     visible_strip: dict[str, Any] = {
         strip.strip_id: strip.band for group in strips.values() for strip in group

@@ -41,6 +41,11 @@ CapStyle = Literal["butt", "round", "square"]
 #: How the ribbon-region backend connects offset segments at a polyline vertex
 #: (SPEC FR-053). ``miter`` is limited by ``miter_limit``.
 JoinStyle = Literal["miter", "bevel", "round"]
+#: Which ribbon implementation to use (SPEC FR-054): ``boolean`` cuts the overlap out of
+#: the under ribbon and resolves self-crossings with ordered sections, ``arrangement``
+#: extracts the planar arrangement of the ribbon boundaries and decides ownership per
+#: face. Both consume the same crossings and assignment.
+RibbonBackend = Literal["boolean", "arrangement"]
 
 
 @dataclass(frozen=True, slots=True)

@@ -50,31 +50,32 @@ class CapStyleGallery(Scene):
 
 
 class RibbonGallery(Scene):
-    """The area backend next to the stroke backend for the same two strands."""
+    """The three backends side by side for the same two strands."""
 
     def construct(self):
         self.add(
-            Text("stroke (cut centerlines) vs ribbon (Boolean regions)", font_size=24).to_edge(UP)
+            Text("stroke / ribbon (boolean) / ribbon (arrangement)", font_size=24).to_edge(UP)
         )
         source = _two_strand_source()
-        stroke = Lace(source, offset=0.22, render="stroke", stroke_color=TEAL)
-        ribbon = Lace(
-            source, offset=0.22, render="ribbon",
-            stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
+        variants = (
+            ("stroke", Lace(source, offset=0.22, render="stroke", stroke_color=TEAL)),
+            ("boolean", Lace(
+                source, offset=0.22, render="ribbon", stroke_color=TEAL,
+                fill_color=TEAL, hole_color=BLACK,
+            )),
+            ("arrangement", Lace(
+                source, offset=0.22, render="ribbon", ribbon_backend="arrangement",
+                stroke_color=TEAL, fill_color=TEAL, hole_color=BLACK,
+            )),
         )
-        for lace, label in ((stroke, "stroke"), (ribbon, "ribbon")):
-            lace.scale(0.75).shift(DOWN * 0.2)
-            print(
-                label,
-                "diagnostics:",
-                [diagnostic.code for diagnostic in lace.diagnostics],
-            )
-        panels = VGroup(
-            VGroup(stroke, Text("stroke", font_size=22).next_to(stroke, DOWN, buff=0.3)),
-            VGroup(ribbon, Text("ribbon", font_size=22).next_to(ribbon, DOWN, buff=0.3)),
-        ).arrange(RIGHT, buff=1.2)
-        self.play(Create(panels[0][0].ribbons), FadeIn(panels[1][0].ribbons), run_time=1.0)
-        self.play(FadeIn(VGroup(panels[0][1], panels[1][1])), run_time=0.4)
+        panels = VGroup()
+        for label, lace in variants:
+            lace.scale(0.7).shift(DOWN * 0.2)
+            print(label, "diagnostics:", [diagnostic.code for diagnostic in lace.diagnostics])
+            panels.add(VGroup(lace, Text(label, font_size=20).next_to(lace, DOWN, buff=0.3)))
+        panels.arrange(RIGHT, buff=0.9)
+        self.play(*[Create(panel[0].ribbons) for panel in panels], run_time=1.0)
+        self.play(FadeIn(VGroup(*[panel[1] for panel in panels])), run_time=0.4)
         self.wait()
 
 

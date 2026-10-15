@@ -18,8 +18,10 @@ from .model import (
     LaceResult,
     PathSource,
     PolylinePath,
+    RibbonBackend,
     normalize_event_policy,
 )
+from .render.arrangement import render_arrangement_regions
 from .render.regions import render_region_geometry
 from .render.stroke import render_stroke_geometry
 from .topology.solver import WeaveMode, solve_weave
@@ -76,6 +78,13 @@ class LaceEngine:
         ``ribbon`` mode only: how the offset outline connects at polyline vertices
         (``miter``, ``bevel`` or ``round``) and the limit that clips a miter spike
         (SPEC FR-053).
+    ribbon_backend:
+        Which region implementation ``ribbon`` mode uses (SPEC FR-054): ``boolean``
+        (default) cuts the overlap out of the under ribbon and resolves self-crossings
+        with ordered sections; ``arrangement`` extracts the planar arrangement of the
+        ribbon boundaries and assigns every face to one owner, so regions never overlap
+        and coincident crossings still conserve area. Differences between them are
+        reported by each backend's own diagnostics.
     """
 
     def __init__(
@@ -98,6 +107,7 @@ class LaceEngine:
         cap_style: CapStyle = "butt",
         join: JoinStyle = "miter",
         miter_limit: float = 5.0,
+        ribbon_backend: RibbonBackend = "boolean",
     ) -> None:
         # Every knob is validated here so that an invalid configuration fails at
         # construction instead of halfway through solve().
@@ -135,6 +145,8 @@ class LaceEngine:
             raise ValueError("join must be 'miter', 'bevel' or 'round'")
         if not np.isfinite(miter_limit) or miter_limit <= 0:
             raise ValueError("miter_limit must be positive and finite")
+        if ribbon_backend not in ("boolean", "arrangement"):
+            raise ValueError("ribbon_backend must be 'boolean' or 'arrangement'")
         self.paths = self._normalize_paths(paths)
         self.offset = float(offset)
         self.weave_mode = weave_mode
@@ -152,6 +164,7 @@ class LaceEngine:
         self.cap_style: CapStyle = cap_style
         self.join: JoinStyle = join
         self.miter_limit = float(miter_limit)
+        self.ribbon_backend: RibbonBackend = ribbon_backend
         self.result: LaceResult | None = None
 
     @staticmethod
@@ -342,7 +355,11 @@ class LaceEngine:
         self, crossings: list[Any], topology: Any, trace: TraceRecorder
     ) -> tuple[list[Any], list[Any]]:
         """Build area-based regions and trace them (``render_mode='ribbon'``)."""
-        regions = render_region_geometry(
+        renderer = (
+            render_arrangement_regions if self.ribbon_backend == "arrangement"
+            else render_region_geometry
+        )
+        regions = renderer(
             self.paths, crossings, topology,
             offset=self.offset, cap_style=self.cap_style,
             join=self.join, miter_limit=self.miter_limit,

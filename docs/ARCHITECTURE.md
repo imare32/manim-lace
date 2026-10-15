@@ -50,7 +50,14 @@ that produced the hit.
   estimate untouched. Refinement never adds, removes or reclassifies an event on its
   own; only the angle test of the classification sees the refined angle.
 
-## Region backend (`render/regions.py`, SPEC FR-052..FR-058)
+## Region backends (`render/regions.py`, `render/arrangement.py`, SPEC FR-052..FR-058)
+
+Two implementations exist behind `ribbon_backend`, because the interesting question is not
+"which one is right" but "where do they have to disagree". Both consume the same
+`WeaveTopology`, return the same `RegionRenderResult`, and are compared by
+`tests/test_arrangement.py`.
+
+### Boolean cutting (`ribbon_backend='boolean'`, the default)
 
 The area backend is the second consumer of `WeaveTopology` and proves the topology layer
 is renderer-neutral (FR-040). It needs the optional `geometry` extra (Shapely) and is
@@ -89,12 +96,55 @@ instead of breaking the core import.
 - Known limit, reported rather than hidden: when several crossings land on the *same*
   point (three strands at one spot), each crossing removes the overlap it sees and the
   removals cancel out, so coverage is no longer conserved. That is reported as
-  `REGION-COINCIDENT-CROSSINGS` together with `REGION-AREA-MISMATCH`, rather than being
-  smoothed over. A planar arrangement with per-face strand labels is the principled fix
-  and is the remaining M4 item.
+  `REGION-COINCIDENT-CROSSINGS` together with `REGION-AREA-MISMATCH`; the arrangement
+  backend below is the principled fix for that configuration.
 - Manim has no even-odd fill, so the facade paints hole rings as its own layer
   (`Lace.holes`) with `hole_color`, and paints regions in `draw_index` order with a
   matching `z_index`; the geometry result is independent of both choices.
+
+### Face ownership (`ribbon_backend='arrangement'`)
+
+The planar arrangement of the ribbon boundaries is built with GEOS primitives: every band's
+rings (plus the section boundaries of self-crossing paths, which is what puts a real edge
+through their overlap) are noded with `unary_union`, `polygonize` extracts the faces, and
+nested faces are reduced so an annulus stays an annulus. Each face is then handed to
+exactly one owner:
+
+- one covering node → that node;
+- several covering nodes → the strand that the local crossing says is on top (the lens of
+  that crossing contains the face);
+- several contradictory crossings on the same face → the deterministic path order, reported
+  as `REGION-CONFLICTING-OVERLAP`;
+- several strands with no crossing nearby → the path order, reported as
+  `REGION-OFF-CROSSING-OVERLAP`.
+
+Consequences, all verified in the tests: regions never overlap
+(`region_area_sum == painted_area`), `painted_area == union_area` even where several
+crossings share one point, a self-crossing needs no overlapping sections, and the painter
+order is not needed for visibility at all (it stays available as `draw_index`). The two
+things the arrangement cannot compute are reported instead: slivers from near-tangent
+boundaries (`REGION-DROPPED-SLIVER`) and a self-crossing whose local window is too short to
+contain its overlap (`REGION-LENS-APPROXIMATION`, checked against the analytic
+`4 * offset^2 / sin(theta)`).
+
+### Cost
+
+The arrangement is the more expensive one, as expected: on a 800-sample Lissajous with 18
+crossings it takes about 0.13 s against 0.04 s for the Boolean backend, and it produces the
+same number of regions (34) with `region_area_sum == painted_area` to 1e-16, where the
+Boolean one reports 0.295 units of overlap. Face ownership is currently a linear scan per
+face; a spatial index is the obvious next step if this backend is used on large inputs.
+
+### What the comparison showed
+
+On ordinary crossings the two backends agree exactly — same painted area, same hidden area,
+same region area sum (circle × line, a three-line chain in `tests/test_arrangement.py`). They
+differ exactly where the Boolean model has to approximate: a self-crossing keeps hidden area
+`0` in the Boolean backend (overlapping sections instead) and the analytic lens in the
+arrangement, and coincident crossings lose coverage in the Boolean backend while the
+arrangement keeps it and reports the contradictory assignment instead. That is why both are
+kept: the arrangement is the principled model, the Boolean one is the cheaper, exactly-local
+one for the common case.
 
 ## Event policy and conflict strategy
 

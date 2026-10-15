@@ -68,6 +68,7 @@ class Lace(VGroup):
         cap_style: str = "butt",
         join: str = "miter",
         miter_limit: float = 5.0,
+        ribbon_backend: str = "boolean",
         **extra: Any,
     ) -> None:
         super().__init__()
@@ -94,6 +95,7 @@ class Lace(VGroup):
             cap_style=cap_style,  # type: ignore[arg-type]
             join=join,  # type: ignore[arg-type]
             miter_limit=miter_limit,
+            ribbon_backend=ribbon_backend,  # type: ignore[arg-type]
         )
         self.result: LaceResult = self.engine.solve()
         self.interlacing = self.result.topology  # migration-friendly discoverability

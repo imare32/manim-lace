@@ -29,7 +29,8 @@ Trace events are immutable records emitted while the engine runs. They are not g
 - Actual stroke pieces emitted by the renderer, including the painter order they are meant
   to be created in (the animation in `examples/scene_gallery.py` uses exactly that order).
 - Actual ribbon regions with their areas and hole roles, plus the area accounting that says
-  how much was removed and whether the visible areas still cover the band union.
+  how much was hidden and whether the visible areas still cover the band union — identically
+  for both region backends, so a trace of the same input can be compared across them.
 - Actual diagnostics for unsupported or ambiguous cases.
 
 ## What is not recorded yet
