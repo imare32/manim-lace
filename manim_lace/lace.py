@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import warnings
 from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any, Literal
@@ -21,14 +22,17 @@ import numpy as np
 from manim.utils.bezier import bezier as _bezier
 
 from .interlacing import PARALLEL_SIN_ATOL, Interlacing
+from .stroke import STROKE_UNITS_PER_WIDTH, StrokeWeave
 from .swatches import random_swatch
 
 __all__ = [
     "CURVE_SAMPLES",
     "HOLE_GROUP_METHODS",
+    "RENDER_MODES",
     "RIBBON_GROUP_METHODS",
     "HoleGroupMethod",
     "Lace",
+    "RenderMode",
     "RibbonGroupMethod",
     "mobject_paths",
 ]
@@ -50,6 +54,16 @@ HOLE_GROUP_METHODS: tuple[str, ...] = ("by_area", "by_distance", "by_hole_index"
 #: 支持的丝带分组方法(``by_ribbon_index`` 逐片段轮换, 其余按分组线性铺开调色板)。
 RibbonGroupMethod = Literal["by_area", "by_distance", "by_path", "by_ribbon_index", "by_vertex_count"]
 RIBBON_GROUP_METHODS: tuple[str, ...] = ("by_area", "by_distance", "by_path", "by_ribbon_index", "by_vertex_count")
+
+#: 编织通道(``Lace(..., render=...)``):
+#:
+#: - ``"ribbon"``(默认): 把丝带当作**区域**, 用偏移线交点把每条丝带切成片段多边形
+#:   (`manim_lace.interlacing`), 有孔洞、可半透明、可 3D 挤出;
+#: - ``"stroke"``: 把丝带当作**中心线 + ``stroke_width``**(`manim_lace.stroke`) —— 事件取中心线交叉
+#:   的弧长参数、断口取 ``offset / |sinθ|``、孔洞不需要构造。**必须不透明**, 且没有孔洞/3D,
+#:   详见 `PROGRESS.md` §3 P0-6。
+RenderMode = Literal["ribbon", "stroke"]
+RENDER_MODES: tuple[str, ...] = ("ribbon", "stroke")
 
 
 def to_3d(coords: np.ndarray) -> np.ndarray:
@@ -244,6 +258,16 @@ class Lace(manim.VGroup):
       - ``"by_area"``: 按 (顶点数, 面积) 分组;
       - ``"by_vertex_count"``: 仅按片段的边数分组。
 
+    编织通道(``render``):
+
+    - ``"ribbon"``(默认): 把丝带当作**区域**切分 —— 有孔洞、可半透明、可 3D 挤出, 见上;
+    - ``"stroke"``: 把丝带当作**中心线 + ``stroke_width``**(见 :mod:`manim_lace.stroke`) ——
+      事件取中心线交叉的弧长参数、断口取 ``offset / |sinθ|``、孔洞不需要构造
+      (没被描边盖住的地方自然是背景)。代价: **必须不透明**(断口端头的残差靠"不透明 + 顺序"
+      兜住), 没有孔洞与 3D 挤出; 线宽被强制为 ``2 * offset / 0.01``, 冲突的 kwargs
+      (``stroke_width`` / ``stroke_opacity`` / ``fill_opacity``)会被忽略并告警; 交替无解
+      (约束成奇环)时退化成"每条路径一根完整描边"。
+
     显式传入 ``fill_color`` 时会覆盖分组配色。
 
     输入转换: 目标对象会先被拆成**曲线折线**(见 :func:`mobject_paths`: 每个三次贝塞尔段按
@@ -282,6 +306,7 @@ class Lace(manim.VGroup):
         ribbon_color: Any | None = None,
         ribbon_swatch: Sequence[Any] | None = None,
         ribbon_group_method: str = "by_ribbon_index",
+        render: str = "ribbon",
         validate: str = "warn",
         **kwargs: Any,
     ):
@@ -303,6 +328,8 @@ class Lace(manim.VGroup):
             )
         if ribbon_swatch is not None and len(ribbon_swatch) == 0:
             raise ValueError("ribbon_swatch must not be empty; pass None to keep the kwargs colour")
+        if render not in RENDER_MODES:
+            raise ValueError(f"unknown render {render!r}, expected one of {RENDER_MODES}")
 
         self.offset = offset
         self.hole_opacity = hole_opacity
@@ -310,6 +337,7 @@ class Lace(manim.VGroup):
         self.hole_group_method = hole_group_method
         self.ribbon_color = ribbon_color
         self.ribbon_group_method = ribbon_group_method
+        self.render = render
         self.kwargs = kwargs
         #: 实际用于孔洞着色的调色板。
         self.hole_swatch: tuple[Any, ...] = tuple(hole_swatch) if hole_swatch is not None else tuple(random_swatch())
@@ -342,6 +370,10 @@ class Lace(manim.VGroup):
 
     def _generate_visuals(self) -> None:
         """生成 ``holes`` 与 ``ribbons`` 两组可视化对象。"""
+        if self.render == "stroke":
+            self._generate_stroke_visuals()
+            return
+
         # 1. 孔洞: 按分组把调色板颜色线性映射到各组
         swatch = self.hole_swatch
         groups = list(self.hole_groups.values())
@@ -377,6 +409,70 @@ class Lace(manim.VGroup):
                 poly_kwargs["fill_color"] = color
             poly_kwargs.update(self.kwargs)
             self.ribbons.add(_ribbon_mobject(ribbon, poly_kwargs))
+
+    def _generate_stroke_visuals(self) -> None:
+        """按"中心线 + ``stroke_width``"通道生成片段(见 :mod:`manim_lace.stroke`)。
+
+        与 polygon 通道的差别:
+
+        * 片段是**中心线的一段**, 线宽由 ``offset`` 强制决定
+          (``2 * offset / STROKE_UNITS_PER_WIDTH``) —— 用户传的 ``stroke_width`` / 不透明参数会被
+          忽略并告警, 否则"断口恰好被压上方盖住"这个前提不成立;
+        * 必须**不透明**: 半透明会让"谁盖住谁"退化成混色(见 `PROGRESS.md` §3 P0-6);
+        * ``holes`` 为空 —— 没被描边盖住的地方自然是背景;
+        * 交替无解(约束成奇环)或切不出片段时**不编织**: 每条路径退化成一根完整描边并告警。
+
+        配色与 polygon 通道同源: ``ribbon_color`` 优先, 其次 ``ribbon_swatch``
+        (``ribbon_group_method == "by_path"`` 按路径取色, 否则按片段轮换), 否则用 kwargs 的
+        ``stroke_color``; 其余分组方法对"中心线段"没有意义。
+        """
+        self.weave = StrokeWeave(self.interlacing.paths, self.offset)
+        for issue in self.weave.issues:
+            warnings.warn(f"stroke 通道: {issue}", UserWarning, stacklevel=2)
+
+        width = 2.0 * self.offset / STROKE_UNITS_PER_WIDTH
+        blocked = {"stroke_width", "stroke_opacity", "fill_opacity"}
+        conflicts: list[str] = []
+        if "stroke_width" in self.kwargs and not np.isclose(float(self.kwargs["stroke_width"]), width):
+            conflicts.append(f"stroke_width={self.kwargs['stroke_width']}(应为 {width:.6g})")
+        if float(self.kwargs.get("stroke_opacity", 1.0)) < 1.0:
+            conflicts.append(f"stroke_opacity={self.kwargs['stroke_opacity']}(必须为 1)")
+        if float(self.kwargs.get("fill_opacity", 0.0)) > 0.0:
+            conflicts.append(f"fill_opacity={self.kwargs['fill_opacity']}(必须为 0)")
+        if conflicts:
+            warnings.warn(
+                "stroke 通道按中心线宽度与不透明绘制, 以下参数被忽略: " + ", ".join(conflicts),
+                UserWarning,
+                stacklevel=3,
+            )
+        stroke_kwargs = {key: value for key, value in self.kwargs.items() if key not in blocked}
+
+        def colour_for(path_index: int, index: int) -> Any:
+            if self.ribbon_color is not None:
+                return self.ribbon_color
+            if self.ribbon_swatch is not None:
+                swatch = self.ribbon_swatch
+                if self.ribbon_group_method == "by_path":
+                    return swatch[path_index % len(swatch)]
+                return swatch[index % len(swatch)]
+            return self.kwargs.get("stroke_color", self.kwargs.get("color", manim.WHITE))
+
+        if self.weave.flags is None or not self.weave.segments:
+            # 交替无解 / 切不出片段: 不编织, 但形状仍然正确(整条路径一根描边)
+            pieces: list[dict[str, Any]] = [
+                {"path": index, "points": np.asarray(path, dtype=float)[:, :2]}
+                for index, path in enumerate(self.weave.paths)
+            ]
+        else:
+            order = self.weave.order if self.weave.order is not None else range(len(self.weave.segments))
+            pieces = [self.weave.segments[index] for index in order]
+
+        for index, piece in enumerate(pieces):
+            mobject = manim.VMobject(**stroke_kwargs)
+            mobject.set_points_as_corners(to_3d(np.asarray(piece["points"], dtype=float)))
+            mobject.set_stroke(color=colour_for(piece["path"], index), width=width, opacity=1.0)
+            mobject.set_fill(opacity=0.0)
+            self.ribbons.add(mobject)
 
     def draw_path(self, coords: np.ndarray) -> manim.VMobject:
         """调试辅助: 把一组坐标画成黑色折线。
