@@ -114,7 +114,7 @@ def sample_parametric(
             if not (np.isfinite(p_left).all() and np.isfinite(p_right).all()):
                 # Undefined values separate subpaths. Never connect across them.
                 if len(raw) >= 2:
-                    output.append(_make_path(raw, path_id, part_index, object_label, max_error, False))
+                    output.append(_make_path(raw, path_id, part_index, object_label, max_error, False, func))
                     part_index += 1
                 raw = []
                 continue
@@ -124,7 +124,7 @@ def sample_parametric(
             )
             if not refined:
                 if len(raw) >= 2:
-                    output.append(_make_path(raw, path_id, part_index, object_label, max_error, False))
+                    output.append(_make_path(raw, path_id, part_index, object_label, max_error, False, func))
                     part_index += 1
                 raw = []
                 continue
@@ -132,12 +132,12 @@ def sample_parametric(
                 raw.extend(refined[1:])
             else:
                 if len(raw) >= 2:
-                    output.append(_make_path(raw, path_id, part_index, object_label, max_error, False))
+                    output.append(_make_path(raw, path_id, part_index, object_label, max_error, False, func))
                     part_index += 1
                 raw = list(refined)
         if len(raw) >= 2:
             final_closed = bool(closed and range_index == len(cuts) - 2)
-            output.append(_make_path(raw, path_id, part_index, object_label, max_error, final_closed))
+            output.append(_make_path(raw, path_id, part_index, object_label, max_error, final_closed, func))
             part_index += 1
     return output
 
@@ -149,6 +149,7 @@ def _make_path(
     object_label: str,
     max_error: float,
     closed: bool,
+    curve: PointFunction,
 ) -> PolylinePath:
     # Consecutive samples at the same parameter can arise at interval boundaries.
     compact: list[tuple[float, np.ndarray]] = []
@@ -172,6 +173,8 @@ def _make_path(
         ),
         parameters=params,
         sampling_error=max_error,
+        # Retain the curve so crossings can be refined on it (SPEC FR-036).
+        curve=curve,
     )
 
 
@@ -216,13 +219,13 @@ def sample_graph(
                     split_paths.append(PolylinePath(
                         points=path.points[start:i], path_id=f"{path.path_id}.split{len(split_paths)}",
                         source=path.source, parameters=path.parameters[start:i] if path.parameters is not None else None,
-                        sampling_error=path.sampling_error,
+                        sampling_error=path.sampling_error, curve=path.curve,
                     ))
                 start = i
         if len(path.points) - start >= 2:
             split_paths.append(PolylinePath(
                 points=path.points[start:], path_id=f"{path.path_id}.split{len(split_paths)}",
                 source=path.source, parameters=path.parameters[start:] if path.parameters is not None else None,
-                sampling_error=path.sampling_error,
+                sampling_error=path.sampling_error, curve=path.curve,
             ))
     return split_paths

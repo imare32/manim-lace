@@ -224,3 +224,131 @@ def test_invalid_engine_parameters_raise_at_construction(kwargs):
 def test_ribbon_render_mode_is_still_unimplemented():
     with pytest.raises(NotImplementedError):
         LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])], render_mode="ribbon")
+
+
+def _two_path_crossing(offset=0.2, **kwargs):
+    paths = [
+        np.array([[-2.0, 0.0], [2.0, 0.0]]),
+        np.array([[0.0, -2.0], [0.0, 2.0]]),
+    ]
+    return LaceEngine(paths, offset=offset, weave_mode="alternating", **kwargs).solve()
+
+
+def test_butt_caps_stop_exactly_at_the_cut():
+    result = _two_path_crossing(offset=0.2)
+    crossing = result.crossings[0]
+    assignment = result.topology.assignment_for(crossing.crossing_id)
+    assert assignment is not None
+    under_arc = crossing.s_a if assignment.under_side == "a" else crossing.s_b
+    radius = 0.2 / max(abs(crossing.sin_angle), 0.2) + 0.03 * 0.2
+    under_path = crossing.path_a if assignment.under_side == "a" else crossing.path_b
+    spans = _spans(result, under_path)
+    assert len(spans) == 2
+    assert spans[0][1] == pytest.approx(under_arc - radius, abs=1e-9)
+    assert spans[1][0] == pytest.approx(under_arc + radius, abs=1e-9)
+    assert not any(d.code == "RENDER-CAP-EXTENSION" for d in result.diagnostics)
+
+
+@pytest.mark.parametrize("cap_style", ["round", "square"])
+def test_protruding_caps_widen_the_cut_by_the_ribbon_half_width(cap_style):
+    paths = [
+        np.array([[-2.0, 0.0], [2.0, 0.0]]),
+        np.array([[0.0, -2.0], [0.0, 2.0]]),
+    ]
+    engine = LaceEngine(paths, offset=0.2, weave_mode="alternating", cap_style=cap_style)
+    capped = engine.solve()
+    butt = _two_path_crossing(offset=0.2)
+    crossing = capped.crossings[0]
+    assignment = capped.topology.assignment_for(crossing.crossing_id)
+    assert assignment is not None
+    under_path = crossing.path_a if assignment.under_side == "a" else crossing.path_b
+    butt_assignment = butt.topology.assignment_for(crossing.crossing_id)
+    assert butt_assignment is not None and butt_assignment.under_side == assignment.under_side
+    # A round or square cap paints half the width past the endpoint, so the gap grows
+    # by exactly one ribbon half-width on each side of the crossing.
+    before = _spans(butt, under_path)
+    after = _spans(capped, under_path)
+    assert len(before) == len(after) == 2
+    assert before[0][1] - after[0][1] == pytest.approx(0.2, abs=1e-9)
+    assert after[1][0] - before[1][0] == pytest.approx(0.2, abs=1e-9)
+    diagnostic = next(d for d in capped.diagnostics if d.code == "RENDER-CAP-EXTENSION")
+    assert diagnostic.severity.value == "info"
+    assert engine.cap_style == cap_style
+
+
+def test_engine_rejects_an_unknown_cap_style():
+    with pytest.raises(ValueError):
+        LaceEngine([np.array([[0.0, 0.0], [1.0, 0.0]])], cap_style="curly")
+
+
+def test_pieces_are_ordered_under_before_over():
+    # Three lines forced into a chain (P0002 under P0001 under P0000): the renderer
+    # must paint the under path of every crossing before the path that is over it.
+    paths = [
+        np.array([[-1.0, -1.0], [2.0, 0.2]]),
+        np.array([[-1.0, 0.5], [2.0, -1.0]]),
+        np.array([[-0.5, -1.2], [0.2, 1.4]]),
+    ]
+    manual = {"X0000": "a", "X0001": "a", "X0002": "a"}
+    result = LaceEngine(
+        paths, offset=0.08, weave_mode="alternating", manual_over=manual
+    ).solve()
+    assert result.topology.assignments
+    assert not any(d.code == "RENDER-DRAW-ORDER-CYCLE" for d in result.diagnostics)
+    first_index: dict[str, int] = {}
+    last_index: dict[str, int] = {}
+    for piece in result.pieces:
+        first_index[piece.path_id] = min(first_index.get(piece.path_id, piece.draw_index), piece.draw_index)
+        last_index[piece.path_id] = max(last_index.get(piece.path_id, piece.draw_index), piece.draw_index)
+    assert sorted(piece.draw_index for piece in result.pieces) == list(range(len(result.pieces)))
+    for crossing in result.crossings:
+        assignment = result.topology.assignment_for(crossing.crossing_id)
+        if assignment is None:
+            continue
+        under = crossing.path_a if assignment.under_side == "a" else crossing.path_b
+        over = crossing.path_b if assignment.under_side == "a" else crossing.path_a
+        assert last_index[under] < first_index[over], (crossing.crossing_id, result.pieces)
+
+
+def test_draw_order_is_deterministic_and_traced():
+    first = _two_path_crossing(offset=0.2)
+    second = _two_path_crossing(offset=0.2)
+    order = [piece.piece_id for piece in sorted(first.pieces, key=lambda p: p.draw_index)]
+    assert order == [piece.piece_id for piece in sorted(second.pieces, key=lambda p: p.draw_index)]
+    traced = [event for event in first.trace if event.event_type == "stroke.piece"]
+    assert [event.data["draw_index"] for event in traced] == list(range(len(order)))
+    assert [event.object_ids[0] for event in traced] == order
+
+
+def test_a_cyclic_over_under_relation_is_only_reported_where_cuts_are_approximate():
+    # Two strands that cross twice give over/under in both directions: no painter order
+    # can be consistent, and the cuts are what makes the weave visible.
+    theta = np.linspace(0, 2 * np.pi, 181)
+    circle = np.column_stack((np.cos(theta), np.sin(theta)))
+    line = np.array([[-2.0, 0.0], [2.0, 0.0]])
+    exact = LaceEngine([circle, line], offset=0.1, weave_mode="free").solve()
+    assert not any(d.code == "RENDER-DRAW-ORDER-CYCLE" for d in exact.diagnostics)
+
+    # The same cycle with shallow cuts, which are the only place where the paint order
+    # actively hides the approximation, must be reported.
+    zigzag = np.array([[-2.0, 0.0], [0.0, 0.005], [2.0, 0.0]])
+    shallow = np.array([[-2.0, 0.0025], [2.0, 0.0025]])
+    result = LaceEngine([zigzag, shallow], offset=0.1, weave_mode="free").solve()
+    diagnostic = next(d for d in result.diagnostics if d.code == "RENDER-DRAW-ORDER-CYCLE")
+    assert diagnostic.severity.value == "info"
+    assert diagnostic.details["approximate_constraints"]
+
+
+def test_piece_geometry_and_draw_order_are_frozen():
+    # Geometry golden for the stroke stage: arc intervals, point data and painter order.
+    # This is the headless stand-in for a visual regression baseline (the crossing
+    # digests in tests/test_benchmarks.py freeze the step before it).
+    from manim_lace.benchmarks import piece_digest
+
+    assert piece_digest(_two_path_crossing(offset=0.2).pieces) == (
+        "48855cccb5c53ae8cc482aa73aeebe641036c418"
+    )
+    zigzag = np.array([[-2.0, 0.0], [0.0, 0.005], [2.0, 0.0]])
+    shallow = np.array([[-2.0, 0.0025], [2.0, 0.0025]])
+    relaxed = LaceEngine([zigzag, shallow], offset=0.1, weave_mode="free").solve()
+    assert piece_digest(relaxed.pieces) == "ed3216653644460a021c153ab894ac1109376378"

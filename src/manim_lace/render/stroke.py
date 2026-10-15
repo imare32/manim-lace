@@ -12,23 +12,41 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
-from ..model import CrossingEvent, PolylinePath, WeaveTopology
+from ..model import CapStyle, CrossingEvent, PolylinePath, WeaveTopology
 
 
 @dataclass(slots=True)
 class StrokePiece:
+    """One visible centerline piece.
+
+    ``draw_index`` is the position in the deterministic painter order computed from
+    the over/under assignments: a piece of an under path always comes before the
+    pieces of the paths that are over it. Opaque rendering does not depend on it, but
+    it keeps imperfect cut ends covered (SPEC FR-046 determinism).
+    """
+
     piece_id: str
     path_id: str
     points: np.ndarray
     arc_start: float
     arc_end: float
     closed: bool = False
+    draw_index: int = 0
 
 
 @dataclass(slots=True)
 class StrokeRenderResult:
     pieces: list[StrokePiece]
     diagnostics: list[Diagnostic] = field(default_factory=list)
+
+    def ordered_pieces(self) -> list[StrokePiece]:
+        """Pieces in the deterministic draw order (see ``StrokePiece.draw_index``)."""
+        return sorted(self.pieces, key=lambda piece: (piece.draw_index, piece.piece_id))
+
+    @property
+    def draw_order(self) -> list[str]:
+        """Piece IDs in draw order, for inspection, animation and tests."""
+        return [piece.piece_id for piece in self.ordered_pieces()]
 
 
 def _point_at(path: PolylinePath, arc: float) -> np.ndarray:
@@ -86,6 +104,51 @@ def _merge_intervals(intervals: list[tuple[float, float]], tol: float = 1e-10) -
     return out
 
 
+def _path_layers(
+    path_ids: list[str], edges: list[tuple[str, str]]
+) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    """Layer paths so that every under path is drawn before the paths over it.
+
+    ``edges`` are ``(under, over)`` pairs. A cycle has no consistent painter order;
+    the edges that forced the deterministic break are returned so the caller can report
+    them instead of hiding the fact.
+    """
+    incoming: dict[str, list[str]] = {path_id: [] for path_id in path_ids}
+    seen: set[tuple[str, str]] = set()
+    for under, over in edges:
+        if under == over or (under, over) in seen:
+            continue
+        seen.add((under, over))
+        incoming.setdefault(over, []).append(under)
+    layers = {path_id: 0 for path_id in path_ids}
+    remaining = [path_id for path_id in path_ids]
+    resolved: set[str] = set()
+    congested: list[tuple[str, str]] = []
+    while remaining:
+        progressed = False
+        for path_id in list(remaining):
+            if any(u not in resolved for u in incoming[path_id]):
+                continue
+            layers[path_id] = max((layers[u] + 1 for u in incoming[path_id]), default=0)
+            resolved.add(path_id)
+            remaining.remove(path_id)
+            progressed = True
+        if progressed:
+            continue
+        # Every remaining path waits for something inside a cycle: break it in path
+        # order and remember which constraints had to give.
+        path_id = remaining.pop(0)
+        for blocker in incoming[path_id]:
+            if blocker not in resolved:
+                congested.append((blocker, path_id))
+        layers[path_id] = max(
+            (layers[u] + 1 for u in incoming[path_id] if u in resolved), default=0
+        )
+        resolved.add(path_id)
+    congested.sort()
+    return layers, congested
+
+
 def _fully_cut_diagnostic(path: PolylinePath, *, closed_seam: bool) -> Diagnostic:
     message = (
         "交叉切口覆盖了整条闭合路径，因此没有可见中心线片段。"
@@ -110,6 +173,7 @@ def render_stroke_geometry(
     min_sin: float = 0.2,
     overshoot: float = 0.03,
     min_piece_length: float = 1e-7,
+    cap_style: CapStyle = "butt",
 ) -> StrokeRenderResult:
     """Build visible centerline pieces from crossing events and assignments.
 
@@ -118,9 +182,16 @@ def render_stroke_geometry(
     shallow angles. This first implementation is suitable for opaque stroke
     rendering; transparent strokes and exact area clipping are out of scope.
 
+    ``cap_style`` describes how the visible ends of a cut piece are painted. With
+    ``round`` or ``square`` caps the paint protrudes half the ribbon width beyond the
+    centerline endpoint, so the gap is widened by ``offset`` to keep the over path
+    visible. That keeps the piece geometry honest about what the renderer will draw;
+    the exact cap outline is still an approximation, not a boolean region.
+
     Guarantees for the emitted pieces of one path: their arc intervals never
     overlap, never cross the removed cut intervals, and a piece is never longer
-    than the path itself.
+    than the path itself. ``draw_index`` orders all pieces so that an under path is
+    painted before the paths that are over it.
     """
     if offset <= 0 or not np.isfinite(offset):
         raise ValueError("offset must be positive and finite")
@@ -130,8 +201,12 @@ def render_stroke_geometry(
         raise ValueError("overshoot must be finite and non-negative")
     if not np.isfinite(min_piece_length) or min_piece_length < 0:
         raise ValueError("min_piece_length must be finite and non-negative")
+    if cap_style not in ("butt", "round", "square"):
+        raise ValueError("cap_style must be 'butt', 'round' or 'square'")
     path_index_by_id = {p.path_id: i for i, p in enumerate(paths)}
     cuts: dict[str, list[tuple[float, float]]] = {p.path_id: [] for p in paths}
+    over_edges: list[tuple[str, str]] = []
+    approximate_edges: set[tuple[str, str]] = set()
     diagnostics: list[Diagnostic] = []
     for crossing in crossings:
         if crossing.kind != "transverse":
@@ -149,10 +224,17 @@ def render_stroke_geometry(
             continue
         under_side = assignment.under_side
         path_id = crossing.path_a if under_side == "a" else crossing.path_b
+        over_id = crossing.path_b if under_side == "a" else crossing.path_a
+        over_edges.append((path_id, over_id))
+        if abs(crossing.sin_angle) < min_sin:
+            approximate_edges.add((path_id, over_id))
         arc = crossing.s_a if under_side == "a" else crossing.s_b
         path = paths[path_index_by_id[path_id]]
         radius = offset / max(abs(crossing.sin_angle), min_sin)
         radius += overshoot * offset
+        if cap_style != "butt":
+            # A round or square cap paints half the width past the endpoint.
+            radius += offset
         start, end = arc - radius, arc + radius
         if path.closed and path.length > 0:
             if 2 * radius >= path.length:
@@ -257,4 +339,48 @@ def render_stroke_geometry(
             message="至少一个浅角交叉的断口使用了受限近似；这不是精确的区域裁剪。",
             hints=("可调整 min_sin；如需严格轮廓请开发实体 Ribbon 后端。",),
         ))
+    if cap_style != "butt":
+        diagnostics.append(Diagnostic(
+            code="RENDER-CAP-EXTENSION",
+            severity=Severity.INFO,
+            message=(
+                f"cap_style='{cap_style}' 会让可见端头沿切向多出半个线宽，"
+                f"断口已额外加宽 {offset:g}；端头轮廓仍是视觉近似。"
+            ),
+            hints=("改用 cap_style='butt' 可让断口严格停在切口位置。",),
+        ))
+    layers, congested = _path_layers([path.path_id for path in paths], over_edges)
+    exact_edges = [edge for edge in congested if edge not in approximate_edges]
+    if congested and len(exact_edges) != len(congested):
+        # A cyclic over/under relation is the normal case for two strands that cross an
+        # even number of times: the cuts decide visibility, not the paint order. It is
+        # only worth reporting where a cut is merely approximate, because there the
+        # paint order is what keeps the over path visible.
+        diagnostics.append(Diagnostic(
+            code="RENDER-DRAW-ORDER-CYCLE",
+            severity=Severity.INFO,
+            message=(
+                "过／欠关系存在环，且环上至少一个断口是浅角近似；"
+                "绘制顺序按路径顺序确定性打破，端头形变可能露出近似误差。"
+            ),
+            path_ids=tuple(sorted({path_id for edge in congested for path_id in edge})),
+            details={
+                "constraints": [[under, over] for under, over in congested],
+                "approximate_constraints": [
+                    [under, over] for under, over in congested
+                    if (under, over) in approximate_edges
+                ],
+            },
+            hints=("不透明描边只在被钳制的断口处依赖该顺序；增大 min_sin 或减小 offset 可减轻。",),
+        ))
+    path_position = {path.path_id: index for index, path in enumerate(paths)}
+    ordered = sorted(
+        pieces,
+        key=lambda piece: (
+            layers.get(piece.path_id, 0), path_position.get(piece.path_id, 0),
+            piece.arc_start, piece.piece_id,
+        ),
+    )
+    for index, piece in enumerate(ordered):
+        piece.draw_index = index
     return StrokeRenderResult(pieces=pieces, diagnostics=diagnostics)

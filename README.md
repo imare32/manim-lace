@@ -20,15 +20,18 @@
 | 从 Manim `VMobject` / `VGroup` 读取路径 | 已提供可选适配器，并在 Manim CE `0.22.0` 上实测通过（`tests/test_optional_manim.py`） |
 | 中心线段交叉检测 | 已实现基础版：路径间/自交/重叠/端点/多线共点诊断；顶点交叉、闭合缝、重复顶点与退化路径有回归测试 |
 | 候选加速与性能基准 | 已实现确定性均匀网格剪枝（`candidate_strategy` 可切换网格/暴力，两者逐事件等价），附四类输入的可复现基准集与事件指纹 |
-| 路径级严格交替求解 | 已实现基础版与冲突诊断 |
+| 来源曲线上的局部交点精化（FR-036） | 已实现：两侧路径都带可求值来源曲线与来源参数映射时，用阻尼 Newton 解 `gamma_a(t)=gamma_b(u)`，给出曲线参数、真实切向角与曲线弧长；无探针、探针失效、不收敛或路径在该处确实拐折时如实回退到折线估计 |
+| 路径级严格交替求解 | 已实现：约束传播 + 冲突的**最小见证环**（奇偶环 / 自交奇偶间隔）+ FR-045 冲突策略开关（`error` 报错不伪造 / `manual` 手动优先并放宽自动约束 / `relax` 保留自动解并放宽无解处） |
+| 非横穿候选的事件策略 | 已实现：`event_policy` 可按事件类选择"如实诊断 / 提升为普通横穿（`weave`，仅点状接触）/ 只保留几何不报警告（`ignore`）"；重叠与多线共点只能是诊断或忽略，永不变成二元交叉 |
 | 每次交叉手动指定上下关系 | 已实现 `manual` 模式和逐交叉覆盖 |
 | Stroke 几何切分 | 已实现基础版：闭合缝切口、整条被切、浅角受限与片段丢弃都有显式诊断和测试；端帽与精确区域裁剪仍属视觉近似 |
+| 端帽策略与绘制顺序 | 已实现：`cap_style ∈ {butt, round, square}`（round/square 会按半个线宽加宽断口并报 `RENDER-CAP-EXTENSION`）；每个片段带确定性 `draw_index`（按"被压者先画"分层，环按路径顺序确定性打破，仅在近似断口处报 `RENDER-DRAW-ORDER-CYCLE`），Manim 侧同步 `CapStyleType` 与 `z_index` |
 | Manim `Lace` VGroup 封装 | 已提供，并在 Manim CE `0.22.0` 上实机渲染通过（`examples/scene_weave.py`） |
 | 基于算法轨迹的动画计划 | 已实现 renderer-neutral trace plan；Manim 动画适配器为初始版本，实机渲染已跑通 |
 | 可视化线宽 | 采用 `max(1.0, 200.0 * offset)` 的启发式映射；Manim 的 `stroke_width` 随画幅变化，尚未做严格的像素对齐换算 |
 | 实体 Ribbon、多边形面域与孔洞 | 明确未实现，留下接口与设计要求 |
 | 隐式方程直接等值线提取 | 未实现；可先传入 Manim `ImplicitFunction` 的矢量对象 |
-| 精确曲线曲线求交、鲁棒多线共点分解 | 未实现；当前中心线求交基于采样折线 |
+| 鲁棒多线共点分解 | 未实现；当前只能识别并诊断多线共点，不做唯一穿插顺序推断 |
 
 ## 安装
 
@@ -55,6 +58,8 @@ python -m pip install -e '.[manim,dev]'
 python -m pip install -e '.[geometry,dev]'
 ```
 
+`Lace` 是**惰性**模块属性：没装 Manim 也能 `import manim_lace`，此时它不在 `__all__` 里，首次访问才报带安装提示的 `ImportError`；`TYPE_CHECKING` 声明与静态 `__all__` 字面量保证类型检查器和 IDE 仍能解析该名字（契约由 `tests/test_package_api.py` 冻结）。
+
 ## 快速开始：纯几何内核
 
 ```python
@@ -78,12 +83,12 @@ print("trace events:", len(result.trace))
 纯核心结果的数据可用性：
 
 - `result.paths`：规范化路径；
-- `result.crossings`：交叉候选及路径弧长位置；
+- `result.crossings`：交叉候选及路径弧长位置；精化成功的交叉还会带 `refined=True` 与来源曲线参数 `parameter_a` / `parameter_b`；
 - `result.topology.assignments`：每个已解交叉的过／欠分配；
 - `result.pieces`：Stroke 后端切分出来的可见折线片段；
 - `result.diagnostics`：结构化诊断；
 - `result.trace`：实际求解过程留下的结构化轨迹；
-- `result.detection_stats`：候选筛选统计（策略、线段数、候选对数、窄相位次数、网格单元数、暴力上界）。
+- `result.detection_stats`：候选筛选统计（策略、线段数、候选对数、窄相位次数、网格单元数、暴力上界、精化事件数）。
 
 调试时常用的几个入口：
 
@@ -96,6 +101,30 @@ for event in result.trace:                         # 真实算法阶段，而非
 ```
 
 `LaceEngine(..., candidate_strategy="brute_force")` 可作为参照实现：它与默认网格策略必须给出**相同的交叉事件、诊断与片段几何**，若不一致即为缺陷。
+
+精化结果是可选的增强，不是新的交叉来源：
+
+```python
+result = LaceEngine.from_parametric(lambda t: (np.cos(t), np.sin(t)), (0, 2*np.pi),
+                                    closed=True, refine=True).solve()
+for event in result.crossings:
+    if event.refined:                       # 已在来源曲线上求解
+        print(event.crossing_id, event.parameter_a, event.parameter_b, event.sin_angle)
+```
+
+非横穿候选与严格交替冲突各有显式策略（默认：如实诊断 + 报错不伪造）：
+
+```python
+from manim_lace import EventPolicy, LaceEngine
+
+result = LaceEngine(
+    paths,
+    event_policy=EventPolicy(endpoint_touch="weave"),   # 把 T 型接触真正织进去
+    conflict_strategy="manual",                         # 手动指定优先，放宽矛盾的自动约束
+    manual_over={"X0000": "b"},
+).solve()
+relaxed = [a.crossing_id for a in result.topology.assignments.values() if a.source == "relaxed"]
+```
 
 ## 直接从数学曲线开始
 
@@ -163,15 +192,25 @@ python benchmarks/bench_crossings.py --repeat 3
 ## 重要语义
 
 - `offset` 表示半宽，因此总几何宽度目标为 `2 * offset`。
-- 严格 `alternating` 模式只有在约束相容时才能给出解；若不相容，拓扑对象会携带 `TOPOLOGY-ALTERNATION-UNSAT` 诊断，不会假称已满足严格交替。
+- 严格 `alternating` 模式只有在约束相容时才能给出解；若不相容，拓扑对象会携带 `TOPOLOGY-ALTERNATION-UNSAT` 诊断，不会假称已满足严格交替。诊断里的 `crossing_ids` 是**最小见证集合**（每个冲突一条"最短替代路径 + 该约束"构成的奇偶环，或一条两次经过奇偶性相同的自交），不再倾倒整个连通分量。此时可以用 `conflict_strategy` 选择近似解：
+  - `error`（默认）：报告见证并返回空分配；
+  - `manual`：手动指定变成硬约束（参与奇偶传播），与之矛盾的自动约束被放宽；
+  - `relax`：尽量保留自动交替解，只放宽无解处，手动指定仍然覆盖。
+  两个放宽策略都会给每个被放宽的交叉写 `source="relaxed"`、按确定性默认值（`a` 侧在上，若用户指定过则用用户值）给出上下关系，并携带 `TOPOLOGY-ALTERNATION-RELAXED` 警告（含见证与 `relaxed_crossing_ids`）。结果不是严格交替编织，但绝不静默。
+- 手动指定在可满足时不会破坏交替：`relax`/`error` 下手动值作为覆盖生效，只有**确实与自动解不同**时才报 `TOPOLOGY-MANUAL-OVERRIDE`（info）；`manual` 下它作为硬约束参与传播，邻居交叉随之调整。同一路径上两次互相矛盾的手动指定会报 `TOPOLOGY-MANUAL-CONFLICT`（warning）并保留交叉 ID 较小的一项。
+- `event_policy` 决定非横穿候选怎么处理，取值 `"diagnose"`（默认，保留分类并报警告）、`"weave"`（把**点状接触**提升为普通横穿进入过／欠求解，并报 `GEOM-CONTACT-WOVEN`）、`"ignore"`（保留几何与分类，只是不报警告）。可传 `EventPolicy(...)`、字段映射（如 `{"endpoint_touch": "weave"}`）或一个统一取值。共线重叠与多线共点只能是 `"diagnose"`/`"ignore"`：前者是区间、后者超过两条股线，都不存在唯一的二元上／下关系。
 - `free` 模式对未手动指定的交叉使用确定性默认分配，但不承诺路径级交替。
 - `manual` 模式需要为每个普通横穿交叉提供 `crossing_id: "a" | "b"`；`a` / `b` 分别指该事件数据中的 `path_a` / `path_b` 一侧。自交的两侧仍由不同弧长经过区分。
 - 当前 `stroke` 后端针对不透明二维描边的视觉呈现。半透明叠色、浅角遮挡端头的精确几何与真实区域裁剪不在保证范围内。
+- `cap_style`（默认 `"butt"`）描述可见端头怎么画：`"butt"` 的几何严格停在切口处；`"round"`/`"square"` 会沿切向多画半个线宽，因此断口会额外加宽 `offset` 并报 `RENDER-CAP-EXTENSION`（info）。端头轮廓本身不建模，由描边渲染器决定。
+- 每个片段都带确定性 `draw_index`：按"被压路径先画"的路径分层（最长路分层）排序，环按路径顺序确定性打破。两条股线交叉偶数次时"谁先画"必然成环，这是正常编织图案，可见性由切口决定，因此只有环上存在被 `min_sin` 钳制的近似断口时才报 `RENDER-DRAW-ORDER-CYCLE`（info）。Manim 侧按该顺序建组、设置对应 cap 与 `z_index`，不会与几何层不一致。
 - `render="ribbon"` 当前明确抛出 `NotImplementedError`。后续应基于真正的平面细分/半边结构或经过验证的二维布尔几何来实现，而不是把普通图的环路基当成平面面域。
 - 输入为文字、SVG 时，提取的是矢量轮廓，不是字形的语义中心线笔画。
 - Stroke 片段不变式（有测试保证）：同一路径的片段弧长区间互不重叠、也不超过路径总长；绕闭合缝的切口输出为一个 `piece-seam` 加其余可见弧段；开放路径的切口一旦覆盖整条中心线，就不输出片段并报 `RENDER-PATH-FULLY-CUT`。
-- 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`。
+- 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`、`refine` 必须是布尔值、`conflict_strategy ∈ {"error","manual","relax"}`、`event_policy` 是 `EventPolicy`/字段映射/统一取值或 `None` 且取值合法（`endpoint_touch`、`near_tangent` 取 `"diagnose"|"weave"|"ignore"`，`collinear_overlap`、`multiway` 取 `"diagnose"|"ignore"`）、`cap_style ∈ {"butt","round","square"}`。
 - 候选加速只剪枝、不改语义：网格与暴力枚举必须给出逐事件、逐诊断、逐片段一致的结果（`tests/test_index.py`、`tests/test_benchmarks.py` 的黄金指纹）。
+- 交叉精化（`refine=True`，默认开启）只精化已有事件，不产生新事件，也不改变事件的最大集合：候选仍在采样折线上判定。精化要求两侧路径都带来源曲线探针（`PolylinePath.curve`，由 `sample_parametric` / `sample_graph` / Manim 适配器提供）与来源参数映射（`PolylinePath.parameters`），成功时事件带 `refined=True`、`parameter_a/parameter_b`、曲线弧长与由**真实局部切向**算出的 `sin_angle`。探针缺失、探针抛错或返回非有限值、Newton 不收敛、解跑出候选邻域、或路径在该处**确实拐折**（无唯一局部切向）时，一律回退到折线估计并保持 `refined=False`，不会用"平滑过的"结果冒充几何。
+- 精化后的 `segment_a`/`u_a` 描述的是精化参数所在的采样段，`s_a`/`s_b` 是折线累计弧长加上曲线在段内的真实弧长；闭合路径的弧长位置取模到 `[0, length)`。自交事件在精化后仍保证 `s_a < s_b`。
 
 ## 诊断码
 
@@ -180,13 +219,18 @@ python benchmarks/bench_crossings.py --repeat 3
 | 阶段 | 诊断码 | 严重级 | 触发条件 |
 |---|---|---|---|
 | 几何 | `GEOM-DEGENERATE-PATH` | warning | 路径总长不超过位置容差（例如采样返回重复坐标） |
-| 几何 | `GEOM-ENDPOINT_TOUCH` / `GEOM-NEAR_TANGENT` | warning | 候选交叉被判为端点接触／近切，默认不进入严格交替 |
-| 几何 | `GEOM-COLLINEAR-OVERLAP` | warning | 共线重叠线段，不发明交叉关系 |
-| 几何 | `GEOM-MULTIWAY-CROSSING` | warning | 多路径在同一点附近相交，不进入二元过／欠求解 |
-| 拓扑 | `TOPOLOGY-ALTERNATION-UNSAT` | error | 严格交替约束冲突，返回空分配而不是伪造解 |
+| 几何 | `GEOM-ENDPOINT_TOUCH` / `GEOM-NEAR_TANGENT` | warning | 候选交叉被判为端点接触／近切，默认不进入严格交替（`event_policy` 可改为提升或静默） |
+| 几何 | `GEOM-CONTACT-WOVEN` | info | `event_policy` 把点状接触提升为普通横穿，`details["classified_as"]` 保留原分类 |
+| 几何 | `GEOM-COLLINEAR-OVERLAP` | warning | 共线重叠线段，不发明交叉关系（`event_policy` 可静默） |
+| 几何 | `GEOM-MULTIWAY-CROSSING` | warning | 多路径在同一点附近相交，不进入二元过／欠求解（`event_policy` 可静默） |
+| 拓扑 | `TOPOLOGY-ALTERNATION-UNSAT` | error | 严格交替约束冲突；`details` 给出每个冲突的最小见证与 `crossing_ids` 并返回空分配，而不是伪造解 |
+| 拓扑 | `TOPOLOGY-ALTERNATION-RELAXED` | warning | 冲突策略 `manual`/`relax` 放宽了部分交叉；`details` 含同样的见证与 `relaxed_crossing_ids` |
 | 拓扑 | `TOPOLOGY-MANUAL-ASSIGNMENT-MISSING` | error | `manual` 模式缺少部分交叉的上方指定 |
 | 拓扑 | `TOPOLOGY-MANUAL-OVERRIDE` | info | 用户指定覆盖了自动交替结果 |
+| 拓扑 | `TOPOLOGY-MANUAL-CONFLICT` | warning | 同一路径上两次手动指定奇偶性不相容，保留了交叉 ID 较小的一项 |
 | 渲染 | `RENDER-MISSING-ASSIGNMENT` | warning | 交叉没有上下关系，因此该处不切口 |
+| 渲染 | `RENDER-CAP-EXTENSION` | info | `cap_style` 为 `round`/`square`，端头会多画半个线宽，断口已相应加宽 |
+| 渲染 | `RENDER-DRAW-ORDER-CYCLE` | info | 过／欠关系成环且环上存在近似断口，绘制顺序被确定性打破 |
 | 渲染 | `RENDER-PATH-FULLY-CUT` | warning | 切口覆盖整条中心线（闭合或开放） |
 | 渲染 | `RENDER-PIECE-DROPPED` | info | 可见弧段短于 `min_piece_length` 而未输出 |
 | 渲染 | `RENDER-SHALLOW-ANGLE-APPROXIMATION` | info | 至少一个浅角交叉的断口使用了受限近似 |
@@ -203,6 +247,7 @@ src/manim_lace/
     sampling.py            # 显式函数 / 参数曲线采样
     index.py               # 确定性候选索引与邻域聚类
     intersections.py       # 折线交叉事件检测
+    refine.py              # 来源曲线上的局部交点精化（FR-036）
   topology/solver.py       # Pass 排序与 over/under 约束
   render/stroke.py         # 中心线切分几何
   render/regions.py        # 实体区域后端接口（未实现）
@@ -211,6 +256,8 @@ src/manim_lace/
   animation/trace.py       # 真实算法阶段轨迹
   animation/plan.py        # renderer-neutral 动画阶段计划
 benchmarks/bench_crossings.py  # 计时 + 网格/暴力等价校验
+examples/scene_weave.py        # 基础编织场景
+examples/scene_gallery.py      # 端帽策略与绘制顺序画廊
 ```
 
 运行基准（会打印剪枝比、耗时与事件指纹，并在两套候选策略不一致时返回非零退出码）：
@@ -221,14 +268,14 @@ python benchmarks/bench_crossings.py --repeat 3
 
 ## 建议的下一步开发顺序
 
-与 `docs/ROADMAP.md` 的里程碑顺序保持一致（当前 M1 收尾 → M2 → M3 → M4）：
+与 `docs/ROADMAP.md` 的里程碑顺序保持一致（当前 M1 收尾 → M4）：
 
-1. 采样曲线的**交点局部精化**（FR-036，M1 最后一项）：当前求交基于折线，顶点交叉的角度仍取自线段对而非真实切向。
-2. 拓扑健壮性（M2）：端点／多线共点的显式事件策略、最小冲突集、FR-045 的冲突策略开关。
-3. Stroke 的端帽策略、片段绘制依赖顺序与视觉回归样例（M3 剩余项；闭合缝切口、整条被切、浅角近似已有测试与诊断）。
-4. 视觉线宽的像素对齐换算，以及 Manim CE `0.19`~`0.22` 的适配器兼容矩阵（M1 版本矩阵项）。
-5. 建立 half-edge / planar arrangement 或验证几何库的区域后端（M4）。
-6. 把算法 TraceEvent 扩展成采样细分、逐候选线段对、约束传播步骤和区域遍历的细粒度记录（M5；目前候选阶段只有聚合计数）。
-7. 在更大输入上继续压索引构造与逐段记账的开销（见 `make bench` 输出）。
+1. 建立 half-edge / planar arrangement 或验证几何库的区域后端（M4；`render/regions.py` 已有接口占位）。
+2. 视觉线宽的像素对齐换算，以及 Manim CE `0.19`~`0.22` 的适配器兼容矩阵（M1 版本矩阵项）。
+3. 把算法 TraceEvent 扩展成采样细分、逐候选线段对、约束传播步骤和区域遍历的细粒度记录（M5；目前候选阶段只有聚合计数、冲突只有见证环）。
+4. 验证动画高亮与最终几何使用同一批 ID/坐标（M5 剩余项）。
+5. 在更大输入上继续压索引构造与逐段记账的开销（见 `make bench` 输出）。
+6. 让精化受益于更多输入：为无法求值来源曲线的路径（如 SVG 轮廓的多段折线）定义局部多项式精化，或让适配器保留更多来源参数信息。
+7. 放宽时的质量：目前被放宽的交叉取确定性默认值，可以尝试"最少修改"的近似解（把放宽代价降到最低）。
 
 完整需求基线见 [`docs/SPEC.md`](docs/SPEC.md)。

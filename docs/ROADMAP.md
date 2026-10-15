@@ -1,21 +1,22 @@
 # Development roadmap
 
 Markers: `[x]` done and covered by tests, `[~]` partially done, `[ ]` not started.
-Last reviewed 2026-10-15 against the state of `main` after the crossing, stroke-boundary
-and candidate-index work.
+Last reviewed 2026-10-15 against the state of `main` after the crossing, stroke-boundary,
+candidate-index, intersection-refinement, event-policy, conflict-strategy and stroke
+cap/order work.
 
 ## Where we are
 
 - **M0 done.**
-- **M1 in progress** — 4 of 6 bullets done, 1 partial (Manim CE version matrix),
-  1 open (FR-036 intersection refinement).
-- **M3 started early** — 3 of 4 bullets done. The stroke backend boundaries were pulled
-  forward on request, so M3 runs ahead of the still-unstarted M2.
-- **M2 is all-partial** (events are diagnosed but not policy-controlled, conflicts are
-  reported but not minimised), **M4 not started**, **M5 partially scaffolded**,
-  **M6 not started**.
-- Next in line: FR-036 intersection refinement (M1) → M2 event policies → M3 caps and
-  draw order → M4 region backend.
+- **M1 in progress** — 5 of 6 bullets done, 1 partial (Manim CE version matrix).
+  FR-036 intersection refinement is done for inputs whose source curve is evaluable.
+- **M2 done** — event policies, minimal conflict witnesses and the FR-045 conflict
+  strategy switch are implemented and tested.
+- **M3 done** — seam handling, dropped-geometry diagnostics, stated limitations, and now
+  cap policy, draw dependency order and the renderable/geometry regression pair.
+- **M4 not started**, **M5 partially scaffolded**, **M6 not started**.
+- Next in line: M4 region backend → M5 fine-grained traces and verified animation
+  coordinates.
 
 ## M0 — Starter kit (done)
 - Core data model, graph/parametric samplers, line-segment crossing detector.
@@ -30,9 +31,19 @@ and candidate-index work.
       `0.19`–`0.22` range is still untested.
 - [x] Map sampled points back to source parameters (`PolylinePath.parameters`,
       preserved across breakpoint splits in `geometry/sampling.py`).
-- [ ] Add adaptive intersection refinement on the source curve (FR-036): crossings
-      are still computed on the sampled polyline, and a vertex crossing takes its
-      angle from the segment pair rather than the true local tangents.
+- [x] Add adaptive intersection refinement on the source curve (FR-036): when both
+      paths expose an evaluable source curve (`PolylinePath.curve`, filled in by
+      `sample_parametric`, `sample_graph` and the Manim Bezier adapter) plus the
+      source parameter mapping, each hit is re-solved with a damped Newton iteration
+      on `gamma_a(t) - gamma_b(u) = 0`, restricted to the parameter window that
+      produced it. Refined events carry the source parameters, the curve arc length
+      and an angle sine from the true local tangents. It is fail-open and
+      fail-honest: no probe, a probe that raises or returns non-finite values, a
+      non-convergent iteration, a solution outside the local window, or a path that
+      genuinely kinks at the crossing all keep the chord estimate.
+      `tests/test_refine.py` covers the analytic accuracy gain, the vertex-angle
+      replacement, the corner refusal, the fallbacks and determinism;
+      `tests/test_optional_manim.py` covers the Bezier probe on real Manim data.
 - [x] Strengthen event clustering at polyline vertices and closed-path seams:
       vertex crossings on interior segments and with repeated points stay
       `transverse`, a crossing at a closed seam is reported once at arc 0, and a
@@ -49,15 +60,33 @@ and candidate-index work.
       bookkeeping, plus crossing refinement for sampled curves (FR-036).
 
 ## M2 — Weave topology robustness
-- [~] Add explicit endpoint and multiway event policies: endpoint contacts,
-  near-tangents and multiway nodes are classified and reported, but there is no
-  user-facing policy knob for them yet.
-- [~] Implement constraint explanation paths / minimal conflict sets:
-  `TOPOLOGY-ALTERNATION-UNSAT` lists the conflicting crossings and path pairs, but
-  the reported set is not minimised.
-- [~] Make manual override precedence and strictness settings explicit: a manual
-  assignment wins over the alternating solver and emits `TOPOLOGY-MANUAL-OVERRIDE`;
-  the FR-045 conflict-strategy switch does not exist yet.
+- [x] Add explicit endpoint and multiway event policies: `EventPolicy` (engine knob
+      `event_policy`, accepting an object, a partial mapping or one value for every
+      field) decides per event class whether a candidate is kept as a diagnosed fact
+      (default), promoted into the over/under solver (`weave`, point-like contacts
+      only, reported through `GEOM-CONTACT-WOVEN`) or kept without its warning
+      (`ignore`). An overlap is an interval and a multiway node has more than two
+      strands, so those two classes can only be diagnosed or ignored. Diagnosis keeps
+      every event in `result.crossings`; the policy never deletes geometry.
+      `tests/test_event_policy.py` covers the policy matrix, the validation paths and
+      an end-to-end promoted T-junction that is actually cut.
+- [x] Implement constraint explanation paths / minimal conflict sets:
+      `TOPOLOGY-ALTERNATION-UNSAT` and `TOPOLOGY-ALTERNATION-RELAXED` report one
+      witness per conflict — the shortest alternative path that closes an odd cycle,
+      or a self-crossing whose two passes share a parity — and `crossing_ids` is now
+      the union of those witnesses instead of every crossing in the conflicting
+      component.
+- [x] Make manual override precedence and strictness settings explicit: the FR-045
+      switch `conflict_strategy` (engine and `solve_weave`) selects `error` (default:
+      report the witnesses and return no assignment), `manual` (the user's over sides
+      become hard constraints and the automatic ones that contradict them are
+      relaxed) or `relax` (keep the automatic solution and relax what has to give).
+      Both relaxing strategies mark every relaxed crossing with `source='relaxed'`
+      and report `TOPOLOGY-ALTERNATION-RELAXED`; manual sides stay authoritative as
+      before (`TOPOLOGY-MANUAL-OVERRIDE`), and two contradicting manual sides on one
+      path are now reported as `TOPOLOGY-MANUAL-CONFLICT`.
+      `tests/test_conflict_strategy.py` freezes witnesses, strategies, determinism
+      and JSON-safe diagnostic details.
 
 ## M3 — Production stroke renderer
 - [x] Correct cyclic interval handling around closed-path seams: a cut that wraps
@@ -66,7 +95,16 @@ and candidate-index work.
       and pieces of one path never overlap in arc space (`tests/test_stroke.py`).
 - [x] Report dropped geometry (`RENDER-PIECE-DROPPED`, `RENDER-MISSING-ASSIGNMENT`)
       instead of silently shortening the centerline.
-- [ ] Add draw dependency order, round/butt/square cap policy, and visual regression examples.
+- [x] Add draw dependency order, round/butt/square cap policy, and visual regression
+      examples. Every piece now carries a deterministic `draw_index` computed from the
+      over/under assignments (an under path is always painted before the paths over it,
+      with cycles broken deterministically), `cap_style` selects `butt` (the cut stops
+      exactly at the gap) or `round`/`square` (the paint protrudes half the ribbon width,
+      so the gap is widened by `offset` and `RENDER-CAP-EXTENSION` says so), and the Manim
+      facade applies the matching `CapStyleType` plus `z_index`. `examples/scene_gallery.py`
+      renders the cap comparison and the painter order, while `tests/test_stroke.py` freezes
+      the piece geometry through `manim_lace.benchmarks.piece_digest` (the headless stand-in
+      for a pixel baseline, since CI has no renderer) and asserts the ordering invariant.
 - [x] State limitations for alpha compositing and shallow-angle crossings
       (`README.md` 重要语义 and the numeric assumptions in `docs/ARCHITECTURE.md`).
 

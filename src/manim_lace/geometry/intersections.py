@@ -4,6 +4,10 @@ Candidate generation (``grid`` or ``brute_force``) is separated from the exact
 segment test, so the acceleration structure only prunes work and can never change
 the reported events. Deduplication compares path identity, arc positions, local
 neighbourhood and type, not plain point distance.
+
+Events whose two paths expose an evaluable source curve are additionally refined
+on that curve (SPEC FR-036, ``geometry/refine.py``); refinement is fail-open, so a
+path without a probe keeps the sampled-polyline estimate unchanged.
 """
 
 from __future__ import annotations
@@ -14,8 +18,9 @@ from typing import Literal
 import numpy as np
 
 from ..diagnostics import Diagnostic, Severity
-from ..model import CrossingEvent, CrossingStats, PolylinePath
+from ..model import CrossingEvent, CrossingStats, EventPolicy, PolylinePath
 from .index import SegmentCandidateIndex, all_pairs, neighbourhood_clusters
+from .refine import refine_crossing
 
 CandidateStrategy = Literal["grid", "brute_force"]
 
@@ -169,10 +174,19 @@ def _local_rays(path: PolylinePath, arc: float, point: np.ndarray, tol: float) -
 
 def _classify_vertex_intersection(
     path_a: PolylinePath, path_b: PolylinePath, s_a: float, s_b: float,
-    point: tuple[float, float], sin_angle: float, initial_kind: str, tol: float,
+    point: tuple[float, float], sin_angle: float, initial_kind: str,
+    angle_threshold: float, tol: float,
 ) -> str:
+    """Resolve the event kind from the local branch structure and the angle.
+
+    ``sin_angle`` is the chord angle, or the refined tangent angle when the
+    crossing could be solved on the source curves. Only the angle test reacts to
+    refinement; the branch alternation stays a property of the sampled geometry.
+    """
     if initial_kind != "endpoint_touch":
-        return initial_kind
+        # Not a segment-endpoint hit: no branch terminates here, so the verdict is
+        # the crossing angle itself.
+        return "near_tangent" if sin_angle <= angle_threshold else "transverse"
     external_a = (not path_a.closed) and min(abs(s_a), abs(path_a.length - s_a)) <= tol
     external_b = (not path_b.closed) and min(abs(s_b), abs(path_b.length - s_b)) <= tol
     if external_a or external_b:
@@ -187,7 +201,7 @@ def _classify_vertex_intersection(
     labels = [side for _, side in sorted(rays)]
     alternates = all(labels[i] != labels[(i + 1) % len(labels)] for i in range(len(labels)))
     if alternates:
-        return "near_tangent" if sin_angle <= 1e-7 else "transverse"
+        return "near_tangent" if sin_angle <= angle_threshold else "transverse"
     return "near_tangent"
 
 def _flatten_segments(
@@ -234,6 +248,8 @@ def detect_crossings(
     position_tol: float = 1e-7,
     angle_tol: float = 1e-8,
     candidate_strategy: CandidateStrategy = "grid",
+    refine: bool = True,
+    policy: EventPolicy | None = None,
 ) -> CrossingDetectionResult:
     """Find path/path and non-adjacent self-intersections.
 
@@ -245,6 +261,15 @@ def detect_crossings(
     ``grid`` prunes with a deterministic uniform grid, ``brute_force`` checks
     every pair. Both must produce identical events; the grid exists only to
     reduce the number of exact tests (SPEC FR-035).
+
+    ``refine`` locally re-solves each hit on the source curves when both paths
+    expose one (SPEC FR-036). Paths built from plain coordinates have no probe, so
+    their events stay exactly as the sampled polyline reported them.
+
+    ``policy`` decides what happens to candidates that are not plain transverse
+    crossings: keep them as diagnosed facts (the default), promote point-like
+    contacts into the weave, or drop the warning. It never removes geometry from the
+    result, and it never turns an overlap or a multiway node into a binary crossing.
     """
     if position_tol <= 0 or not np.isfinite(position_tol):
         raise ValueError("position_tol must be positive and finite")
@@ -252,6 +277,14 @@ def detect_crossings(
         raise ValueError("angle_tol must be finite and within (0, 1)")
     if candidate_strategy not in ("grid", "brute_force"):
         raise ValueError("candidate_strategy must be 'grid' or 'brute_force'")
+    if not isinstance(refine, bool):
+        raise ValueError("refine must be a bool")
+    policy = policy if policy is not None else EventPolicy()
+    if not isinstance(policy, EventPolicy):
+        raise ValueError("policy must be an EventPolicy or None")
+    # Delicate-angle threshold: below it a crossing is reported as near-tangent
+    # instead of transversally woven. Shared by the chord and the refined angle.
+    angle_threshold = angle_tol * 10
     raw_hits: list[_RawHit] = []
     diagnostics: list[Diagnostic] = []
     for path in paths:
@@ -319,13 +352,14 @@ def detect_crossings(
         u, v, point, sin_angle, kind = hit
         seg_i, seg_j = segment_indices[first], segment_indices[second]
         if kind == "overlap":
-            diagnostics.append(Diagnostic(
-                code="GEOM-COLLINEAR-OVERLAP",
-                severity=Severity.WARNING,
-                message="发现共线重叠线段；该重叠不会作为普通横穿交叉处理。",
-                path_ids=(paths[path_first].path_id, paths[path_second].path_id),
-                details={"segment_a": seg_i, "segment_b": seg_j},
-            ))
+            if policy.collinear_overlap == "diagnose":
+                diagnostics.append(Diagnostic(
+                    code="GEOM-COLLINEAR-OVERLAP",
+                    severity=Severity.WARNING,
+                    message="发现共线重叠线段；该重叠不会作为普通横穿交叉处理。",
+                    path_ids=(paths[path_first].path_id, paths[path_second].path_id),
+                    details={"segment_a": seg_i, "segment_b": seg_j},
+                ))
             continue
         s_i = float(arc_starts[first] + u * segment_lengths[first])
         s_j = float(arc_starts[second] + v * segment_lengths[second])
@@ -368,38 +402,86 @@ def detect_crossings(
             unique.append(hit)
 
     crossings: list[CrossingEvent] = []
+    refined_events = 0
     for index, hit in enumerate(unique):
         p_a, p_b = paths[hit.path_i], paths[hit.path_j]
+        point, sin_angle = hit.point, hit.sin_angle
+        s_i, s_j = hit.s_i, hit.s_j
+        segment_i, segment_j = hit.segment_i, hit.segment_j
+        u_a, u_b = hit.u, hit.v
+        parameter_a: float | None = None
+        parameter_b: float | None = None
+        refined = None
+        if refine:
+            refined = refine_crossing(
+                p_a, p_b,
+                segment_a=hit.segment_i, u_a=hit.u,
+                segment_b=hit.segment_j, u_b=hit.v,
+                point=hit.point, position_tol=position_tol,
+            )
+        if refined is not None and hit.path_i == hit.path_j and refined.s_a > refined.s_b:
+            # Both sides live on one path: the two passes must stay ordered by arc
+            # length even after the refinement moved them.
+            refined = refined.swapped()
+        if refined is not None:
+            point, sin_angle = refined.point, refined.sin_angle
+            s_i, s_j = refined.s_a, refined.s_b
+            segment_i, segment_j = refined.segment_a, refined.segment_b
+            u_a, u_b = refined.u_a, refined.u_b
+            parameter_a, parameter_b = refined.parameter_a, refined.parameter_b
+            refined_events += 1
         kind = _classify_vertex_intersection(
-            p_a, p_b, hit.s_i, hit.s_j, hit.point, hit.sin_angle, hit.kind,
-            max(position_tol * 8, 1e-8),
+            p_a, p_b, s_i, s_j, point, sin_angle, hit.kind,
+            angle_threshold, max(position_tol * 8, 1e-8),
         )
         event = CrossingEvent(
             crossing_id=f"X{index:04d}",
             kind=kind,  # type: ignore[arg-type]
-            point=hit.point,
+            point=point,
             path_a=p_a.path_id,
             path_b=p_b.path_id,
             path_index_a=hit.path_i,
             path_index_b=hit.path_j,
-            s_a=hit.s_i,
-            s_b=hit.s_j,
-            segment_a=hit.segment_i,
-            segment_b=hit.segment_j,
-            u_a=hit.u,
-            u_b=hit.v,
-            sin_angle=hit.sin_angle,
+            s_a=s_i,
+            s_b=s_j,
+            segment_a=segment_i,
+            segment_b=segment_j,
+            u_a=u_a,
+            u_b=u_b,
+            sin_angle=sin_angle,
+            refined=refined is not None,
+            parameter_a=parameter_a,
+            parameter_b=parameter_b,
         )
+        if kind in ("endpoint_touch", "near_tangent"):
+            decision = getattr(policy, kind)
+            if decision == "weave":
+                # Head-on request: the contact becomes an ordinary crossing so it
+                # enters the over/under solver. The original classification stays
+                # visible in the diagnostic and in the trace.
+                diagnostics.append(Diagnostic(
+                    code="GEOM-CONTACT-WOVEN",
+                    severity=Severity.INFO,
+                    message=(
+                        f"按事件策略把 {kind} 事件 {event.crossing_id} 提升为普通横穿，"
+                        "参与过／欠求解。"
+                    ),
+                    path_ids=(event.path_a, event.path_b),
+                    crossing_id=event.crossing_id,
+                    point=event.point,
+                    details={"classified_as": kind},
+                ))
+                event = replace(event, kind="transverse")
+            elif decision == "diagnose":
+                diagnostics.append(Diagnostic(
+                    code=f"GEOM-{kind.upper()}",
+                    severity=Severity.WARNING,
+                    message=f"交叉候选被分类为 {kind}，默认不参与严格自动交替求解。",
+                    path_ids=(event.path_a, event.path_b),
+                    crossing_id=event.crossing_id,
+                    point=event.point,
+                ))
         crossings.append(event)
-        if kind != "transverse":
-            diagnostics.append(Diagnostic(
-                code=f"GEOM-{kind.upper()}",
-                severity=Severity.WARNING,
-                message=f"交叉候选被分类为 {kind}，默认不参与严格自动交替求解。",
-                path_ids=(event.path_a, event.path_b),
-                crossing_id=event.crossing_id,
-                point=event.point,
-            ))
 
     # Cluster crossings that coincide geometrically. Pairwise crossings at a
     # genuine multiway node are not independent binary over/under events. The
@@ -417,6 +499,8 @@ def detect_crossings(
         }
         if len(involved) >= 3:
             multiway_indices.update(cluster)
+            if policy.multiway != "diagnose":
+                continue
             diagnostics.append(Diagnostic(
                 code="GEOM-MULTIWAY-CROSSING",
                 severity=Severity.WARNING,
@@ -438,5 +522,6 @@ def detect_crossings(
             candidate_pairs=len(candidate_pairs),
             pair_checks=pair_checks,
             grid_cells=grid_cells,
+            refined_events=refined_events,
         ),
     )

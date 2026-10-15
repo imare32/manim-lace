@@ -7,19 +7,25 @@ Trace events are immutable records emitted while the engine runs. They are not g
 | Stage | Events | Current data |
 |---|---|---|
 | `input` | `path.normalized` | path ID, point count, closed flag, length and estimated sampling error |
-| `crossings` | `crossing.candidates` | candidate strategy, segment count, candidate pairs, narrow-phase checks, grid cells, brute-force pair count |
-| `crossings` | `crossing.detected` | crossing ID, kind, position, path arc lengths, angle sine |
-| `topology` | `crossing.assigned` | which side is over/under, source of assignment and explanation |
-| `construction` | `stroke.piece` | piece ID, source path, number of points and arc interval |
+| `crossings` | `crossing.candidates` | candidate strategy, segment count, candidate pairs, narrow-phase checks, grid cells, brute-force pair count, number of events refined on the source curve |
+| `crossings` | `crossing.detected` | crossing ID, kind, position, path arc lengths, angle sine, refined flag and — when refined — the source-curve parameters |
+| `topology` | `crossing.assigned` | which side is over/under, source of assignment (`alternating`, `manual`, `free` or `relaxed`) and explanation |
+| `construction` | `stroke.piece` | piece ID, source path, number of points, arc interval and `draw_index` (records are emitted in that order) |
 | `diagnostics` | `diagnostic` | stable code, severity, details, hints |
 | `complete` | `result.complete` | counts for paths, crossings and output pieces |
 
 ## What animation can truthfully show in v0.1
 
 - Actual normalized paths and sample vertices.
-- Actual detected crossing points and their IDs/types.
-- Actual solved over/under assignment for crossings with a solution.
-- Actual stroke pieces emitted by the renderer.
+- Actual detected crossing points and their IDs/types, plus the fact that — and where — a
+  crossing was re-solved on its source curve.
+- Actual solved over/under assignment for crossings with a solution, including whether it
+  came from alternation, a user override, free mode or a relaxation of an unsatisfiable
+  constraint.
+- Actual conflict witnesses when strict alternation has no solution: the diagnostic
+  `details` carry the minimal cycles (crossing IDs and paths) that make it unsatisfiable.
+- Actual stroke pieces emitted by the renderer, including the painter order they are meant
+  to be created in (the animation in `examples/scene_gallery.py` uses exactly that order).
 - Actual diagnostics for unsupported or ambiguous cases.
 
 ## What is not recorded yet

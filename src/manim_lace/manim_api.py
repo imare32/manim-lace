@@ -13,6 +13,7 @@ from manim import (  # type: ignore[import-not-found]
     ORANGE,
     RED,
     WHITE,
+    CapStyleType,
     Create,
     Dot,
     FadeIn,
@@ -27,7 +28,7 @@ from manim import (  # type: ignore[import-not-found]
 from .adapters.manim import extract_paths
 from .animation.plan import build_animation_plan
 from .engine import LaceEngine
-from .model import LaceResult, PolylinePath
+from .model import EventPolicy, LaceResult, PolylinePath
 
 
 class Lace(VGroup):
@@ -52,6 +53,10 @@ class Lace(VGroup):
         min_sin: float = 0.2,
         min_piece_length: float = 1e-7,
         candidate_strategy: str = "grid",
+        refine: bool = True,
+        event_policy: EventPolicy | dict[str, str] | str | None = None,
+        conflict_strategy: str = "error",
+        cap_style: str = "butt",
         **extra: Any,
     ) -> None:
         super().__init__()
@@ -74,6 +79,10 @@ class Lace(VGroup):
             min_sin=min_sin,
             min_piece_length=min_piece_length,
             candidate_strategy=candidate_strategy,  # type: ignore[arg-type]
+            refine=refine,
+            event_policy=event_policy,
+            conflict_strategy=conflict_strategy,  # type: ignore[arg-type]
+            cap_style=cap_style,  # type: ignore[arg-type]
         )
         self.result: LaceResult = self.engine.solve()
         self.interlacing = self.result.topology  # migration-friendly discoverability
@@ -86,12 +95,11 @@ class Lace(VGroup):
             mob = _polyline_to_vmobject(path.points, closed=path.closed)
             mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
             self.source_paths.add(mob)
-        self.ribbons = VGroup()
         width = stroke_width if stroke_width is not None else max(1.0, 200.0 * offset)
-        for piece in self.result.pieces:
-            mob = _polyline_to_vmobject(piece.points, closed=piece.closed)
-            mob.set_stroke(stroke_color, width=width, opacity=stroke_opacity)
-            self.ribbons.add(mob)
+        self.ribbons = _ribbon_group(
+            self.result.pieces, color=stroke_color, width=width,
+            opacity=stroke_opacity, cap_style=cap_style,
+        )
         self.add(self.ribbons)
 
     @classmethod
@@ -132,10 +140,11 @@ class Lace(VGroup):
         obj.source_paths = VGroup(*[_polyline_to_vmobject(p.points, closed=p.closed) for p in obj.paths])
         for mob in obj.source_paths:
             mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
-        obj.ribbons = VGroup(*[_polyline_to_vmobject(p.points, closed=p.closed) for p in obj.result.pieces])
         width = style["stroke_width"] if style["stroke_width"] is not None else max(1.0, 200.0 * offset)
-        for mob in obj.ribbons:
-            mob.set_stroke(style["stroke_color"], width=width, opacity=style["stroke_opacity"])
+        obj.ribbons = _ribbon_group(
+            obj.result.pieces, color=style["stroke_color"], width=width,
+            opacity=style["stroke_opacity"], cap_style=engine.cap_style,
+        )
         obj.add(obj.ribbons)
         return obj
 
@@ -172,10 +181,11 @@ class Lace(VGroup):
         obj.source_paths = VGroup(*[_polyline_to_vmobject(p.points, closed=p.closed) for p in obj.paths])
         for mob in obj.source_paths:
             mob.set_stroke(GREY_B, width=1.5, opacity=0.45)
-        obj.ribbons = VGroup(*[_polyline_to_vmobject(p.points, closed=p.closed) for p in obj.result.pieces])
         width = style["stroke_width"] if style["stroke_width"] is not None else max(1.0, 200.0 * offset)
-        for mob in obj.ribbons:
-            mob.set_stroke(style["stroke_color"], width=width, opacity=style["stroke_opacity"])
+        obj.ribbons = _ribbon_group(
+            obj.result.pieces, color=style["stroke_color"], width=width,
+            opacity=style["stroke_opacity"], cap_style=engine.cap_style,
+        )
         obj.add(obj.ribbons)
         return obj
 
@@ -260,3 +270,30 @@ def _polyline_to_vmobject(points: np.ndarray, *, closed: bool = False) -> VMobje
     mob = VMobject()
     mob.set_points_as_corners(xyz)
     return mob
+
+
+#: Manim's name for each cap style the geometry layer knows about.
+_MANIM_CAP_STYLES = {
+    "butt": CapStyleType.BUTT,
+    "round": CapStyleType.ROUND,
+    "square": CapStyleType.SQUARE,
+}
+
+
+def _ribbon_group(
+    pieces: list[Any], *, color: Any, width: float, opacity: float, cap_style: str
+) -> VGroup:
+    """One VMobject per piece, in the renderer's draw order, with the cap style set.
+
+    The order of the group members is the painter order computed by the geometry
+    layer (under paths first), so an imperfect cut end stays covered by the path that
+    is over it. ``z_index`` repeats that order for scenes that re-sort mobjects.
+    """
+    group = VGroup()
+    for index, piece in enumerate(sorted(pieces, key=lambda item: (item.draw_index, item.piece_id))):
+        mob = _polyline_to_vmobject(piece.points, closed=piece.closed)
+        mob.set_stroke(color, width=width, opacity=opacity)
+        mob.set_cap_style(_MANIM_CAP_STYLES[cap_style])
+        mob.z_index = index
+        group.add(mob)
+    return group

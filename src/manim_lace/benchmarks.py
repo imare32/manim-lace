@@ -19,6 +19,29 @@ import numpy as np
 
 from .model import PolylinePath
 
+
+def piece_digest(pieces) -> str:
+    """Short stable digest of the stroke pieces, including their draw order.
+
+    The crossing digest above freezes the geometry stage; this one freezes what the
+    stroke renderer emits (arc intervals, point counts and painter order), which is the
+    closest a headless repository gets to a visual regression baseline.
+    """
+    payload = [
+        (
+            piece.piece_id,
+            piece.path_id,
+            piece.closed,
+            piece.draw_index,
+            len(piece.points),
+            round(float(piece.arc_start), 12),
+            round(float(piece.arc_end), 12),
+            [round(float(value), 9) for value in np.asarray(piece.points).reshape(-1)],
+        )
+        for piece in sorted(pieces, key=lambda item: (item.draw_index, item.piece_id))
+    ]
+    return hashlib.sha1(repr(payload).encode("utf-8")).hexdigest()
+
 #: The four input classes required by SPEC §10.2.
 SCENARIO_CLASSES = ("simple", "dense_smooth", "self_intersecting", "path_network")
 

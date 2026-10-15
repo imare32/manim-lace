@@ -9,7 +9,15 @@ import numpy as np
 from .animation.trace import TraceRecorder
 from .geometry.intersections import CandidateStrategy, detect_crossings
 from .geometry.sampling import sample_graph, sample_parametric
-from .model import LaceResult, PathSource, PolylinePath
+from .model import (
+    CapStyle,
+    ConflictStrategy,
+    EventPolicy,
+    LaceResult,
+    PathSource,
+    PolylinePath,
+    normalize_event_policy,
+)
 from .render.stroke import render_stroke_geometry
 from .topology.solver import WeaveMode, solve_weave
 
@@ -37,6 +45,29 @@ class LaceEngine:
         ``grid`` (deterministic uniform-grid pruning, the default) or
         ``brute_force`` (every segment pair). Both must yield identical events;
         the strategy only changes how many exact tests are executed.
+    refine:
+        Locally re-solve each crossing on the source curves when both paths
+        expose one (SPEC FR-036). Paths built from plain coordinates have no
+        probe and keep the sampled-polyline estimate.
+    event_policy:
+        How to treat candidates that are not plain transverse crossings
+        (SPEC FR-032): an :class:`EventPolicy`, a mapping of field names, or one
+        value applied to every field. The default diagnoses them and keeps them out
+        of the weave solver, and ``weave`` promotes endpoint contacts and
+        near-tangents into it.
+    conflict_strategy:
+        What ``alternating`` mode does when strict alternation has no solution
+        (SPEC FR-045): ``error`` (default) reports the minimal conflict witnesses
+        and returns no assignment, ``manual`` keeps the user's over sides as hard
+        constraints and relaxes the automatic ones that contradict them, ``relax``
+        keeps the automatic solution and relaxes what has to give. Both relaxing
+        strategies mark every relaxed crossing with ``source='relaxed'``.
+    cap_style:
+        How the visible ends of cut pieces are painted: ``butt`` (default, the
+        geometry stops exactly at the cut), ``round`` or ``square`` (the paint
+        protrudes half the ribbon width, so the cut is widened by ``offset``). The
+        pieces also get a deterministic ``draw_index`` that puts every under path
+        before the paths over it.
     """
 
     def __init__(
@@ -53,6 +84,10 @@ class LaceEngine:
         overshoot: float = 0.03,
         min_piece_length: float = 1e-7,
         candidate_strategy: CandidateStrategy = "grid",
+        refine: bool = True,
+        event_policy: EventPolicy | dict[str, str] | str | None = None,
+        conflict_strategy: ConflictStrategy = "error",
+        cap_style: CapStyle = "butt",
     ) -> None:
         # Every knob is validated here so that an invalid configuration fails at
         # construction instead of halfway through solve().
@@ -72,6 +107,13 @@ class LaceEngine:
             raise ValueError("min_piece_length must be finite and non-negative")
         if candidate_strategy not in ("grid", "brute_force"):
             raise ValueError("candidate_strategy must be 'grid' or 'brute_force'")
+        if not isinstance(refine, bool):
+            raise ValueError("refine must be a bool")
+        if conflict_strategy not in ("error", "manual", "relax"):
+            raise ValueError("conflict_strategy must be 'error', 'manual' or 'relax'")
+        if cap_style not in ("butt", "round", "square"):
+            raise ValueError("cap_style must be 'butt', 'round' or 'square'")
+        resolved_policy = normalize_event_policy(event_policy)
         if weave_mode not in ("alternating", "free", "manual"):
             raise ValueError("weave_mode must be 'alternating', 'free' or 'manual'")
         invalid_manual = {
@@ -95,6 +137,10 @@ class LaceEngine:
         self.overshoot = float(overshoot)
         self.min_piece_length = float(min_piece_length)
         self.candidate_strategy: CandidateStrategy = candidate_strategy
+        self.refine = refine
+        self.event_policy = resolved_policy
+        self.conflict_strategy: ConflictStrategy = conflict_strategy
+        self.cap_style: CapStyle = cap_style
         self.result: LaceResult | None = None
 
     @staticmethod
@@ -112,7 +158,8 @@ class LaceEngine:
                         source=path.source,
                         parameters=path.parameters,
                         sampling_error=path.sampling_error,
-                    )
+                        curve=path.curve,
+                        )
             else:
                 path = PolylinePath(
                     points=np.asarray(item, dtype=float),
@@ -177,6 +224,8 @@ class LaceEngine:
             position_tol=self.position_tol,
             angle_tol=self.angle_tol,
             candidate_strategy=self.candidate_strategy,
+            refine=self.refine,
+            policy=self.event_policy,
         )
         if detected.stats is not None:
             trace.emit(
@@ -192,6 +241,7 @@ class LaceEngine:
                     "pair_checks": detected.stats.pair_checks,
                     "grid_cells": detected.stats.grid_cells,
                     "all_pairs": detected.stats.all_pairs,
+                    "refined_events": detected.stats.refined_events,
                 },
             )
         for crossing in detected.crossings:
@@ -199,13 +249,16 @@ class LaceEngine:
                 "crossings", "crossing.detected", f"识别交叉候选 {crossing.crossing_id}（{crossing.kind}）。",
                 object_ids=(crossing.crossing_id, crossing.path_a, crossing.path_b),
                 data={"point": crossing.point, "s_a": crossing.s_a, "s_b": crossing.s_b,
-                      "sin_angle": crossing.sin_angle, "kind": crossing.kind},
+                      "sin_angle": crossing.sin_angle, "kind": crossing.kind,
+                      "refined": crossing.refined, "parameter_a": crossing.parameter_a,
+                      "parameter_b": crossing.parameter_b},
             )
         topology = solve_weave(
             detected.crossings,
             [p.path_id for p in self.paths],
             mode=self.weave_mode,
             manual=self.manual_over,  # type: ignore[arg-type]
+            conflict_strategy=self.conflict_strategy,
         )
         for crossing_id, assignment in sorted(topology.assignments.items()):
             trace.emit(
@@ -224,14 +277,15 @@ class LaceEngine:
         rendered = render_stroke_geometry(
             self.paths, detected.crossings, topology,
             offset=self.offset, min_sin=self.min_sin, overshoot=self.overshoot,
-            min_piece_length=self.min_piece_length,
+            min_piece_length=self.min_piece_length, cap_style=self.cap_style,
         )
-        for piece in rendered.pieces:
+        for piece in rendered.ordered_pieces():
             trace.emit(
                 "construction", "stroke.piece", f"生成描边片段 {piece.piece_id}。",
                 object_ids=(piece.piece_id, piece.path_id),
                 data={"point_count": len(piece.points), "arc_start": piece.arc_start,
-                      "arc_end": piece.arc_end, "closed": piece.closed},
+                      "arc_end": piece.arc_end, "closed": piece.closed,
+                      "draw_index": piece.draw_index},
             )
         for diagnostic in rendered.diagnostics:
             trace.emit("diagnostics", "diagnostic", diagnostic.message,

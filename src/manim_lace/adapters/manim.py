@@ -11,7 +11,7 @@ import warnings
 
 import numpy as np
 
-from ..model import PathSource, PolylinePath
+from ..model import CurveProbe, PathSource, PolylinePath
 
 
 def _distance_to_chord(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
@@ -47,6 +47,34 @@ def _sample_cubic(
     left_points, left_t = _sample_cubic(left, max_error, depth + 1, max_depth, t0, tm)
     right_points, right_t = _sample_cubic(right, max_error, depth + 1, max_depth, tm, t1)
     return np.vstack((left_points, right_points[1:])), np.concatenate((left_t, right_t[1:]))
+
+
+def _bezier_point(control: np.ndarray, t: float) -> np.ndarray:
+    """Evaluate one cubic Bezier segment at its local parameter ``t`` in [0, 1]."""
+    u = 1.0 - t
+    return (
+        (u * u * u) * control[0]
+        + (3.0 * u * u * t) * control[1]
+        + (3.0 * u * t * t) * control[2]
+        + (t * t * t) * control[3]
+    )
+
+
+def _bezier_probe(cubics: np.ndarray) -> CurveProbe:
+    """Evaluator over ``curve_index + local_t``, the parameter the adapter stores.
+
+    The probe describes the real source curve, so a crossing found on the sampled
+    polyline can be re-solved on the Bezier data instead of on the chords
+    (SPEC FR-036). Control points are used unchanged; no extra flattening happens.
+    """
+
+    def probe(t: float) -> np.ndarray:
+        value = float(t)
+        index = int(np.clip(np.floor(value), 0.0, len(cubics) - 1))
+        local = float(np.clip(value - index, 0.0, 1.0))
+        return _bezier_point(cubics[index, :, :2], local)
+
+    return probe
 
 
 def _get_family_with_points(mobject: object) -> list[object]:
@@ -102,12 +130,14 @@ def extract_paths(
             xy = points_3d[:, :2]
             metadata: dict[str, object] = {"member_index": member_index}
             parameters: np.ndarray | None = None
+            curve: CurveProbe | None = None
             if n_per_curve == 4 and len(points_3d) >= 4 and len(points_3d) % 4 == 0:
                 cubics = points_3d.reshape((-1, 4, points_3d.shape[1]))
+                curve = _bezier_probe(cubics)
                 sampled_parts: list[np.ndarray] = []
                 parameter_parts: list[np.ndarray] = []
-                for curve_index, curve in enumerate(cubics):
-                    sampled, local_t = _sample_cubic(curve[:, :2], max_error)
+                for curve_index, cubic in enumerate(cubics):
+                    sampled, local_t = _sample_cubic(cubic[:, :2], max_error)
                     global_t = curve_index + local_t
                     if sampled_parts and np.allclose(sampled_parts[-1][-1], sampled[0]):
                         sampled_parts.append(sampled[1:])
@@ -155,6 +185,7 @@ def extract_paths(
                 ),
                 parameters=parameters if parameters is not None and len(parameters) == len(xy) else None,
                 sampling_error=max_error,
+                curve=curve,
             ))
             next_id += 1
     if not paths:
