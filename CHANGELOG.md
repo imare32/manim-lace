@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 玫瑰线示例（examples/rosette.py）
+
+- Add `examples/scene_rosette.py`, a five-scene gallery for the migrated star-rosette
+  module: `RosetteGallery` (the five star types at n=10 level 2, each labelled with its
+  real largest usable level), `RosetteLevels` (level 0 to the largest level `n=10 PA`
+  supports, with the merged loop/point counts per level), `RosetteConstruction` (the
+  documented pipeline panel by panel: kernel + x-axis mirror → rotated petals →
+  `sort_petals` order → the merged loops as `StarRosette` draws them), `RosetteWeave`
+  (the merged loops are closed self-crossing strands, so they go straight into
+  `manim_lace.Lace` in all three channels) and `RosetteLimits` (the real feasibility
+  boundary plus the actual `ValueError` text). Each scene prints the numbers it drew.
+- `examples/rosette.py` holds the star-rosette geometry (it is example support, not
+  package code: `manim_lace` never imports it and it is outside `src/`), and
+  `examples/scene_rosette.py` imports it through an explicit examples-directory path
+  entry so the scenes run from any working directory.
+- `examples/build_gallery.py` gains a rosette section: it probes `StarRosette` the same
+  way it probes `Lace`, so the cards report the real n/level/star_type, merged loop
+  counts, crossings, visible regions and diagnostics, and the page carries a table of
+  the largest usable level per `(n, star_type)` found by probing `cal_kernels` (level 12
+  means "at least 12" for odd n's PA/PO/PR; even n is finite everywhere).
+- `make lint` and CI keep their existing targets
+  (`ruff check src tests examples benchmarks`); the moved module is covered by
+  `examples` like everything else in that directory.
+
 ## Unreleased — 状态画廊生成器与场景修正
 
 - Add `examples/build_gallery.py`: renders every showcase scene with the current

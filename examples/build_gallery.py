@@ -44,10 +44,12 @@ from typing import Any
 EXAMPLES = Path(__file__).resolve().parent
 ROOT = EXAMPLES.parent
 if str(EXAMPLES) not in sys.path:
+    # For the example modules themselves (scene_*.py and their support module rosette.py).
     sys.path.insert(0, str(EXAMPLES))
 
 import manim  # noqa: E402
 import numpy as np  # noqa: E402
+import rosette as rosette_module  # noqa: E402
 from manim import tempconfig  # noqa: E402
 
 import manim_lace  # noqa: E402
@@ -84,6 +86,19 @@ def _capturing_from_engine(cls: Any, *args: Any, **kwargs: Any) -> Lace:
 
 Lace._from_engine = classmethod(_capturing_from_engine)  # type: ignore[method-assign]
 
+#: Records every ``StarRosette`` the showcase builds (``rosette.py`` is an examples-only
+#: support module, so it is probed here as well).
+_ROSETTES: list[Any] = []
+_ORIGINAL_ROSETTE_INIT = rosette_module.StarRosette.__init__
+
+
+def _capturing_rosette_init(self: Any, *args: Any, **kwargs: Any) -> None:
+    _ORIGINAL_ROSETTE_INIT(self, *args, **kwargs)
+    _ROSETTES.append(self)
+
+
+rosette_module.StarRosette.__init__ = _capturing_rosette_init  # type: ignore[method-assign]
+
 
 @dataclass(frozen=True)
 class Card:
@@ -112,6 +127,7 @@ class Collected:
 
     card: Card
     laces: list[Lace] = field(default_factory=list)
+    rosettes: list[Any] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     note: str = ""
     rendered: bool = False
@@ -144,8 +160,30 @@ def _weave_cards() -> tuple[Card, ...]:
     )
 
 
+def _rosette_cards() -> tuple[Card, ...]:
+    """Rosette cards take their prose from ``scene_rosette.GALLERY`` (same idea)."""
+    from scene_rosette import GALLERY
+
+    return tuple(
+        Card(
+            scene_name,
+            scene_name,
+            "scene_rosette",
+            entry.title,
+            entry.blurb,
+            entry.tags,
+        )
+        for scene_name, entry in GALLERY
+    )
+
+
 SECTIONS: tuple[Section, ...] = (
     Section("weave", "编织图案", "ribbon 后端，白底黑线", _weave_cards()),
+    Section(
+        "rosette", "玫瑰线（Star Rosette）",
+        "根目录 rosette.py 的星形玫瑰，最后一格交给编织器",
+        _rosette_cards(),
+    ),
     Section("backend", "绘制通道对照", "同一份交叉与上下关系，三个后端", (
         Card("RibbonGallery", "RibbonGallery", "scene_gallery", "同一输入，三种绘制通道",
              "stroke 按中心线切口；ribbon(boolean) 把重叠区从下股丝带上布尔减掉；"
@@ -196,8 +234,9 @@ def _module(card: Card) -> Any:
 
 
 def _collect(card: Card) -> Collected:
-    """Run ``construct`` without rendering, so the real ``Lace`` objects are available."""
+    """Run ``construct`` without rendering, so the real objects are available."""
     _CAPTURED.clear()
+    _ROSETTES.clear()
     scene = getattr(_module(card), card.scene)()
     scene.play = lambda *args, **kwargs: None  # type: ignore[method-assign]
     scene.wait = lambda *args, **kwargs: None  # type: ignore[method-assign]
@@ -205,9 +244,10 @@ def _collect(card: Card) -> Collected:
     # The scenes print their own diagnostics; keep the build log readable.
     with contextlib.redirect_stdout(io.StringIO()):
         scene.construct()
-    collected = Collected(card=card, laces=list(_CAPTURED))
+    collected = Collected(card=card, laces=list(_CAPTURED), rosettes=list(_ROSETTES))
     _CAPTURED.clear()
-    collected.metrics = _measure(collected.laces)
+    _ROSETTES.clear()
+    collected.metrics = _measure(collected)
     collected.note = _note(collected)
     return collected
 
@@ -220,8 +260,9 @@ def _event_data(lace: Lace, event_type: str) -> dict[str, Any]:
     return {}
 
 
-def _measure(laces: list[Lace]) -> dict[str, Any]:
+def _measure(collected: Collected) -> dict[str, Any]:
     """Measure the objects the scene built: nothing here is inferred or typed in."""
+    laces = collected.laces
     codes: Counter[str] = Counter()
     events: Counter[str] = Counter()
     for lace in laces:
@@ -256,13 +297,30 @@ def _measure(laces: list[Lace]) -> dict[str, Any]:
             for lace in laces
             if lace.render_mode == "ribbon"
         },
+        "rosettes": [
+            {
+                "n": rosette.n,
+                "level": rosette.level,
+                "star_type": rosette.star_type,
+                "points": sum(len(subpath) for subpath in rosette.get_subpaths()),
+            }
+            for rosette in collected.rosettes
+        ],
     }
+
+
+def _rosette_helpers() -> Any:
+    """The rosette example module (imported after the probes are installed)."""
+    return importlib.import_module("scene_rosette")
 
 
 def _note(collected: Collected) -> str:
     """One measured sentence per card, describing what the media really contains."""
     card, laces, metrics = collected.card, collected.laces, collected.metrics
-    if not laces:
+    if card.key == "RosetteLimits":
+        # A text-only scene: its numbers come from the probe, not from a drawn object.
+        return f"偶数 n 的可行域：n=6 {_max_levels(6)}；n=12 {_max_levels(12)}；越界值原样抛出 ValueError"
+    if not laces and not collected.rosettes:
         return ""
     if card.key == "RibbonGallery":
         parts = []
@@ -300,6 +358,41 @@ def _note(collected: Collected) -> str:
             f"（阈值 {lace.density.threshold:.4f}，簇半径 {lace.density.report.cluster_radius:.4f}，"
             f"{len(report.clusters)} 个密集簇 / {report.crossing_count} 个交叉）"
         )
+    if card.key == "RosetteGallery":
+        return f"n=10、level=2 的五种花型；各自最大可用阶 {_max_levels(10)}"
+    if card.key == "RosetteLevels":
+        loops_of = _rosette_helpers().rosette_loops
+        steps = "、".join(
+            f"L{item['level']} {len(loops_of(item['n'], item['level'], item['star_type']))} 段"
+            for item in metrics["rosettes"]
+        )
+        first = metrics["rosettes"][0]
+        return f"该组合（n={first['n']} {first['star_type']}）逐阶：{steps}"
+    if card.key == "RosetteConstruction" and metrics["rosettes"]:
+        item = metrics["rosettes"][0]
+        kernel = rosette_module.cal_kernels(item["n"], item["level"], item["star_type"])[item["level"]]
+        loops = _rosette_helpers().rosette_loops(item["n"], item["level"], item["star_type"])
+        return (
+            f"核 {len(kernel)} 点 → 旋转 {item['n']} 片花瓣 → 按步长 {item['level'] + 1} 重排 → "
+            f"合并成 {len(loops)} 段连续折线（{sum(len(loop) for loop in loops)} 点）"
+        )
+    if card.key == "RosetteWeave":
+        loops = _rosette_helpers().rosette_loops(10, 1, "PA") + _rosette_helpers().rosette_loops(
+            10, 2, "PA"
+        )
+        parts = [f"源 {len(loops)} 条闭合自交股线"]
+        stroke = next((lace for lace in laces if lace.render_mode == "stroke"), None)
+        if stroke is not None:
+            parts.append(f"stroke {len(stroke.crossings)} 交叉 / {len(stroke.result.pieces)} 片段")
+        for lace in laces:
+            if lace.render_mode != "ribbon":
+                continue
+            codes = sorted({diagnostic.code for diagnostic in lace.diagnostics})
+            parts.append(
+                f"{lace.engine.ribbon_backend} {len(lace.result.pieces)} 区域"
+                + (f"（{'、'.join(codes)}）" if codes else "（0 诊断）")
+            )
+        return "；".join(parts)
     if card.media == "video":
         total = sum(metrics["events"].values())
         return f"本场景产生 {total} 条 trace 事件，涵盖 {len(metrics['events'])} 种类型"
@@ -308,6 +401,14 @@ def _note(collected: Collected) -> str:
         return f"本次求解 0 条诊断：{metrics['crossings']} 个交叉全部有唯一解"
     detail = "、".join(f"{code}×{count}" for code, count in sorted(codes.items()))
     return f"本次求解 {sum(codes.values())} 条诊断：{detail}"
+
+
+def _max_levels(n: int) -> str:
+    """The largest usable level per star type, probed the same way the scenes do."""
+    return "、".join(
+        f"{star_type} {_rosette_helpers().max_usable_level(n, star_type)}"
+        for star_type in rosette_module.STAR_TYPE_VALUES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +554,31 @@ def sampling_table() -> str:
         f"（共 {summary['decisions_count']} 条，列表保留 {kept} 条，"
         f"截断标记 {summary['decisions_truncated']}，"
         f"计数恒等式 node_count == split + accept + 触顶 + 丢弃 成立）</p>"
+    )
+
+
+def rosette_limits_table() -> str:
+    """The real feasibility boundary of ``cal_kernels``, probed per ``(n, star_type)``.
+
+    Odd ``n`` runs past the probe limit, so those cells mean "at least this many".
+    """
+    helpers = _rosette_helpers()
+    rows = [
+        (
+            f"<code>{n}</code>",
+            *[
+                str(helpers.max_usable_level(n, star_type))
+                for star_type in rosette_module.STAR_TYPE_VALUES
+            ],
+        )
+        for n in (4, 5, 6, 7, 8, 10, 12)
+    ]
+    table = _table(("n", *rosette_module.STAR_TYPE_VALUES), rows)
+    return (
+        f"{table}<p class='hint'>单元格 = 该 (n, 花型) 的最大可用阶，由逐阶探测 <code>cal_kernels</code> 得到。"
+        f"{helpers.LEVEL_PROBE_LIMIT} 表示顶到本表探测上限（即“至少这么多”）：奇数 n 的 PA/PO/PR 会顶到上限，"
+        "CA/CR 仍在有限阶处终止；偶数 n 则全部有限。越界调用抛 <code>ValueError</code>，"
+        "并在消息里给出该组合的最大可用阶。</p>"
     )
 
 
@@ -614,6 +740,8 @@ def write_page(collected: list[Collected], *, quality: str, rendered_now: bool) 
         if section.key == "backend":
             for item in items:
                 blocks.append(backend_table(item.laces))
+        if section.key == "rosette":
+            blocks.append(rosette_limits_table())
         if section.key == "style":
             blocks.append(palette_table())
         if section.key == "trace":
@@ -710,10 +838,19 @@ def main(argv: list[str] | None = None) -> int:
             if not args.no_render:
                 _render(card, args.quality)
                 item.rendered = True
+            summary = " / ".join(
+                part
+                for part in (
+                    f"{item.metrics['laces']} lace" if item.metrics["laces"] else "",
+                    f"{len(item.metrics['rosettes'])} rosette" if item.metrics["rosettes"] else "",
+                    f"{item.metrics['crossings']} 交叉" if item.metrics["crossings"] else "",
+                    f"{item.metrics['visible']} 可见面" if item.metrics["visible"] else "",
+                )
+                if part
+            )
             print(
                 f"[gallery] {card.scene:22s} {'渲染' if item.rendered else '复用'}  "
-                f"{item.metrics['laces']} lace / {item.metrics['crossings']} 交叉 / "
-                f"{item.metrics['visible']} 可见面"
+                f"{summary or '纯文本场景'}"
             )
     finally:
         Lace.__init__ = _ORIGINAL_INIT  # type: ignore[method-assign]

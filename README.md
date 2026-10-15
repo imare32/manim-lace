@@ -303,6 +303,25 @@ lace.density            # 密度报告与 kept/dropped 列表；result.pieces �
 
 几条口径：样式**不能**改变交叉与上下关系（FR-062 / AT-018）；`palette` 与 `style_policy` 互斥；**覆盖余量 `cover_allowance` 是几何参数**（它确实改变切口），只允许吃掉切口本来就有的余量 `overshoot`，上限在构造时校验；密度简化只隐藏"落在密集簇内、且短于阈值"的可见片段，并在 `RENDER-DENSITY-SIMPLIFIED` 中逐条列出被隐藏的片段 ID。示例场景见 `examples/scene_style.py`（`PaletteGallery` / `BorderGallery` / `CutEndGallery` / `DensityGallery`）。
 
+## 玫瑰线示例（`examples/rosette.py`）
+
+`examples/rosette.py` 是示例自带的星形玫瑰线几何模块（论文式"核 + 镜像 + 旋转"构造法）：`cal_kernels` 逐阶算出骨架、`get_petals_by_kernel` 镜像并旋转出花瓣、`sort_petals` 按拓扑重排、`merge_adjacent_petals` 合并成连续折线，`StarRosette` 再把结果包成 Manim 的 `Polygram`。**`manim_lace` 自己不导入它**，用法全在示例里：
+
+```bash
+manim -pql examples/scene_rosette.py RosetteGallery     # n=10 五种花型（附各自最大可用阶）
+manim -pql examples/scene_rosette.py RosetteLevels      # n=10 PA 的第 0~5 阶阶梯
+manim -pql examples/scene_rosette.py RosetteConstruction # 核 → 镜像 → 旋转 → 合并
+manim -pql examples/scene_rosette.py RosetteWeave        # 玫瑰线交给编织器（三通道）
+manim -pql examples/scene_rosette.py RosetteLimits       # 可行域与真实 ValueError 原文
+```
+
+两处与仓库自身设定直接相关的地方：
+
+- **可行域是有界的，而且会明说。** 高阶核由"旋转前一阶 + 与 x 轴求交"迭代得到，当旋转后的核线段与 x 轴平行时该阶在数学上不存在，`cal_kernels` 直接抛 `ValueError` 并在消息里给出该组合的最大可用阶，而不是产出 `inf`/`nan` 坐标；偶数 `n` 一律有限（`n = 10` 时 PA/CA 到 5 阶、PR/CR 到 6 阶、PO 到 8 阶），奇数 `n` 宽松得多。`RosetteLimits` 与画廊页面上的表格就是逐阶探测这个边界的真实结果。
+- **玫瑰线可以直接喂给编织器。** `merge_adjacent_petals` 的结果是若干条**闭合自交股线**，于是可以当作 `Lace` 的输入：`RosetteWeave` 把 level 1 与 level 2 两朵玫瑰线（共 3 条股线）在 stroke / ribbon(boolean) / ribbon(arrangement) 三个通道里编织。单条路径没法自己压自己，所以 ribbon 后端仍会照例报 `REGION-DRAW-ORDER-CYCLE` 与 `REGION-OVERLAPPING-SECTIONS`（arrangement 后端对同一输入 0 诊断）。
+
+`rosette.py` 与示例同目录、不在安装包内（`src/` 之外，只是示例的支撑模块）：`scene_rosette.py` 通过显式路径导入它，因此从任意工作目录启动场景都能找到，而它随 `examples/` 一起被 `make lint` 与 CI 检查。
+
 ## 状态画廊：一眼看清目前做到哪
 
 `media/gallery/index.html` 是把当前代码"摊开给你看"的页面：每个图案都由本仓库实机渲染，**卡片上的每个数字都读自同一次求解真实产生的对象**，不是手写的。页面与所有媒体都落在 `media/` 下（Manim 自己的生成物目录，仓库不跟踪），所以重跑脚本不会在 `examples/` 留下任何未跟踪文件。
@@ -313,7 +332,7 @@ python examples/build_gallery.py --no-render     # 只重算数据与页面，�
 python examples/build_gallery.py -q l            # 更小更快的渲染
 ```
 
-它覆盖四块：编织图案（ribbon 后端 9 例）、绘制通道对照（stroke / boolean / arrangement 同输入，附面积核算表）、美学策略（调色板、边框、切口端、密度简化）、算法轨迹（两段动画视频 + 真实事件表 + `sampling.subdivision` 的完整载荷）。末尾还有一张"诊断与诚实降级"表，列出本次渲染实际触发的诊断码、级别、说明与出现在哪张卡片上。
+它覆盖五块：编织图案（ribbon 后端 9 例）、玫瑰线（五种花型、阶数阶梯、构造链、交给编织器、可行域，附逐阶探测出的最大可用阶表）、绘制通道对照（stroke / boolean / arrangement 同输入，附面积核算表）、美学策略（调色板、边框、切口端、密度简化）、算法轨迹（两段动画视频 + 真实事件表 + `sampling.subdivision` 的完整载荷）。末尾还有一张"诊断与诚实降级"表，列出本次渲染实际触发的诊断码、级别、说明与出现在哪张卡片上。
 
 实现方式：脚本用探针记录每个场景 `construct` 期间真正创建的 `Lace`（`play`/`wait`/`add` 被替换为空操作，因此数据采集与渲染是两件事），所以交叉数、可见区域数、面积核算、诊断、配色选择、密度省略数、trace 事件统计全部来自对象本身；编织图案的文案取自 `scene_gallery.GALLERY` 里的 `GalleryEntry`，与场景共用同一处定义。这也是它立刻暴露出两处**内容不实**的原因：四圆格栅原本是四个外切圆（0 交叉），五角星原本不自交——现在两者都是真的编织。
 
@@ -434,9 +453,11 @@ src/manim_lace/
   animation/plan.py        # renderer-neutral 动画阶段计划
   animation/verify.py      # 动画坐标与最终几何一致性验证
 benchmarks/bench_crossings.py  # 计时 + 网格/暴力等价校验
-examples/scene_weave.py        # 基础编织场景
+examples/scene_weave.py        # 基础编织场景 + 算法动画（WeaveDemo / SamplingTraceDemo）
 examples/scene_gallery.py      # 端帽策略、绘制顺序与 9 个编织图案（含 GalleryEntry 注册表）
 examples/scene_style.py        # 配色、边框、切口端与密度简化画廊（M6）
+examples/scene_rosette.py      # 星形玫瑰线画廊，并把玫瑰线交给编织器
+examples/rosette.py            # 示例自带的星形玫瑰线几何模块（manim_lace 不导入它）
 examples/build_gallery.py      # 渲染上述场景并生成 media/gallery/index.html 状态画廊
 media/gallery/                 # 生成物：状态画廊页面 + 静帧 + 两段动画视频（media/ 不入库）
 ```
