@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from manim import *  # noqa: F403
@@ -260,6 +261,44 @@ def build_chain() -> Lace:
 _BACKEND_PALETTE = "natsu"
 
 
+#: The hairline border the ribbon panels carry, in output pixels (``stroke_width_px``).
+HAIRLINE_PX: float = 2.0
+
+
+class StrokePanel(Lace):
+    """The stroke channel's panel, at the strand width the ribbon panels show.
+
+    The channel draws each cut piece as one *stroke*, so its strands are stroke widths
+    rather than geometry — and a card that fits its composition into the frame scales
+    geometry, while ``Mobject.scale`` leaves stroke widths alone. The strands would then
+    come out wider than the ribbon bands beside them (measured on the ``RosetteWeave``
+    card: 22 px against 11 px); :meth:`refit` re-strokes them for the scale the fit
+    applied, so the three panels stay the same input at any size.
+
+    The panel deliberately carries **no border**, although the ribbon panels do (their
+    ``stroke_width_px`` hairline). The pieces are cut to abut exactly at every crossing,
+    so a border cannot separate the strands there without inventing a line the geometry
+    does not have: parked under all the pieces it is painted over by the neighbouring
+    piece's body and the junction comes out seamless, and drawn per piece — so that the
+    piece painted later outlines itself against the earlier one — it outlines the
+    abutting ends as well, which reads as "both strands outlined, same layer": the one
+    thing the weave is not. The panel shows the channel's plain output instead. Whether
+    the crossings read as over/under there is then a matter of the cut geometry; a gap
+    around the strand on top is what ``cover_allowance`` buys, at the price of drawing
+    the panels differently.
+    """
+
+    def __init__(self, source: Any, offset: float, *, palette: Any = None, **style: Any) -> None:
+        super().__init__(source, offset=offset, render="stroke", palette=palette, **style)
+
+    def refit(self, factor: float) -> None:
+        """Re-stroke the strands for the scale a frame fit applied."""
+        widths = [float(np.max(np.asarray(mob.get_stroke_width()))) for mob in self.ribbons]
+        body = (max(widths) if widths else max(1.0, 200.0 * self.offset)) * factor
+        for mob in self.ribbons:
+            mob.set_stroke(width=body)
+
+
 def build_backend_trio() -> tuple[tuple[str, Lace], ...]:
     """The same two strands through all three backends (for ``RibbonGallery``).
 
@@ -273,7 +312,7 @@ def build_backend_trio() -> tuple[tuple[str, Lace], ...]:
     source = _two_strand_source()
     fill = dict(palette=_BACKEND_PALETTE, hole_color=WHITE, fill_opacity=1.0)
     return (
-        ("stroke", Lace(source, offset=0.22, render="stroke", **fill)),
+        ("stroke", StrokePanel(source, 0.22, palette=_BACKEND_PALETTE)),
         ("boolean", Lace(
             source, offset=0.22, render="ribbon",
             stroke_color=BLACK, stroke_width_px=2.0, **fill,
@@ -382,14 +421,11 @@ class RibbonGallery(_WhiteScene):
                 Text(label, font_size=20, color=BLACK),
                 Text(CHANNEL_CAPTIONS[label], font_size=14, color=GREY_B),
             ).arrange(DOWN, buff=0.08).next_to(arranged, DOWN, buff=0.3))
-        self.play(*[
-            animation
-            for lace in laces
-            for animation in (
-                Create(lace.ribbons),
-                *_outline_animations(lace),
-            )
-        ], run_time=1.0)
+        animations: list[Animation] = []
+        for lace in laces:
+            animations.append(Create(lace.ribbons))
+            animations.extend(_outline_animations(lace))
+        self.play(*animations, run_time=1.0)
         self.play(FadeIn(captions), run_time=0.4)
         self.wait()
 

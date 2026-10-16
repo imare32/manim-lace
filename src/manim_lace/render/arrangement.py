@@ -36,49 +36,24 @@ from ..model import CapStyle, CrossingEvent, JoinStyle, PolylinePath, WeaveTopol
 from ..tracing import BoundedRecords
 from .order import paint_order
 from .regions import (
-    _JOIN_STYLES,
     RegionRenderResult,
     RegionRing,
     RibbonRegion,
-    _arc_points,
+    _arm_strip,
+    _covered_area,
     _cut_lines,
     _hole_roles,
     _local_lens,
     _polygons,
     _require_shapely,
     _ring_points,
+    _StripBuilder,
     build_bands,
     build_sections,
     mark_flush_edges,
 )
 
 __all__ = ["render_arrangement_regions"]
-
-
-def _arm_strip(
-    path: PolylinePath,
-    arc: float,
-    window: float,
-    *,
-    offset: float,
-    join: JoinStyle,
-    miter_limit: float,
-    line_class: Any,
-) -> Any:
-    """A short ribbon strip centred on one pass of a self-crossing.
-
-    A self-crossing has no second band to intersect with, so the local footprint of a
-    pass is built from a window of its own centreline around the crossing. The window is
-    chosen to be clearly longer than the overlap (`4 * offset / sin(theta)`), which is
-    why the result is checked against that expectation before it is trusted.
-    """
-    length = float(path.length)
-    start, end = arc - window, arc + window
-    if not path.closed:
-        start, end = max(start, 0.0), min(end, length)
-    return line_class(_arc_points(path, start, end)).buffer(
-        offset, cap_style="flat", join_style=_JOIN_STYLES[join], mitre_limit=float(miter_limit)
-    )
 
 
 def _cells(
@@ -146,6 +121,33 @@ def _boxes_meet(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
         second[2] < first[0] or second[0] > first[2]
         or second[3] < first[1] or second[1] > first[3]
     )
+
+
+def _node_geometry(faces: list[Any], unary_union: Any) -> Any:
+    """One geometry for a node's faces, keeping every one of them.
+
+    The faces of a planar arrangement are interior-disjoint, so their union has
+    exactly the sum of their areas. The overlay engine does not always deliver
+    that: a face that only *touches* another along an edge can be dropped, and
+    which of the two survives depends on the operand order. Measured on a
+    crossing whose two cut chords meet on a band's lateral edge (``n = 7`` CA):
+    the union lost a 2.3e-3 face and left a hole in the painted ribbon, while the
+    same faces unioned in the other order kept it.
+
+    The area check catches the loss. When the union cannot be trusted the faces
+    are kept as they are, and the renderer draws them as the separate regions
+    they are — their shared edge is interior to one colour and gets marked flush
+    like any other section boundary, so nothing is stroked that should not be.
+    """
+    from shapely.geometry import MultiPolygon
+
+    if len(faces) == 1:
+        return faces[0]
+    expected = float(sum(float(face.area) for face in faces))
+    merged = unary_union(faces)
+    if abs(float(merged.area) - expected) <= 1e-9 * max(expected, 1.0):
+        return merged
+    return MultiPolygon(faces)
 
 
 def render_arrangement_regions(
@@ -226,8 +228,13 @@ def render_arrangement_regions(
     layers, congested = paint_order([path.path_id for path in paths], path_edges)
 
     # The lens of a crossing is the local footprint of the over ribbon; a face inside it
-    # is owned by the strand on top, which is exactly what the assignment says.
+    # is owned by the strand on top, which is exactly what the assignment says. A
+    # self-crossing has no second path to name, so the over side is named by its sections
+    # instead: the ones that meet the path at the over arc. Handing the lens to whichever
+    # section sorts first can give it to the under pass, which reverses the weave there
+    # and strokes the notch on the ribbon that is supposed to be on top.
     lenses: dict[str, Any | None] = {}
+    over_sections_of: dict[str, tuple[str, ...]] = {}
     over_path_of: dict[str, str] = {}
     approximated = 0
     for crossing in weavable:
@@ -239,6 +246,13 @@ def render_arrangement_regions(
         over_path_of[crossing.crossing_id] = over
         if crossing.path_a == crossing.path_b:
             path = {item.path_id: item for item in paths}[crossing.path_a]
+            over_arc = crossing.s_b if assignment.under_side == "a" else crossing.s_a
+            over_sections_of[crossing.crossing_id] = tuple(
+                strip.strip_id for strip in _StripBuilder.adjacent(
+                    sections.get(crossing.path_a, []), over_arc,
+                    closed=path.closed, length=float(path.length),
+                )
+            )
             window = min(
                 4.0 * offset / max(abs(crossing.sin_angle), 0.05) + 4.0 * offset,
                 float(path.length) / 2.0,
@@ -265,7 +279,7 @@ def render_arrangement_regions(
             if first is not None and second is not None else None
         )
 
-    union_area = float(unary_union(list(bands.values())).area) if bands else 0.0
+    union_area = _covered_area(list(bands.values()))
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-18)
     cells, slivers, cell_stats = _cells(node_band, LineString, polygonize, unary_union, tolerance)
 
@@ -297,6 +311,14 @@ def render_arrangement_regions(
                 lens = lenses.get(crossing.crossing_id)
                 if lens is None or not lens.contains(probe):
                     continue
+                over_sections = over_sections_of.get(crossing.crossing_id)
+                if over_sections:
+                    # A self-crossing: the over side is the set of sections that meet the
+                    # path at the over arc, exactly the passes the Boolean backend leaves
+                    # whole there. Only when none of them covers this face (a window too
+                    # short for the overlap) does the choice fall back to the path order.
+                    decisions.extend(node for node in covering if node in over_sections)
+                    continue
                 over = over_path_of[crossing.crossing_id]
                 decisions.extend(node for node in covering if node_path[node] == over)
             if decisions:
@@ -322,7 +344,7 @@ def render_arrangement_regions(
 
     regions: list[RibbonRegion] = []
     for node_id, faces in owners.items():
-        geometry = faces[0] if len(faces) == 1 else unary_union(faces)
+        geometry = _node_geometry(faces, unary_union)
         path_id = node_path[node_id]
         for index, polygon in enumerate(_polygons(geometry)):
             polygon = orient(polygon, 1.0)
@@ -346,7 +368,13 @@ def render_arrangement_regions(
     for index, region in enumerate(ordered):
         region.draw_index = index
 
-    painted_area = float(unary_union([face for faces in owners.values() for face in faces]).area) if owners else 0.0
+    # The faces are interior-disjoint, so their sum *is* the painted area. Summing
+    # keeps the accounting honest where the overlay engine would drop a face that
+    # only touches another along an edge (see :func:`_node_geometry`).
+    painted_area = (
+        float(sum(float(face.area) for faces in owners.values() for face in faces))
+        if owners else 0.0
+    )
     region_area_sum = float(sum(region.area for region in regions))
     if slivers:
         diagnostics.append(Diagnostic(
@@ -404,9 +432,18 @@ def render_arrangement_regions(
             },
         ))
     covered_lenses = [lens for lens in lenses.values() if lens is not None]
-    hidden_area = float(unary_union(covered_lenses).area) if covered_lenses else 0.0
+    hidden_area = _covered_area(covered_lenses)
+    weave_edges: list[tuple[np.ndarray, np.ndarray]] = []
+    for lens in covered_lenses:
+        for polygon in (lens.geoms if lens.geom_type != "Polygon" else [lens]):
+            ring = np.asarray(polygon.exterior.coords, dtype=float)[:, :2]
+            for start, end in zip(ring[:-1], ring[1:], strict=False):
+                weave_edges.append((start, end))
     flush_edge_count = mark_flush_edges(
-        regions, cuts=_cut_lines(paths, sections, offset=offset)
+        regions,
+        cuts=_cut_lines(paths, sections, offset=offset),
+        weave=weave_edges,
+        node_bands=node_band,
     )
     return RegionRenderResult(
         regions=regions,

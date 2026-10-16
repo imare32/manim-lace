@@ -1,5 +1,239 @@
 # Changelog
 
+## Unreleased — 画廊卡片：stroke 面板线宽对齐 ribbon 面板，且**不画描边**
+
+用户先指出卡片里 stroke 面板的线条比其它面板粗、且没有黑色描边；加了描边之后又指出，那个描边在
+**交叉处**给不出正确的上下关系，反而不如没有。最终定案：**线宽对齐保留，描边全部去掉**。
+
+- Fix (`examples/scene_gallery.py`, `StrokePanel`): a card that fits its composition into the frame
+  goes through `Mobject.scale`, which shrinks geometry but **leaves stroke widths alone** — so the
+  stroke panel's strands stayed full size while the ribbon bands beside them shrank (measured on the
+  `RosetteWeave` card: 22 px against 11 px; `RibbonGallery` avoids the mismatch by not scaling at
+  all, and its own comment says why). `StrokePanel.refit(factor)` re-strokes the strands for the
+  fitted scale — measured after the fix: `RosetteWeave` 12/11/11 px and `RosetteWeaveCA7` 27/25/27 px
+  across stroke/boolean/arrangement. The rosette weave cards measure the fit factor and call it; the
+  channel card is already unscaled, since the widths are set up in the constructor.
+- 去掉描边（这是最终状态，中途试过一版"黑边"已作废）：这个通道的切口在交叉处是**严丝合缝相接**
+  的（`cover_allowance = 0`），所以黑边没有地方可以"分开"两股丝带，两种画法都不成立——压在全部
+  片段下面时，邻段的身体会把它盖掉，接头融成一片（`media/border_order_zoom.png` 左栏）；各自
+  贴在自己那段下面（按绘制顺序交错）时，接头确实有线了，但那条线同时勾出"相接的两个端面"，读起来
+  是"两股都描了边、在同一层"——恰是编织**不是**的样子（同图中间栏，右栏是 boolean 参考）。实测
+  `RosetteWeaveCA7` 卡：stroke 面板黑像素 **0**，boolean/arrangement 仍各 3405 / 3288。
+  `StrokePanel` 因此不再包任何图层，就是 `Lace(render="stroke")` 本身加一个 `refit`。
+- 关于"能不能让这个通道自己读出上下"，两条路都实测过，都不成立（`media/gap_demo.png`、
+  `media/gap_demo_zoom.png`）：引擎的 `cover_allowance` 方向和直觉相反——它把下股的切口**收短**、
+  端点更往压住它的那股**底下塞**（`0 <= allowance <= overshoot`，此配置 overshoot=0.03），与
+  `allowance = 0` 相比只有 **0.8% 的像素不同、面积 100.1%**，等于没变；反过来"给下股留缝"也不是
+  免费的：要缝看得见就得把端点缩回不少（0.02，即半宽的 20%），实测 **63% 的像素改变、面积掉到
+  82.4%**，环碎成一截一截——因为浅角交叉处上股的带沿下股方向延伸 `offset / |sinθ|`，绕开它要退
+  一大截。这个通道读不出上下是它切**中心线**的代价，上下关系由另两个切**面积**并给切口描线的
+  面板负责。
+- Test: `test_the_stroke_panel_wears_the_cards_strand_width` — `refit(0.4)` scales the strands by the
+  fit factor, the panel adds no layers of its own (`len(submobjects) == len(ribbons)`), and the
+  channel card's stroke panel is one of these.
+- 验证：`pytest -q` → 393 passed；`ruff check` 干净；用到 stroke 面板的 5 张卡已重渲。
+
+## Unreleased — ribbon 描边：断在丝带中间的描边（ROSETTE_RIBBON_OUTLINE_TICKS 第四轮）
+
+用户接着指出 `RosetteWeaveCA7` 卡左侧还有两处不对（一个"V"、一个"X"）。定位到**第四类根因**：
+boolean 后端用**被分段窗口裁剪过的透镜**去切下股丝带，切口因此比真实重叠小，剩下的一块材料
+伸到切口之外——环上就没有边沿缺口末端，描边无处可接，**断在丝带中间**（放大图上就是一根戳进去
+就停的线；两处相邻的断头凑成"V"或"X"的样子）。arrangement 后端一直用两条臂带求交的真实形状，
+所以它没有这个问题。
+
+- Fix (`regions.render_region_geometry`): the cut now removes the overlap of the two passes'
+  *own bands* — the same footprint the arrangement backend cuts with — intersected with the
+  pass on top's **visible** material, which keeps the old guarantee that a cut never opens a
+  gap the over pass does not cover. The weave geometry recorded for the marking uses that
+  footprint too (the clipped lens's boundary carries section caps, which are seams, not
+  notches). Measured on `n = 7` CA: 6 stroke ends dangling → 0; on `n = 10` PA level 1+2:
+  0 before and after (its two "ends" were 3e-6 from another stroke, i.e. joined).
+- Fix (`benchmarks/weave_audit.py`): the `dangling` column was measuring nothing — every end
+  matched its *own* stroke line (distance 0) and counted as joined, and the point query it
+  used is a bounding-box test that misses a stroke running a hair away. It now excludes the
+  end's own stroke and queries with a buffered point; with that fixed it reports 6 on the
+  old cut and 0 on the new one.
+- 复测结果：48 组（n = 5…13 × 五花型 × 两后端）里 46 组 **缺陷/漏轮廓/缺口/断头 四项全 0**；
+  剩余 `n5 CA L2 o12`（缺口 6 处/1.44、断头 5 处）与 `n5 PO L2 o12`（缺口 5 处/0.835、断头 12 处）
+  仍是共点交叉退化配置（`REGION-COINCIDENT-CROSSINGS` / `REGION-LENS-APPROXIMATION` /
+  `GEOM-NEAR_TANGENT` / `TOPOLOGY-ALTERNATION-RELAXED`），arrangement 后端在同样的配置上干净。
+- 测试：`test_the_boolean_backend_leaves_no_stroke_end_inside_the_ribbon`（参数化两张卡：原卡
+  `n10 PA L1p2 o08` 与报告的 `n7 CA L2 o10`），判据直接复用 `benchmarks/weave_audit.py` 的
+  `dangling_ends`，实测在旧切口状态下失败（列出 6 处断头，正含用户指出的两处）。
+- 验证：`pytest -q` → 392 passed；`ruff check` 干净；画廊 25 张卡全部重渲。
+
+## Unreleased — ribbon 描边：编织缺口在丝带中间断掉（ROSETTE_RIBBON_OUTLINE_TICKS 第三轮）
+
+用户核对第二轮的 `RosetteWeaveCA7` 卡时指出：boolean 面板上有一条描边"戳进丝带里面"。复测方法升级后
+（见下）定位为**第三类根因**，与前面两轮都不同：
+
+- Fix (`regions.mark_flush_edges`, `is_hidden`): the "covered side" test — an edge on the region's
+  own band boundary, covered on the far side — used to run *before* the weave test, so an edge
+  that is both a notch and a band edge was hidden as a covered side. That is exactly the case the
+  pass **on top** is in: its own lateral edge crossing the pass below *is* the notch. Where the
+  pass below does not carry that piece — its cut is clipped by the section windows it works
+  through — nothing stroked it and the notch stopped in the middle of the ribbon. Measured on the
+  `n = 7` CA card: a 0.461-long lens edge was stroked over 0.373 (81%), the last 0.088 left
+  unstroked; the same edge in the arrangement backend was 100%. The notch test now runs first and
+  asks the visible material: the edge is stroked when this region owns one side of it *and* the
+  last-painted region changes across it; when some later strand is on top of both sides the notch
+  is hidden underneath (its own outline is the one owed), and when the same region is on top of
+  both sides the line is inside its own fill and is hidden as before. `topmost` now returns the
+  region (index) instead of just its path, which also halves the point-in-polygon queries.
+- Fix (`regions.render_region_geometry`): the Boolean backend recorded the *removed* lens as its
+  weave geometry. That lens is clipped to the section windows the cut works through, so its
+  boundary also carries section caps — and those made the renderer treat a seam as a notch and
+  left the far end of the real notch unrecognised. It now records the boundary of the overlap of
+  the two passes' own bands, which is what the arrangement backend builds its lens from.
+  `_arm_strip` moved from `arrangement.py` to `regions.py` (both backends use it).
+- 复测方法升级（`benchmarks/weave_audit.py`）：原审计的缺陷签名只能看见"多画的线"，看不见
+  "**少画的线**"。新增第三栏 `notch gaps`：把每条记录的透镜边与区域实际发出的描边做一维区间
+  比较，未被覆盖、且两侧可见归属确实不同（描边在此是应画的）的区间计为缺口。48 组里现在
+  46 组为 0；剩余 `n5 CA L2 o12`（6 处/1.44）与 `n5 PO L2 o12`（4 处/0.72）属引擎已声明不可靠的
+  共点交叉配置（boolean 报 `REGION-COINCIDENT-CROSSINGS`，arrangement 报 `REGION-LENS-APPROXIMATION`，
+  另有 `GEOM-NEAR_TANGENT`、`TOPOLOGY-ALTERNATION-RELAXED`）——同一处 arrangement 后端画得完整，
+  属该方法在退化配置下的诚实降级，不是本轮回归。
+- Tests: `test_the_weave_notch_is_stroked_even_where_it_is_its_own_band_edge`（合成三条区域：一条
+  共享边是缺口必须描、一条被后画区域两面盖住必须隐藏）与
+  `test_the_boolean_backend_strokes_every_self_crossing_notch_whole`（在 `n = 7` CA 卡上，对每个
+  自交的缺口边逐点检查"附近有同向描边，且该处两侧可见归属不同"）。两条都实测在旧顺序下失败。
+- 验证：`pytest -q` → 390 passed；`ruff check` 干净；画廊 25 张卡全部重渲。
+
+## Unreleased — 状态画廊：玫瑰线编织从 1 张卡增加到 5 张
+
+用户核对第一轮修复后要求"多画几个玫瑰线编织的例子"，于是把审计覆盖的配置直接做成卡片——
+每一张都是修复前真的中过缺陷签名的配置，是证据而不是凑数：
+
+- `RosetteWeaveCA7`（n=7 CA level 2，offset 0.10）：第一个命中缺陷签名的配置。收敛尖端把交叉的
+  两刀切弦正好落到丝带侧边上，一条外边一半是接缝一半是切口，`mark_flush_edges` 曾同时把它判反
+  两个方向。一个 29 点闭合 strand、14 处交叉全是自交。
+- `RosetteWeaveCR11`（n=11 CR level 2，offset 0.07）：命中 `_drop_folds` 批删 bug 的配置——薄楔形
+  的楔尖被当成噪声折返删掉，环上少一整块。一个 45 点闭合 strand、22 处交叉全是自交。
+- `RosetteWeaveThin`（n=10 PA level 1+2，offset 0.05）：与 `RosetteWeave` 同源同解，只把丝带半宽
+  减半，让透镜整个落在被压丝带内部——arrangement 面归属与面积核算的形状，也曾误报
+  `REGION-AREA-MISMATCH`。
+- `RosetteWeaveTypes`（n=10 level 2 五种花型 × boolean/arrangement 两排）：两排必须逐列长出同一种
+  编织；对不上就是这类问题的原始签名。每格一个 41 点闭合 strand、20 处交叉全是自交，下排 0 诊断。
+- 重构：`build_rosette_weave_trio` 参数化（默认值即原来的 `RosetteWeave`，测试钉不死的行为不变），
+  卡片逻辑上收 `_RosetteWeaveCard` 基类；每格 caption 带上实测的交叉/可见面数；画廊 note 分支改为
+  读场景自己的 `SOURCE`，不再把 n=10 PA 写死。
+- 修：`RosetteWeaveTypes` 的行标签原来挂在左侧，把组版中心拉离原点，而 `_fit_frame` 绕自身中心
+  缩放——缩放后整组左沿冲出画幅（标签被裁成 "ean"/"ent"）。行标签改为行题，`_fit_frame` 增加
+  `move_to(ORIGIN)`（对已居中的现有卡片是无操作）。
+- 测试：`test_the_weave_cards_paint_the_whole_ribbon_in_both_backends`（参数化遍历三张新卡的
+  SOURCE）：`band_union - painted` 与 `painted - band_union` 都必须为空（前者抓住 fold 丢楔形和
+  并集丢面，都已实测会在旧代码上失败），且每个有面积的孔必须被另一个区域盖上。
+  `test_the_flush_indices_address_the_ring_the_renderer_draws` 新增：合成区域精确复现"一条边被
+  split、一对共线边被 merge、点数抵消"的场景，钉住环必须换成 joined 环（旧逻辑下实测失败）。
+- 验证：`pytest -q` → 388 passed；`ruff check examples src tests` 干净；五张卡全部重渲，
+  页面 25 张卡片；审计 48 个配置×后端组合缺陷签名仍为 0。
+
+## Unreleased — ribbon 描边：同一条"丝带中间的线"的三个后续根因（ROSETTE_RIBBON_OUTLINE_TICKS 第二轮）
+
+上一轮修完透镜归属后，用户反馈"还没有真正修好"。对 24 个玫瑰线配置（n = 5…13 ×
+PA/PO/PR/CA/CR × offset 0.05…0.12，含单层与双层合并）× 两个 ribbon 后端按缺陷签名
+复测（被描边、两侧都被已绘区域覆盖、同路径在上、不在任何透镜边界上），原投诉的那张卡
+（n = 10 PA level 1+2，offset = 0.08）确实是 0，但另有 6 个配置命中——全部落在下面三个
+根因上，全部已修：
+
+- Fix (regions, `mark_flush_edges`): the ring was rebuilt from the judged pieces but only
+  *replaced* when the point count changed. One edge can be split (a vertex inserted) while
+  another pair of near-collinear edges is joined (a vertex folded away) — the two cancel out,
+  the count stays the same, and the original ring is left wearing `flush_edges` indices that
+  address the joined ring. The renderer then strokes the half of an edge that is a seam and
+  hides the half that is outline: measured on `n = 7` CA level 2 (offset 0.10), Boolean
+  backend, `P0000#14.region0` edge 1 was split into visible + hidden + hidden but the ring
+  kept the full edge — a 0.111-long line across the ribbon — while edge 3 (real silhouette)
+  was hidden. The replacement now happens whenever the joined ring differs from the original
+  *point by point*, and a ring that joins into fewer than three runs (a zero-area sliver)
+  keeps its original ring with an all-or-nothing flush set. A piece that spans a whole edge
+  keeps the ring's own points, so a ring nothing happened to stays byte for byte what it was.
+- Fix (arrangement backend, new `_node_geometry`): a node's faces were merged with a one-shot
+  `unary_union`, and the overlay engine can **drop a face that only touches another along an
+  edge** — which of the two survives depends on the operand order. Measured on `n = 7` CA
+  level 2: the union lost a 2.3e-3 face and left a hole in the painted ribbon (`gap.union(f1)`
+  kept it, `f1.union(gap)` dropped it, both orders of `unary_union` dropped it). The union is
+  now checked against the sum of the faces' areas — the faces of a planar arrangement are
+  interior-disjoint, so the sum is exact — and when it cannot be trusted the faces are kept as
+  they are and drawn as the separate regions they are (their shared edge is interior to one
+  colour and gets flushed like any other section boundary). `painted_area` is now the exact
+  sum of the faces' areas for the same reason.
+- Fix (regions, `_drop_folds`): folds were removed in batches — every vertex that looked like
+  a zero-area reversal in one pass went at once. A crossing whose two cut chords meet on a
+  band's lateral edge leaves the tip of the wedge as several copies of one point differing
+  only in the last bits (the polygon boolean's noise); each copy looks like a zero-area
+  reversal on its own, and dropping them all removed the vertex the ring really turns at —
+  and with it the whole wedge (a 2.8e-3 triangle, i.e. a hole). Measured on `n = 11` CR
+  level 2 (offset 0.07), Boolean backend, `P0000#20`. Folds now come off **one at a time**,
+  re-judging the ring after each drop, which is what the docstring always claimed; the last
+  copy is then judged against the ring's real corners and kept.
+- Fix (regions, `_covered_area` + `mark_flush_edges`): the one-shot `unary_union` over *many*
+  parts is unreliable in the same way — measured on `n = 13` CA level 2 (offset 0.05), 40 of
+  158 valid parts came out uncovered and the area 5e-2 short, in every operand order. The
+  area accounting (`painted_area`, `union_area`, `hidden_area`) now unions the parts one at a
+  time and verifies that the result covers every part, trying the orders both ways (a lossy
+  union is a lower bound, so a verified attempt is exact); that also removes the spurious
+  `REGION-AREA-MISMATCH` this render used to report. The interior test inside
+  `mark_flush_edges` no longer asks a union at all — it asks region by region, so a part the
+  union would drop can no longer make the edges around it look like the silhouette.
+- Tests: `test_a_zero_area_fold_is_dropped_and_a_real_thin_corner_is_kept` now expects the
+  excursion to collapse to the straight run (the turnaround vertex goes; the point it returned
+  to stays, and the ring covers the same area — asserted with the polygon area), and
+  `test_a_wedge_whose_tip_is_near_duplicate_points_survives` is new: a wedge whose tip is
+  three noise copies of one point keeps its vertex and its area. `pytest -q` → 384 passed,
+  `ruff check src tests examples` clean (`ruff format --check` fails on 41 files on `main`
+  already, unchanged by this round).
+
+## Unreleased — arrangement 后端：自交的透镜归“压住对方的那一遍”
+
+- Fix (arrangement backend): the faces inside a self-crossing's lens were given to whichever
+  covering section sorted first, so at some crossings the lens went to the **under** pass and
+  the weave reversed there. The Boolean backend cuts the under pass of a self-crossing by the
+  same local overlap (``under_arc``/``over_arc`` from the assignment), and the stroke backend
+  cuts the same pass too; only the arrangement named the over side by *path* — which is the
+  same path on both passes of a self-crossing — and then broke the tie by node id.
+- Measured on the gallery rosette (70 crossings, 20 self-crossings, all on P0002): at
+  ``X0050`` (point (+1.1135, −0.809), ``s_a`` = 0.5257 on the horizontal pass, ``s_b`` =
+  49.9221 on the steep pass, ``sin θ`` = 0.9511) the assignment says ``under_side = "a"`` —
+  the horizontal pass goes under. The stroke panel confirms it (its pieces near arc 0.5257
+  have a gap there; ``P0002.piece1`` starts at 0.6122) and the Boolean panel cuts it (strips
+  0/1 carry the notch). The arrangement handed the lens to ``P0002#0`` — the section
+  [0.5257, 1.9021], i.e. the *under* pass — leaving the horizontal ribbon whole and cutting
+  the steep one.
+- What the user saw (docs/ROSETTE_RIBBON_OUTLINE_TICKS.md §1, world ≈ (+1.03, −0.80)): the
+  Boolean panel stroked the weave diagonal **L′** from (+1.1716, −0.729) to (+1.2236, −0.889)
+  across the purple ribbon — the second of the crossing's two notch lines — which the
+  arrangement did not draw; and the arrangement stroked a **0.110-long horizontal stub**
+  (``P0002#26.region1`` edge 3, (+1.2236, −0.889) → (+1.1135, −0.889)) along the band's
+  bottom edge *inside* the lens, i.e. a black line in the middle of the ribbon.
+- The fix names the over side by its sections: ``over_sections_of[crossing_id]`` holds the
+  sections that meet the path at the **over** arc (``_StripBuilder.adjacent``), and a lens
+  face goes to them; only when none of them covers the face does the choice fall back to the
+  path order. Measured after the fix: the lens at X0050 belongs to ``P0002#26`` /
+  ``P0002#27`` (the steep pass) — the pass the Boolean backend leaves whole — the arrangement
+  now strokes the same L′ (``P0002#0.region0`` edges 8–9, ``P0002#26.region1`` edge 3) and the
+  stub is gone; the Boolean panel is unchanged.
+- The decomposition is untouched: the arrangement's ``region_area_sum`` stays exactly equal to
+  its ``union_area`` (15.498939905 on the rosette, 0 diagnostics), and the fills do not move —
+  both passes are P0002, so the lens changes owner inside one palette colour.
+- The doc's §2 criterion (“stroked edge strictly inside its own band, off every other band”)
+  counts 323 (Boolean) / 395 (arrangement) edges: those are the weave notches — the lens
+  boundary inside the under band, which §3.2 correctly refuses to flush. Measuring the defect
+  signature directly (an edge covered on **both** sides by the painted union, with the same
+  path on top on both sides, and on no lens boundary) finds **0** such edges in either
+  backend, before and after the fix.
+- Tests: ``test_the_under_pass_of_a_self_crossing_does_not_own_the_lens`` now checks the lens
+  against the sections at the *over* arc instead of merely the path id (it uses the pentagram
+  {5/2}, whose crossings are far enough apart for the sections to tell the passes apart), and
+  ``test_both_backends_cut_the_same_pass_of_a_self_crossing`` is new: a probe on the under
+  strand just inside the lens must be painted by the over strand's sections in **both**
+  backends. Both fail when the ownership decision is patched back to the section order.
+- Still present: where the sections are too coarse to tell the passes apart — a path with a
+  single self-crossing, where both passes touch both sections — the arrangement still falls
+  back to the section order. The fix is a no-op there, so nothing regresses, but that
+  configuration's weave is not expressible in the long-section decomposition this backend
+  uses.
+
 ## Unreleased — 布尔后端：切口不再在丝带中间留下“洞”
 
 - Fix (Boolean backend): a cut that lands *inside* the under band without reaching its edges

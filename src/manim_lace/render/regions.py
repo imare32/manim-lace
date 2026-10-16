@@ -319,38 +319,243 @@ def mark_flush_edges(
     regions: list[RibbonRegion],
     *,
     cuts: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    weave: list[tuple[np.ndarray, np.ndarray]] = (),
+    node_bands: dict[str, Any] | None = None,
     tolerance: float = 1e-6,
+    probe: float = 1e-6,
 ) -> int:
-    """Mark the exterior edges that are seams of a section split, and return how many.
+    """Mark the exterior edges a renderer must not stroke, and return how many.
 
-    Cutting a self-crossing needs the path divided into sections (and, for the Boolean
-    backend, into windows around each pass), which leaves a chord across the strand where
-    the material simply continues: the two sides are one strand, one colour, one region.
-    Nothing visible happens along such a chord, so stroking it draws a tick across the
-    ribbon and makes the strand look cut when it is not.
+    Three families of exterior edge carry no visible boundary:
 
-    The chords are known exactly — they are the caps of the section bands, see
-    :func:`_cut_lines` — so they are handed in instead of being guessed from pairs of
-    shared edges. Guessing cannot work on a self-crossing: the *cut* the under pass shows
-    there lies exactly on the other pass's outline, because the subtracted lens is bounded
-    by it, so a shared-edge test marks the weave itself as a seam. A cut edge therefore
-    stays unmarked and keeps the weave readable.
+    * **Seams.** Cutting a self-crossing needs the path divided into sections (and, for
+      the Boolean backend, into windows around each pass), which leaves a chord across
+      the strand where the material simply continues: the two sides are one strand, one
+      colour, one region. Nothing visible happens along such a chord, so stroking it
+      draws a tick across the ribbon and makes the strand look cut when it is not. The
+      chords are known exactly — they are the caps of the section bands, see
+      :func:`_cut_lines` — so they are handed in instead of being guessed from pairs of
+      shared edges. Guessing cannot work on a self-crossing: the *cut* the under pass
+      shows there lies exactly on the other pass's outline, because the subtracted lens
+      is bounded by it, so a shared-edge test marks the weave itself as a seam. A cut
+      edge therefore stays unmarked and keeps the weave readable.
+    * **Covered sides.** A side of a region's own band that another strand (or another
+      section of the same strand) covers: the fill continues across it in one colour, so
+      the only outline a renderer owes there is the one of the strand on top. This is the
+      "a line runs across the middle of the ribbon" signature.
+    * **Interior edges that are not weave.** Where two sections of one path overlap away
+      from a crossing, the boundary between their territories is interior to the painted
+      ribbon and belongs to no lens.
+
+    What must stay is the **weave notch**: the edge where the under pass of a crossing
+      stops against the over pass's lateral edge. It is interior to the painted ribbon
+    too — the over strand covers the lens — but it is the boundary a renderer has to
+    stroke, and marking it is what drew ticks across the ribbon. A notch is told apart
+    from a covered side by the band it belongs to: a notch cuts *across* the region's own
+    band, while a covered side lies *on* it.
+
+    ``weave`` are the lens boundaries (the local footprint of every crossing that was
+    actually cut) and ``node_bands`` maps each region's node — its strip for a sectioned
+    path, else the path — to the band that node was built from. Both are what tells the
+    three interior families apart; without them only the chords can be marked.
+
+    An edge can be part seam, part notch and part covered side, so the exterior ring is
+    split where its status changes (at every crossing with a region boundary, a weave
+    edge or a node band) and each piece is judged on its own. The fill is unchanged —
+    inserted vertices are collinear, and a corner the join folds away is collinear to
+    within the marking tolerance.
     """
+    from shapely.strtree import STRtree
+
+    LineString, Point, Polygon, unary_union, _make_valid, _orient = _require_shapely()
+    ordered = sorted(regions, key=lambda item: (item.draw_index, item.region_id))
+    fills = {
+        region.region_id: Polygon(
+            np.asarray(region.exterior.points, dtype=float),
+            [np.asarray(hole.points, dtype=float) for hole in region.holes] or None,
+        )
+        for region in ordered
+    }
+    weave_geometry = (
+        unary_union([LineString([tuple(start), tuple(end)]) for start, end in weave])
+        if weave
+        else None
+    )
+    # An edge's status can only change where it crosses another region's boundary, a
+    # weave edge or its own node's band, so those are the split points to look for.
+    segments: list[Any] = []
+    for region in ordered:
+        points = np.asarray(region.exterior.points, dtype=float)
+        for start, end in zip(points[:-1], points[1:], strict=False):
+            if float(np.hypot(*(end - start))) > 0.0:
+                segments.append(LineString([tuple(start), tuple(end)]))
+    for start, end in weave:
+        segments.append(LineString([tuple(start), tuple(end)]))
+    for band in (node_bands or {}).values():
+        if band is not None and not band.is_empty:
+            segments.append(band.boundary)
+    tree = STRtree(segments) if segments else None
+    fill_tree = STRtree([fills[region.region_id] for region in ordered]) if fills else None
+
+    def topmost(point: Point) -> int | None:
+        """Index in ``ordered`` of the last-painted region that covers ``point``.
+
+        Asked region by region rather than of a union of them all: the overlay engine
+        can drop a part that only touches its neighbours along an edge (see
+        :func:`_covered_area`), and a part dropped from that union would make the
+        edges around it look like the silhouette of the painted ribbon.
+        """
+        if fill_tree is None:
+            return None
+        best: int | None = None
+        for index in fill_tree.query(point):
+            if fills[ordered[index].region_id].intersects(point):
+                if best is None or index > best:
+                    best = index
+        return best
+
+    def split_parameters(start: np.ndarray, end: np.ndarray) -> list[float]:
+        if tree is None:
+            return [0.0, 1.0]
+        edge = LineString([tuple(start), tuple(end)])
+        parameters = {0.0, 1.0}
+        for candidate in tree.query(edge):
+            hit = segments[candidate].intersection(edge)
+            stack = [hit] if not hit.is_empty else []
+            while stack:
+                item = stack.pop()
+                kind = getattr(item, "geom_type", "")
+                if kind == "Point":
+                    coordinates = [item.coords[0]]
+                elif kind in ("MultiPoint", "GeometryCollection", "MultiLineString"):
+                    stack.extend(item.geoms)
+                    continue
+                elif kind == "LineString":
+                    coordinates = list(item.coords)
+                else:
+                    continue
+                for coordinate in coordinates:
+                    delta = np.asarray(coordinate, dtype=float) - start
+                    span = float(np.dot(end - start, end - start))
+                    if span <= 0.0:
+                        continue
+                    parameter = float(np.dot(delta, end - start)) / span
+                    if -1e-9 <= parameter <= 1.0 + 1e-9:
+                        parameters.add(min(max(parameter, 0.0), 1.0))
+        return sorted(parameters)
+
+    def is_hidden(
+        start: np.ndarray, end: np.ndarray, low: float, high: float, band: Any,
+        region_id: str,
+    ) -> bool:
+        """Does this piece of edge carry no visible boundary of its own?"""
+        middle = start + (end - start) * (0.5 * (low + high))
+        direction = (end - start) / float(np.linalg.norm(end - start))
+        normal = np.array([-direction[1], direction[0]])
+        outer = topmost(Point(*(middle + normal * probe)))
+        inner = topmost(Point(*(middle - normal * probe)))
+        if outer is None or inner is None:
+            return False  # the silhouette of the painted ribbon
+        if ordered[outer].path_id != ordered[inner].path_id:
+            return False  # a colour boundary between two strands
+        if weave_geometry is not None and weave_geometry.distance(Point(*middle)) <= tolerance:
+            # The weave notch: the edge is on the footprint boundary of the pass on top,
+            # so the visible material changes here — exactly the boundary a renderer has
+            # to stroke. Asked *before* the band test, because the over pass's own lateral
+            # edge is a notch where it crosses the under pass; hiding it as a covered side
+            # leaves a hole in the notch wherever the under pass's own sections do not
+            # carry that piece (measured on `n = 7` CA: 0.088 of a lens edge stayed
+            # unstroked and the notch ended in the middle of the ribbon).
+            if outer != inner and region_id in (
+                ordered[outer].region_id, ordered[inner].region_id
+            ):
+                return False
+            return True  # hidden under a later strand, whose own outline is owed
+        if band is not None and band.boundary.distance(Point(*middle)) <= tolerance:
+            return True  # a side of this region's own band, covered by something else
+        return True  # interior, one colour, no weave
+
     marked = 0
     for region in regions:
         chords = cuts.get(region.path_id, ())
+        node = region.region_id.rsplit(".region", 1)[0]
+        band = (node_bands or {}).get(node)
         points = np.asarray(region.exterior.points, dtype=float)
-        indices = [
-            index
-            for index in range(len(points) - 1)
+        # The ring is rebuilt as a list of (start, end, hidden) pieces, so that an edge
+        # can be part hidden and part outline, and so that pieces the renderer would
+        # draw as one edge are joined back into one.
+        pieces: list[tuple[np.ndarray, np.ndarray, bool]] = []
+        for start, end in zip(points[:-1], points[1:], strict=False):
+            if float(np.hypot(*(end - start))) <= 0.0:
+                continue
             if any(
-                _on_cut(points[index], points[index + 1], start, end, tolerance)
-                for start, end in chords
-            )
-        ]
-        region.flush_edges = tuple(indices)
-        marked += len(indices)
+                _on_cut(start, end, chord_start, chord_end, tolerance)
+                for chord_start, chord_end in chords
+            ):
+                pieces.append((start, end, True))  # a seam: the material continues
+                continue
+            parameters = split_parameters(start, end)
+            for low, high in zip(parameters[:-1], parameters[1:], strict=False):
+                if high - low <= 1e-12:
+                    continue
+                hidden = is_hidden(start, end, low, high, band, region.region_id)
+                if low == 0.0 and high == 1.0:
+                    # The whole edge is one piece: keep the ring's own points, so a ring
+                    # nothing happened to stays exactly what it was.
+                    pieces.append((start, end, hidden))
+                else:
+                    pieces.append((start + (end - start) * low, start + (end - start) * high, hidden))
+        joined: list[tuple[np.ndarray, np.ndarray, bool]] = []
+        for piece in pieces:
+            previous = joined[-1] if joined else None
+            if (
+                previous is not None
+                and previous[2] == piece[2]
+                and _collinear(previous[0], previous[1], piece[1], tolerance)
+            ):
+                joined[-1] = (previous[0], piece[1], previous[2])
+                continue
+            joined.append(piece)
+        flags = [piece[2] for piece in joined]
+        if len(joined) >= 3:
+            region.flush_edges = tuple(index for index, flag in enumerate(flags) if flag)
+            # The indices above address the joined ring, so the ring has to become the
+            # joined one whenever the two differ — by a split vertex as much as by a
+            # merged corner. Comparing point counts is not enough: one edge can be split
+            # while another pair of near-collinear edges is joined, and the two cancel
+            # out, which would leave the original ring wearing flush indices that
+            # address a different ring.
+            ring = [joined[0][0], *(piece[1] for piece in joined)]
+            if len(ring) != len(points) or any(
+                not np.array_equal(candidate, original)
+                for candidate, original in zip(ring, points)
+            ):
+                region.exterior = RegionRing(
+                    points=np.array(ring, dtype=float), role=region.exterior.role
+                )
+        elif joined:
+            # A ring that joins into fewer than three runs encloses no area — every one
+            # of its corners is collinear — so the original ring stays and its edges are
+            # told apart by that single run: all of them are seams, or none is.
+            region.flush_edges = tuple(range(len(points) - 1)) if flags[0] else ()
+        else:
+            region.flush_edges = ()
+        marked += len(region.flush_edges)
     return marked
+
+
+def _collinear(start: np.ndarray, middle: np.ndarray, end: np.ndarray, tolerance: float) -> bool:
+    """Do three points run straight on from one to the next?
+
+    The test is relative on purpose: a vertex the polygonisation left on a straight run
+    has a cross product at the level of floating-point noise, while a real corner — even
+    the corner of a sliver the ring walk kept — does not.
+    """
+    first = middle - start
+    second = end - middle
+    cross = abs(float(first[0] * second[1] - first[1] * second[0]))
+    scale = float(np.linalg.norm(first)) * float(np.linalg.norm(second))
+    return scale > 0.0 and cross <= tolerance * scale
 
 
 @dataclass(slots=True)
@@ -448,8 +653,11 @@ def _drop_folds(points: np.ndarray, *, area_tolerance: float = _FOLD_AREA_TOLERA
 
     Only reversals are considered — the ring has to turn back into itself — and only when the
     triangle they span carries no area, so a genuine corner or a real (if thin) feature is
-    never touched. Folds are removed until none remain, because dropping one can expose
-    another.
+    never touched. Folds are removed one at a time, re-judging the ring after each drop:
+    dropping a vertex moves its neighbours' test, and a run of near-duplicate points (float
+    noise from the boolean) makes *every* one of them look like a zero-area reversal —
+    dropping them all in one pass removes the vertex the ring really turns at, and with it
+    the thin wedge the ring encloses there.
     """
     if len(points) < 4:
         return points
@@ -457,7 +665,6 @@ def _drop_folds(points: np.ndarray, *, area_tolerance: float = _FOLD_AREA_TOLERA
     changed = True
     while changed and len(kept) >= 3:
         changed = False
-        pruned: list[np.ndarray] = []
         count = len(kept)
         for index in range(count):
             previous = kept[index - 1]
@@ -466,14 +673,13 @@ def _drop_folds(points: np.ndarray, *, area_tolerance: float = _FOLD_AREA_TOLERA
             back = current - previous
             forward = following - current
             if float(np.dot(back, forward)) >= 0.0:
-                pruned.append(current)
                 continue
             area = 0.5 * abs(float(back[0] * forward[1] - back[1] * forward[0]))
             if area > area_tolerance:
-                pruned.append(current)
                 continue
+            kept = [point for position, point in enumerate(kept) if position != index]
             changed = True
-        kept = pruned
+            break
     if len(kept) < 3:
         return points
     return np.vstack((np.array(kept), np.array(kept[0])))
@@ -619,6 +825,36 @@ def _half_plane(point: np.ndarray, tangent: np.ndarray, extent: float, polygon_c
     return polygon_class([
         point - across, point + along - across, point + along + across, point + across,
     ])
+
+
+def _arm_strip(
+    path: PolylinePath,
+    arc: float,
+    window: float,
+    *,
+    offset: float,
+    join: JoinStyle,
+    miter_limit: float,
+    line_class: Any,
+) -> Any:
+    """A short ribbon strip centred on one pass of a self-crossing.
+
+    A self-crossing has no second band to intersect with, so the local footprint of a
+    pass is built from a window of its own centreline around the crossing. The window is
+    chosen to be clearly longer than the overlap (`4 * offset / sin(theta)`), which is
+    why the result is checked against that expectation before it is trusted.
+
+    Used by both backends: the arrangement builds its lens from two of these, and the
+    Boolean backend uses them to know where the *true* notch lies — its own cut is
+    clipped by the section windows it works through (see :func:`_self_crossing_lens`).
+    """
+    length = float(path.length)
+    start, end = arc - window, arc + window
+    if not path.closed:
+        start, end = max(start, 0.0), min(end, length)
+    return line_class(_arc_points(path, start, end)).buffer(
+        offset, cap_style="flat", join_style=_JOIN_STYLES[join], mitre_limit=float(miter_limit)
+    )
 
 
 def _self_crossing_reach(offset: float, sin_angle: float) -> float:
@@ -895,6 +1131,34 @@ def _union_or_none(parts: list[Any], unary_union: Any) -> Any | None:
     return live[0] if len(live) == 1 else unary_union(live)
 
 
+def _covered_area(parts: list[Any]) -> float:
+    """The area ``parts`` cover: every one of them, overlaps counted once.
+
+    A one-shot ``unary_union`` can drop a part that only touches its neighbours along
+    an edge — measured on a 158-region render, where 40 of the parts came out
+    uncovered and the area 5e-2 short, in every operand order — which would understate
+    what the renderer paints and make the area check cry wolf. So the parts are unioned
+    one at a time, the result is checked against every part, and the orders are tried
+    both ways: a lossy union is a lower bound of the true one, so a verified attempt is
+    exact and the larger of the attempts is the better estimate.
+    """
+    live = [part for part in parts if part is not None and not part.is_empty]
+    if not live:
+        return 0.0
+    if len(live) == 1:
+        return float(live[0].area)
+    best: Any | None = None
+    for order in (live, live[::-1], sorted(live, key=lambda part: -part.area)):
+        running = order[0]
+        for part in order[1:]:
+            running = running.union(part)
+        if all(running.covers(part) for part in live):
+            return float(running.area)
+        if best is None or float(running.area) > float(best.area):
+            best = running
+    return float(best.area)
+
+
 def _sections_around(
     group: list[_Strip], arc: float, reach: float, path: PolylinePath
 ) -> list[_Strip]:
@@ -955,6 +1219,18 @@ def _self_crossing_lens(
     if lens is None or lens.is_empty:
         return None
     return lens
+
+
+def _boundary_segments(geometry: Any) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The edges of a geometry's rings as ``(start, end)`` pairs."""
+    if geometry is None or geometry.is_empty:
+        return []
+    segments: list[tuple[np.ndarray, np.ndarray]] = []
+    for polygon in _polygons(geometry):
+        ring = np.asarray(polygon.exterior.coords, dtype=float)[:, :2]
+        for start, end in zip(ring[:-1], ring[1:], strict=False):
+            segments.append((start, end))
+    return segments
 
 
 def render_region_geometry(
@@ -1022,6 +1298,9 @@ def render_region_geometry(
     lens_miss_count = 0
     cut_count = 0
     section_cut_count = 0
+    # The boundary of every lens that was actually subtracted: the weave notches a
+    # renderer still has to stroke lie on it (see ``mark_flush_edges``).
+    weave_edges: list[tuple[np.ndarray, np.ndarray]] = []
     for crossing in weavable:
         assignment = topology.assignment_for(crossing.crossing_id)
         if assignment is None:
@@ -1071,6 +1350,36 @@ def render_region_geometry(
                 walk.add({"kind": "skip", "reason": "no_local_overlap",
                           "crossing_id": crossing.crossing_id})
                 continue
+            # Cut with the overlap of the two passes' *own bands*, not with the lens the
+            # window-clipped intersection above produced. The clipped one both stops short
+            # of the real footprint and carries section caps (seams, not notches) in its
+            # boundary, so the piece left over reaches past the cut: the renderer then had
+            # no ring edge along the far end of the notch and its stroke stopped in the
+            # middle of the ribbon (measured on `n = 7` CA: 4 stroke ends dangling, 0 in
+            # the arrangement backend). Intersecting with the pass on top's *visible*
+            # material keeps the old guarantee that a cut never opens a gap the over pass
+            # does not cover.
+            arm_window = _self_crossing_reach(offset, crossing.sin_angle)
+            arms = [
+                _arm_strip(
+                    path, arc, arm_window, offset=offset, join=join,
+                    miter_limit=miter_limit, line_class=LineString,
+                )
+                for arc in (under_arc, over_arc)
+            ]
+            arm_lens = _local_lens(arms[0], arms[1], crossing.point, Point)
+            if arm_lens is not None:
+                over_visible = _union_or_none(
+                    [visible_strip[strip.strip_id] for strip in over_sections], unary_union
+                )
+                footprint = (
+                    None if over_visible is None else arm_lens.intersection(over_visible)
+                )
+                if footprint is not None and not footprint.is_empty:
+                    lens = footprint
+                weave_edges.extend(_boundary_segments(arm_lens))
+            else:
+                weave_edges.extend(_boundary_segments(lens))
             removed = _subtract_from_strips(under_sections, visible_strip, lens)
             removed_area += removed
             cut_count += 1
@@ -1103,6 +1412,7 @@ def render_region_geometry(
             removed_area += removed
             cut_count += 1
             section_cut_count += 1
+            weave_edges.extend(_boundary_segments(lens))
             walk.add({"kind": "weave", "crossing_id": crossing.crossing_id,
                       "under": under_id, "over": over_id, "target": "section",
                       "lens_area": float(lens.area), "removed_area": float(removed)})
@@ -1112,6 +1422,7 @@ def render_region_geometry(
         removed = before - float(visible_band[under_id].area)
         removed_area += removed
         cut_count += 1
+        weave_edges.extend(_boundary_segments(lens))
         walk.add({"kind": "weave", "crossing_id": crossing.crossing_id,
                   "under": under_id, "over": over_id, "target": "band",
                   "lens_area": float(lens.area), "removed_area": float(removed)})
@@ -1243,8 +1554,8 @@ def render_region_geometry(
                 ))
 
     band_area = float(sum(band.area for band in bands.values()))
-    union_area = float(unary_union(ribbon_parts).area) if ribbon_parts else 0.0
-    painted_area = float(unary_union(painted_parts).area) if painted_parts else 0.0
+    union_area = _covered_area(ribbon_parts)
+    painted_area = _covered_area(painted_parts)
     region_area_sum = float(sum(region.area for region in regions))
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-12)
     whole_union = float(unary_union(list(bands.values())).area) if bands else 0.0
@@ -1304,7 +1615,16 @@ def render_region_geometry(
         # The chords that opened an occlusion hole are seams too: the strand runs straight
         # through them, so they must not be stroked and the fill must be closed over them.
         cuts.setdefault(path_id, []).extend(chords)
-    flush_edge_count = mark_flush_edges(regions, cuts=cuts)
+    node_bands: dict[str, Any] = {}
+    for group in strips.values():
+        for strip in group:
+            node_bands[strip.strip_id] = strip.band
+    for path_id, band in bands.items():
+        if path_id not in strips:
+            node_bands[path_id] = band
+    flush_edge_count = mark_flush_edges(
+        regions, cuts=cuts, weave=weave_edges, node_bands=node_bands
+    )
     return RegionRenderResult(
         regions=regions,
         diagnostics=diagnostics,

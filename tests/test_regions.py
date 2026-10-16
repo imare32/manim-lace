@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 
 from manim_lace import JoinStyle, LaceEngine, PolylinePath
-from manim_lace.render.regions import RibbonRegion, _drop_folds, render_region_geometry
+from manim_lace.render.regions import (
+    RegionRing,
+    RibbonRegion,
+    _drop_folds,
+    mark_flush_edges,
+    render_region_geometry,
+)
 
 shapely = pytest.importorskip("shapely")
 
@@ -166,11 +172,33 @@ def test_a_self_crossing_marks_the_section_cuts_as_seams_not_the_notches():
     # The seams of a self-crossing are the chords the section split cuts across the
     # strand. The weave notches — the edges where the under pass stops against the over
     # pass's lateral edge — must stay out of that set: they are boundary a renderer has to
-    # stroke, and marking them is what drew ticks across the ribbon.
+    # stroke, and marking them is what drew ticks across the ribbon. The flush set also
+    # carries the sides another strand covers (a covered side shows no colour change, so
+    # it owes no outline of its own), so the chords are picked out by their geometry
+    # rather than by "everything that is flush".
     offset = 0.1
     figure = np.array([[-1.0, -1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, 1.0]])
-    result = LaceEngine([figure], offset=offset, render_mode="ribbon", weave_mode="free").solve()
+    engine = LaceEngine([figure], offset=offset, render_mode="ribbon", weave_mode="free")
+    result = engine.solve()
     centerline = LineString(figure)
+    crossing = np.asarray(result.crossings[0].point, dtype=float)
+
+    # The chords the section split cuts across the strand, rebuilt the way the backend
+    # builds them: a chord is told apart from a weave notch by where it runs, and both
+    # meet the centreline, so the notch list below excludes exactly these.
+    from manim_lace.render.regions import _cut_lines, _on_cut, build_bands, build_sections
+
+    bands, _holes = build_bands(
+        engine.paths, offset=offset, cap_style="butt", join="miter", miter_limit=5.0,
+        diagnostics=[],
+    )
+    sections = build_sections(
+        engine.paths, bands, [c for c in result.crossings if c.kind == "transverse"],
+        offset=offset, cap_style="butt", join="miter", miter_limit=5.0,
+        line_class=LineString, point_class=Point, polygon_class=Polygon,
+        unary_union=unary_union, pass_windows=True,
+    )
+    chords = _cut_lines(engine.paths, sections, offset=offset).get(engine.paths[0].path_id, ())
 
     def edges(region):
         points = np.asarray(region.exterior.points, dtype=float)
@@ -178,32 +206,40 @@ def test_a_self_crossing_marks_the_section_cuts_as_seams_not_the_notches():
         for index in range(count):
             yield index, points[index], points[(index + 1) % count]
 
-    def band_distance(start, end):
-        """Distance from the edge's middle to the centreline of the strand."""
-        return centerline.distance(Point(*(0.5 * (start + end))))
+    def crossing_distance(start, end):
+        return LineString([start, end]).distance(Point(*crossing))
 
-    seams = [
-        (region, start, end)
+    def on_chord(start, end):
+        return any(_on_cut(start, end, chord_start, chord_end, 1e-9)
+                   for chord_start, chord_end in chords)
+
+    # A section cut is the chord through the crossing that separates two sections; it
+    # arrives split into pieces by the other pass's outline, so every piece that runs
+    # through the crossing point belongs to it.
+    cut_pieces = [
+        (region, index)
         for region in result.pieces
         for index, start, end in edges(region)
-        if index in region.flush_edges
+        if 0.0 < float(np.hypot(*(end - start))) <= 2.0 * offset
+        and crossing_distance(start, end) == pytest.approx(0.0, abs=1e-9)
     ]
-    assert seams
-    for region, start, end in seams:
-        assert float(np.hypot(*(end - start))) == pytest.approx(2.0 * offset, abs=1e-9)
-        # A chord across the strand is centred on it; a notch follows the other pass's
-        # lateral edge and is one band width away from the centreline instead.
-        assert band_distance(start, end) == pytest.approx(0.0, abs=1e-9)
+    assert cut_pieces, "the geometry must actually have section cuts to prove anything"
+    for region, index in cut_pieces:
+        assert index in region.flush_edges, "a section cut is a seam and must not be stroked"
 
     notches = [
         (region, index)
         for region in result.pieces
         for index, start, end in edges(region)
-        if index not in region.flush_edges
-        and float(np.hypot(*(end - start))) == pytest.approx(2.0 * offset, abs=1e-9)
-        and band_distance(start, end) == pytest.approx(offset, abs=1e-9)
+        # A notch cuts across the strand: it meets the centreline at a point interior to
+        # both, while a covered side only runs along one lateral edge. The chords of the
+        # section split meet the centreline too, so they are excluded by name.
+        if centerline.crosses(LineString([start, end]))
+        and not on_chord(start, end)
     ]
     assert notches, "the geometry must actually have notches for this to prove anything"
+    for region, index in notches:
+        assert index not in region.flush_edges, "a weave notch is real boundary"
 
 
 def test_the_self_crossing_cut_keeps_each_pass_material_beside_the_crossing():
@@ -262,10 +298,13 @@ def test_a_zero_area_fold_is_dropped_and_a_real_thin_corner_is_kept():
         [0.0, 0.0], [0.04, 0.0], [0.0005, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0],
     ])
     cleaned = _drop_folds(folded)
-    assert len(cleaned) == len(folded) - 2
+    # The turnaround vertex goes. What stays is the point the excursion returned to, which
+    # now sits on the straight run — the out-and-back itself is what must be gone, and the
+    # ring still covers exactly what it covered.
     assert [tuple(point) for point in cleaned] == [
-        (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0),
+        (0.0, 0.0), (0.0005, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0),
     ]
+    assert Polygon(cleaned).area == pytest.approx(Polygon(folded).area)
     # A thin feature the geometry really has is not a fold: it turns back, but it spans area.
     cusp = np.array([[0.0, 0.0], [0.5, 0.02], [1.0, 0.0], [0.5, -1.0], [0.0, 0.0]])
     assert np.array_equal(_drop_folds(cusp), cusp)
@@ -273,6 +312,139 @@ def test_a_zero_area_fold_is_dropped_and_a_real_thin_corner_is_kept():
     assert np.array_equal(_drop_folds(cleaned), cleaned)
     degenerate = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]])
     assert np.array_equal(_drop_folds(degenerate), degenerate)
+
+
+def test_a_wedge_whose_tip_is_near_duplicate_points_survives():
+    # A crossing whose two cut chords meet on a band's lateral edge leaves the tip of the
+    # wedge as several copies of one point that differ only in the last bits (the polygon
+    # boolean's noise). Each copy looks like a zero-area reversal on its own; dropping them
+    # all in one pass removed the vertex the ring really turns at, and with it the whole
+    # wedge — a hole in the painted ribbon. Folds come off one at a time, so the last copy
+    # is judged against the ring's real corners and kept.
+    tip = np.array([0.3, 0.4])
+    ring = np.array([
+        [0.0, 0.0], [1.0, 0.0],
+        tip + np.array([0.0, 0.0]),
+        tip + np.array([4e-16, 0.0]),
+        tip + np.array([-4e-16, 4e-16]),
+        [0.0, 1.0], [0.0, 0.0],
+    ])
+    cleaned = _drop_folds(ring)
+    # The wedge keeps its tip, and the ring still covers the same area.
+    assert any(np.allclose(point, tip, atol=1e-12) for point in cleaned)
+    assert Polygon(cleaned).area == pytest.approx(Polygon(ring).area)
+
+
+def test_the_weave_notch_is_stroked_even_where_it_is_its_own_band_edge():
+    # A notch is the pass on top crossing the pass below, and the edge that carries it
+    # belongs to whichever region's ring reaches there. For the pass *on top* that edge
+    # is its own band's lateral edge, so the "covered side" test used to hide it — and
+    # where the pass below does not carry that piece (its own cut is clipped by the
+    # section windows it works through), the notch then ended in the middle of the
+    # ribbon. What decides is the visible material: the edge is a notch when this
+    # region owns one side of it and the owner changes across it.
+    #
+    # A is the region under test; B below it (drawn first) is on the left, C above it
+    # (drawn last) covers A's top edge on both sides.
+    def region(region_id, points, draw_index):
+        ring = np.asarray(points, dtype=float)
+        return RibbonRegion(
+            region_id=region_id, path_id="P0000",
+            exterior=RegionRing(points=ring, role="exterior"),
+            area=float(Polygon(ring).area), draw_index=draw_index,
+        )
+
+    a = region("A.region0", [
+        [4.0, 0.0], [8.0, 0.0], [8.0, 2.0], [4.0, 2.0], [4.0, 0.0],
+    ], 1)
+    b = region("B.region0", [
+        [0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0], [0.0, 0.0],
+    ], 0)
+    # C sits on the middle of A's top side, so it is painted over both sides of that
+    # piece of the boundary — but it stays clear of A's left side.
+    c = region("C.region0", [
+        [6.0, 1.5], [7.0, 1.5], [7.0, 2.5], [6.0, 2.5], [6.0, 1.5],
+    ], 2)
+    bands = {
+        "A": Polygon(a.exterior.points),
+        "B": Polygon(b.exterior.points),
+        "C": Polygon(c.exterior.points),
+    }
+    # A's left side (the shared edge with B) and its top side (covered by C in the
+    # middle) are both recorded as lens boundaries — both are notches as far as the
+    # weave knows.
+    weave = [
+        (np.array([4.0, 0.0]), np.array([4.0, 2.0])),
+        (np.array([8.0, 2.0]), np.array([4.0, 2.0])),
+    ]
+    mark_flush_edges([a, b, c], cuts={}, weave=weave, node_bands=bands)
+    points = np.asarray(a.exterior.points, dtype=float)
+    # C's sides split A's top side in three.
+    assert [tuple(point) for point in points] == [
+        (4.0, 0.0), (8.0, 0.0), (8.0, 2.0), (7.0, 2.0), (6.0, 2.0), (4.0, 2.0),
+        (4.0, 0.0),
+    ]
+    # Edge 5 is A's left side: A is what is visible on its own side and B on the other,
+    # so the notch is real and has to be stroked — even though the edge lies on A's own
+    # band boundary, which used to be enough to hide it.
+    assert 5 not in a.flush_edges, a.flush_edges
+    # Edge 3 is the piece of A's top side under C: C is painted over both sides of it,
+    # so the notch is hidden underneath and C's own outline is the one owed.
+    assert a.flush_edges == (3,), a.flush_edges
+
+
+def test_the_flush_indices_address_the_ring_the_renderer_draws():
+    # One edge can be split — another region's boundary crosses it, so a vertex is
+    # inserted — while a pair of near-collinear edges is joined, a vertex folded away. The
+    # two cancel out in the point count, and the ring still has to become the joined one:
+    # the indices address *that* ring. Measured on the n=7 CA card (Boolean backend,
+    # ``P0000#14.region0``): the split and the merge cancelled, the original ring stayed,
+    # and one stale index both stroked a covered side — a line across the ribbon — and hid
+    # half of the silhouette.
+    #
+    # A is the region under test: a 4x2 square whose right side is covered by B and whose
+    # top side is half covered by C (both the same path, so no colour change), with one
+    # collinear vertex pair on the right side that joins. B and C are shaped so that C's
+    # lower edge lands exactly on A's top edge from x=2 to x=4: one crossing point, two
+    # pieces.
+    def region(region_id, points, draw_index):
+        ring = np.asarray(points, dtype=float)
+        return RibbonRegion(
+            region_id=region_id, path_id="P0000",
+            exterior=RegionRing(points=ring, role="exterior"),
+            area=float(Polygon(ring).area), draw_index=draw_index,
+        )
+
+    a = region("A.region0", [
+        [0.0, 0.0], [4.0, 0.0], [4.0, 1.0], [4.0, 2.0], [0.0, 2.0], [0.0, 0.0],
+    ], 0)
+    b = region("B.region0", [
+        [4.0, 0.0], [8.0, 0.0], [8.0, 2.0], [4.0, 2.0], [4.0, 0.0],
+    ], 1)
+    c = region("C.region0", [
+        [2.0, 2.0], [4.0, 2.0], [4.0, 2.6], [2.0, 2.6], [2.0, 2.0],
+    ], 2)
+    bands = {
+        "A": Polygon(a.exterior.points),
+        "B": Polygon(b.exterior.points),
+        "C": Polygon(c.exterior.points),
+    }
+    marked = mark_flush_edges([a, b, c], cuts={}, weave=(), node_bands=bands)
+    points = np.asarray(a.exterior.points, dtype=float)
+
+    # The ring is the joined one: the split vertex is there, the folded corner is not, and
+    # the point count happens to be unchanged — which is exactly why comparing counts
+    # cannot decide whether to replace it.
+    assert [tuple(point) for point in points] == [
+        (0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (2.0, 2.0), (0.0, 2.0), (0.0, 0.0),
+    ]
+    # The two hidden runs of A are the covered right side (the joined pair) and the
+    # covered half of the top edge; everything else is silhouette and stays stroked.
+    assert a.flush_edges == (1, 2), a.flush_edges
+    # A's two, plus B's covered left side and C's covered lower edge.
+    assert marked == 4, marked
+    assert b.flush_edges == (3,), b.flush_edges  # its left side, covered by A
+    assert c.flush_edges == (0,), c.flush_edges  # its lower edge, covered by A
 
 
 def test_a_ribbon_ring_never_keeps_a_folded_vertex():

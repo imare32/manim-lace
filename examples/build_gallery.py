@@ -379,11 +379,21 @@ def _note(collected: Collected) -> str:
             f"核 {len(kernel)} 点 → 旋转 {item['n']} 片花瓣 → 按步长 {item['level'] + 1} 重排 → "
             f"合并成 {len(loops)} 段连续折线（{sum(len(loop) for loop in loops)} 点）"
         )
-    if card.key == "RosetteWeave":
-        loops = _rosette_helpers().rosette_loops(10, 1, "PA") + _rosette_helpers().rosette_loops(
-            10, 2, "PA"
+    if card.key.startswith("RosetteWeave"):
+        scene_class = getattr(_module(card), card.scene)
+        n, levels, star_type, offset = getattr(scene_class, "SOURCE", (10, (1, 2), "PA", 0.08))
+        loops_of = _rosette_helpers().rosette_loops
+        types = rosette_module.STAR_TYPE_VALUES if star_type is None else (star_type,)
+        loops: list = []
+        for star in types:
+            for level in levels:
+                loops.extend(loops_of(n, level, star))
+        label = (
+            f"n={n} {star_type} L{'/'.join(str(level) for level in levels)}、offset {offset}"
+            if star_type is not None
+            else f"n={n} L{'/'.join(str(level) for level in levels)}、五种花型、offset {offset}"
         )
-        parts = [f"源 {len(loops)} 条闭合自交股线"]
+        parts = [f"{label}：源 {len(loops)} 条闭合自交股线"]
         stroke = next((lace for lace in laces if lace.render_mode == "stroke"), None)
         if stroke is not None:
             parts.append(f"stroke {len(stroke.crossings)} 交叉 / {len(stroke.result.pieces)} 片段")
