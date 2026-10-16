@@ -34,6 +34,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+markers = [
+  # 单次求解以秒计、把整套测试的时间吃掉大半的重案例。用 `--skip-heavy`（或
+  # `-m "not heavy"`）排除它们：改 ribbon 后端时不需要每次重跑隐式曲线的全量细化，
+  # 也不需要重测整个审查目录。默认不跳过，重案例仍然在 `pytest` 里。
+  "heavy: 单次求解以秒计的重案例（隐式曲线细化、审查目录全量重测）",
+]
 
 [tool.ruff]
 line-length = 100

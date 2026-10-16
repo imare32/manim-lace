@@ -1,7 +1,10 @@
-.PHONY: test demo bench lint audit
+.PHONY: test test-fast demo bench lint audit
 
 test:
 	pytest -q
+
+test-fast:
+	pytest -q --skip-heavy
 
 demo:
 	python examples/demo_core.py

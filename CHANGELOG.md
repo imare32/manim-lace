@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased — 引擎：孔洞展开不再死循环、面积记账不再静默（`random-walks` 的 boolean 从跑不完到 0.5s）
+
+`index-random-walks-6/12` 的 boolean 通道原本是两个"跑不完"的案例（实测 >5 分钟 / >4 分钟
+未完成、峰值内存 1.7GB），两张卡因此把 boolean 写成「本轮未纳入」。根因不在布尔运算本身，
+而在 `_open_occlusion_holes`：它按"切一刀就少一个孔"反复重切，而切弦可能**切不到**它瞄的那个
+孔，于是带孔的那一半进入下一轮，每轮只把 piece 数翻倍——实测一个带 1 个孔的 piece 切了
+**32 万次**仍未终止。
+
+- Fix `_split_along_cut`：切弦改以**被瞄孔的中心**定位（原先用交叉点）。单个干净交叉下两者
+  重合，但当孔是若干近切交叉的足迹、或比最近那个交叉的窗口更宽时，过交叉点的弦会整个错过它。
+- Fix `_open_occlusion_holes`：给重切循环加**轮数预算**（`2 + piece 数`）。预算用完仍留下的
+  孔按原样保留——那正是这一趟想改善的行为（渲染器用背景色涂它），但至少**会终止**。
+- Fix `_polygons` 为空时的返回：近切的 `difference` 会留下零面积的 `MultiLineString`，原样
+  返回会在下游读 `.interiors` 时崩；现在返回"没有可画的 piece"。
+- Fix `_covered_area`：精确路径（三种顺序 × 逐个 union × 每个部件 `covers` 校验，即 O(n²) 次
+  Shapely 叠加）只在部件数 ≤ 64 时走，超过则用一次 `unary_union` 估计——稠密输入上精确路径
+  就是主要开销，而它给出的数与调用方手里的算术上界是同一个量级。
+- Fix `render_region_geometry` 的自检：补上**反向**判据。并集不可能大于各部件面积之和，而
+  `region_area_sum` 正是同一个量（各区域面积之和，重叠算两次），所以
+  `painted_area > region_area_sum` 只可能是布尔运算把孔填回造成的记账错误。此时报
+  `REGION-AREA-MISMATCH`，并把 `painted_area` 对齐到那个可信值。
+
+实测：
+
+| 输入 | 通道 | 改前 | 改后 |
+|---|---|---|---|
+| `index-random-walks-6` | boolean | >5 分钟未完成、1.7GB | **0.50s**（同案 arrangement 0.54s） |
+| `index-random-walks-12` | boolean | >4 分钟未完成 | **1.09s**（同案 arrangement 1.91s） |
+| `ros-n10-pa-l12-o05` | boolean | `painted_area` **37.702956**（自身 161 个区域之和 10.183419） | **10.183419** = `union_area` = `region_area_sum` |
+
+两张随机游走卡的 boolean 通道因此**从「本轮未纳入」撤出**，页面现在三个通道并排；
+`docs/REVIEW.md` 与 `examples/review_catalog.py` 里对应的条目已按新实测改写。它们**不是**因此
+变干净了：boolean 在这两张上仍报 `REGION-AREA-MISMATCH`（改前 6.18 vs 6.50、改后 12.97 vs
+13.98，可见面积小于参考面积那份降级）与 `REGION-DRAW-ORDER-CYCLE`，页面照旧把它们显示成失败
+芯片——撤掉的只是"跑不完"这一条。面积那一档则不再有"账面错、图没错"的静默数字：
+`ros-n10-pa-l12-o05` 两个后端的三项账目一致，`examples/review_checks.py` 的独立复核
+（`region.painted_le_sum`）保留作为第二个读数。
+
+## Unreleased — 引擎：`mark_flush_edges` 里两处逐对穷举改成索引（`Arc(3π)` 从跑不完到能跑完）
+
+`adp-arc-overlapping`（`Arc(angle=3π)`：后半个圈把前半个圈原路重走一遍）是目录里唯一一个
+两个 ribbon 后端都"跑不完"的输入，两个通道因此挂着「本轮未纳入」。profile 之后原因不在布尔
+运算，而在 `render/regions.py` 的 `mark_flush_edges` 里**两处逐对穷举**——它占该案 41 秒里的
+24.5 秒（boolean）和 78 秒里的 65 秒（arrangement）：
+
+- **接缝判定**（`_on_cut`）：每条区域边都要对**本路径的全部切弦**比对一次，该案是 1965 条弦
+  × 3730 条边 = **733 万次 / 17.2 秒**，而绝大多数明显不相交。改成把切弦放进 `STRtree`，
+  每条边只问自己外接框命中的那几条（`seams_along`）。判定本身一字未改，所以接缝还是接缝：
+  733 万次 → **63 万次 / 2.1 秒**。
+- **透镜足迹判定**（`is_hidden` 里的 `weave_geometry.distance(...)`）：被问的只是"这个点是否
+  落在某条已切透镜的足迹上"，但为了回答它先做了一次 `unary_union`，逼叠加引擎把每两条相交
+  足迹先做结点化。该案有 ~13k 条足迹，这**一次** `unary_union` 就吃掉了 78 秒里的 **65 秒**。
+  改成 `STRtree` + `dwithin` 谓词直接回答同一个问题，不再求并。
+
+实测（同一台机器；括号里是文档原先记的数字，那是更早一轮、修掉孔洞展开死循环之前量的）：
+
+| 输入 | 通道 | 改前 | 改后 |
+|---|---|---|---|
+| `adp-arc-overlapping` | boolean | 32.1s（原记 >60s 未完成、2.7GB） | **17.7s** |
+| `adp-arc-overlapping` | arrangement | 75.5s（原记 >60s 未完成） | **8.3s** |
+| `spec-self-intersecting` | 三通道合计 | 14.7s | **9.7s** |
+
+审计数字**逐项未变**：`spec-self-intersecting` 仍是 292 / 62 个区域、24 处可见断头、boolean
+3 段未描缺口（`notch_gaps` 0.0386）；`adp-arc-overlapping` 仍是 175 个事件与同一组诊断。
+两条通道现在能跑完，但 17.7s / 8.3s 仍是目录里最贵的两项（比第二名贵一个数量级），因此**继续
+留在「本轮未纳入」**：`examples/review_catalog.py` 的 `omitted` 理由与 `docs/REVIEW.md` 的
+对应条目已按新实测改写，不再是"跑不完"。
+
+## Unreleased — 测试：`--skip-heavy` 把重案例摘出一次跑
+
+整套 `pytest` 是 651 项，但每条用例的代价**极不均匀**，而且最贵的两族都与 ribbon
+后端无关：`test_the_raw_input_channel_is_rendered_first` 把整个审查目录重测一遍
+（实测 84 秒），隐式曲线的重案例再占 89 秒（`test_review_catalog` 的 6 项 67 秒 +
+`test_implicit` 的 5 项 22 秒）。改 ribbon 的时候它们不提供任何信息，只是等。
+
+- Add `--skip-heavy`（`tests/conftest.py`）：跳过带 `heavy` 标记的用例。默认**不跳过**，
+  `pytest` 的行为不变；`-m "not heavy"` 同样可用（`heavy` 标记注册在 `pyproject.toml`，
+  `pytest --markers` 能看到）。实测 **217 s → 77 s**，651 项 → **639 passed +
+  12 skipped**。
+- 标记对象：`test_the_raw_input_channel_is_rendered_first`；案例 `imp-lemniscate` /
+  `imp-saddle-cross` / `imp-pole`（期望与确定性两项）；`test_implicit.py` 里 5 个跑细网格
+  的用例。`HEAVY_CASE_KEYS` 旁边写着各自的实测耗时，方便下次重新判断谁该进来。
+- Add `make test-fast`（= `pytest -q --skip-heavy`）。
+
 ## Unreleased — 审查：`dangling_ends` 现在看得见人眼点出的断头（并记录了两种被否掉的修法）
 
 一轮人审在 `spec-self-intersecting`（Lissajous 5:4）上点了两件事：boolean「四个交叉口处的

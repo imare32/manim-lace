@@ -196,7 +196,17 @@ def _open_occlusion_holes(
     _line, _point, Polygon, union, _make_valid, _orient = _require_shapely()
     chords: list[tuple[np.ndarray, np.ndarray]] = []
     pieces = [polygon for polygon in _polygons(geometry) if polygon.geom_type == "Polygon"]
-    while True:
+    # Bound the passes. One hole is normally removed by one cut, but a piece can carry
+    # several (a band with several near-tangent crossings does), so the halves are
+    # re-examined until none is left. That re-examination cannot be trusted to terminate
+    # on its own: a chord that fails to remove its hole (see ``_split_along_cut``) would
+    # leave it in one half and every pass would only double the pieces — measured on
+    # ``random_walks_6``, where one piece with a single hole passed 320k splits without
+    # ending. The pass count is therefore capped. A hole that survives the cap is kept,
+    # which is exactly the behaviour this pass was introduced to improve on: the adapter
+    # paints it in the background colour and it only shows when the paint order allows it.
+    budget = 2 + len(pieces)
+    for _ in range(budget):
         opened: list[Any] = []
         resplit = False
         for polygon in pieces:
@@ -236,7 +246,11 @@ def _open_occlusion_holes(
         if not resplit:
             break
     if not pieces:
-        return [geometry], chords
+        # The geometry carries no polygon at all: a near-tangent ``difference`` can leave
+        # a zero-area ``MultiLineString`` / ``GeometryCollection`` behind. There is then
+        # nothing to paint, and returning the raw geometry would reach the caller as a
+        # non-polygon and crash when it reads ``.interiors``. Return no pieces instead.
+        return [], chords
     # Deliberately *not* merged into one geometry: the pieces must stay separate, or the
     # shared chord is dissolved back into the interior and the hole comes straight back.
     return pieces, chords
@@ -266,7 +280,16 @@ def _split_along_cut(
         key=lambda item: float(np.sum((np.array(item.point) - centre) ** 2)),
     )
     arc = crossing.s_a if crossing.path_a == path.path_id else crossing.s_b
-    point, tangent = _arc_frame(path, float(arc))
+    _, tangent = _arc_frame(path, float(arc))
+    # Centre the chord on the hole it has to remove, not on the crossing point. For a
+    # single clean crossing the two coincide, but a hole can be the footprint of several
+    # near-tangent crossings, or wider than the window of the crossing nearest to it, and
+    # a chord through that crossing's point can then miss the hole. The hole survives in
+    # one half, the pass loop re-splits that half, and — each split only doubling the
+    # pieces — it does not terminate (measured on ``random_walks_6``: one piece with a
+    # single hole passed 320k splits). A chord through the centroid always separates the
+    # hole it was aimed at, which is what lets the loop below finish.
+    point = centre
     normal = np.array([-tangent[1], tangent[0]])
     # The half-planes and the chord have to cover the piece, not just the strand width:
     # the cut chord of a miter corner is wider than 2 * offset, and ``_on_cut`` only marks
@@ -376,11 +399,14 @@ def mark_flush_edges(
         )
         for region in ordered
     }
-    weave_geometry = (
-        unary_union([LineString([tuple(start), tuple(end)]) for start, end in weave])
-        if weave
-        else None
-    )
+    # The lens footprints stay individual segments in an STRtree instead of being unioned
+    # into one geometry. The only question asked of them is "is this point within
+    # ``tolerance`` of one of them" (see ``is_hidden``), and answering that with a union
+    # makes the overlay engine node every pair of overlapping segments first: measured on
+    # ``adp-arc-overlapping``, whose retraced ``Arc(3π)`` produces ~13k weave edges, that
+    # one ``unary_union`` cost 65 s of a 78 s render.
+    weave_lines = [LineString([tuple(start), tuple(end)]) for start, end in weave]
+    weave_tree = STRtree(weave_lines) if weave_lines else None
     # An edge's status can only change where it crosses another region's boundary, a
     # weave edge or its own node's band, so those are the split points to look for.
     segments: list[Any] = []
@@ -458,7 +484,9 @@ def mark_flush_edges(
             return False  # the silhouette of the painted ribbon
         if ordered[outer].path_id != ordered[inner].path_id:
             return False  # a colour boundary between two strands
-        if weave_geometry is not None and weave_geometry.distance(Point(*middle)) <= tolerance:
+        if weave_tree is not None and len(weave_tree.query(
+            Point(*middle), predicate="dwithin", distance=tolerance
+        )):
             # The weave notch: the edge is on the footprint boundary of the pass on top,
             # so the visible material changes here — exactly the boundary a renderer has
             # to stroke. Asked *before* the band test, because the over pass's own lateral
@@ -475,9 +503,31 @@ def mark_flush_edges(
             return True  # a side of this region's own band, covered by something else
         return True  # interior, one colour, no weave
 
+    # The seam test asks "does this edge lie on one of the path's cut chords", and a
+    # sectioned path carries one chord per section cap: measured on ``adp-arc-overlapping``
+    # (an ``Arc(3π)`` whose last half-turn retraces the first) that is 1965 chords against
+    # 3730 edges, i.e. 7.3M containment tests and 17 s of a 41 s render — while nearly
+    # every pair is disjoint. The chords go into an STRtree so an edge only asks about the
+    # chords its bounding box meets, the same structure ``split_parameters`` already uses
+    # for its split points. The test itself is unchanged: a seam is still a seam.
+    seam_index: dict[str, tuple[tuple[tuple[np.ndarray, np.ndarray], ...], Any]] = {}
+
+    def seams_along(path_id: str, edge: Any) -> Any:
+        """The cut chords whose bounding box meets ``edge`` — a superset of the seams."""
+        entry = seam_index.get(path_id)
+        if entry is None:
+            chords = tuple(cuts.get(path_id, ()))
+            lines = [LineString([tuple(start), tuple(end)]) for start, end in chords]
+            entry = (chords, STRtree(lines) if lines else None)
+            seam_index[path_id] = entry
+        chords, seam_tree = entry
+        if seam_tree is None:
+            return ()
+        return (chords[index] for index in seam_tree.query(edge))
+
     marked = 0
     for region in regions:
-        chords = cuts.get(region.path_id, ())
+        has_cuts = bool(cuts.get(region.path_id))
         node = region.region_id.rsplit(".region", 1)[0]
         band = (node_bands or {}).get(node)
         points = np.asarray(region.exterior.points, dtype=float)
@@ -488,9 +538,11 @@ def mark_flush_edges(
         for start, end in zip(points[:-1], points[1:], strict=False):
             if float(np.hypot(*(end - start))) <= 0.0:
                 continue
-            if any(
+            if has_cuts and any(
                 _on_cut(start, end, chord_start, chord_end, tolerance)
-                for chord_start, chord_end in chords
+                for chord_start, chord_end in seams_along(
+                    region.path_id, LineString([tuple(start), tuple(end)])
+                )
             ):
                 pieces.append((start, end, True))  # a seam: the material continues
                 continue
@@ -1131,22 +1183,54 @@ def _union_or_none(parts: list[Any], unary_union: Any) -> Any | None:
     return live[0] if len(live) == 1 else unary_union(live)
 
 
-def _covered_area(parts: list[Any]) -> float:
+#: Above this many parts :func:`_covered_area` stops trying the exact union. The exact
+#: path runs three orders of pairwise ``union`` with a ``covers`` check per part, i.e.
+#: O(n^2) Shapely overlays, which made dense short-path inputs (48 crossings, > 5 minutes)
+#: pathologically slow while telling us nothing the caller's arithmetic cross-check — a
+#: union is never larger than the sum of the parts' own areas — cannot.
+_COVERED_AREA_EXACT_LIMIT = 64
+
+
+def _union_chain(parts: list[Any]) -> Any:
+    """Union a list of geometries without depending on ``shapely.ops``."""
+    running = parts[0]
+    for part in parts[1:]:
+        running = running.union(part)
+    return running
+
+
+def _covered_area(
+    parts: list[Any],
+    *,
+    unary_union: Any | None = None,
+) -> float:
     """The area ``parts`` cover: every one of them, overlaps counted once.
 
     A one-shot ``unary_union`` can drop a part that only touches its neighbours along
     an edge — measured on a 158-region render, where 40 of the parts came out
     uncovered and the area 5e-2 short, in every operand order — which would understate
-    what the renderer paints and make the area check cry wolf. So the parts are unioned
-    one at a time, the result is checked against every part, and the orders are tried
-    both ways: a lossy union is a lower bound of the true one, so a verified attempt is
-    exact and the larger of the attempts is the better estimate.
+    what the renderer paints and make the area check cry wolf. So for a small set of
+    parts they are unioned one at a time, the result is checked against every part, and
+    the orders are tried both ways: a lossy union is a lower bound of the true one, so a
+    verified attempt is exact and the larger of the attempts is the better estimate.
+
+    That exact path is O(n^2) Shapely overlays, so it is only taken while there are
+    ``_COVERED_AREA_EXACT_LIMIT`` parts or fewer. Above that a one-shot union is used
+    instead: the result is then an estimate, and — like any union of these parts — it is
+    never larger than the sum of their own areas. ``render_region_geometry`` holds that
+    arithmetic bound independently (``region_area_sum``) and uses it to catch, and to
+    correct, a union that overstates the area; overstating is the failure mode an
+    invalid polygon (duplicate vertices, a self-touch) can cause, while the exact path
+    below only defends against *understating*.
     """
     live = [part for part in parts if part is not None and not part.is_empty]
     if not live:
         return 0.0
     if len(live) == 1:
         return float(live[0].area)
+    if len(live) > _COVERED_AREA_EXACT_LIMIT:
+        unioned = unary_union(live) if unary_union is not None else _union_chain(live)
+        return float(unioned.area)
     best: Any | None = None
     for order in (live, live[::-1], sorted(live, key=lambda part: -part.area)):
         running = order[0]
@@ -1554,10 +1638,42 @@ def render_region_geometry(
                 ))
 
     band_area = float(sum(band.area for band in bands.values()))
-    union_area = _covered_area(ribbon_parts)
-    painted_area = _covered_area(painted_parts)
+    union_area = _covered_area(ribbon_parts, unary_union=unary_union)
+    painted_area = _covered_area(painted_parts, unary_union=unary_union)
     region_area_sum = float(sum(region.area for region in regions))
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-12)
+    # Arithmetic cross-check that needs no geometry: a union can never be larger than the
+    # sum of the parts it unions, and the emitted regions tile exactly the painted parts
+    # (opening an occlusion hole only re-splits a polygon; it does not change its area),
+    # so ``region_area_sum`` is the same number with overlaps counted twice. A
+    # ``painted_area`` above it is therefore a Boolean-engine error, not geometry: it is
+    # what happens when ``_covered_area`` unions an invalid polygon (duplicate vertices,
+    # a self-touch) and an occlusion hole is filled back in. This used to pass silently —
+    # the mismatch check below only looks for painted *smaller* than the reference — and,
+    # measured on `ros-n10-pa-l12-o05`, reported a visible area of 37.70 for 161 regions
+    # whose areas sum to 10.18, which is impossible. ``region_area_sum`` is the
+    # trustworthy number here and becomes the value.
+    if painted_area > region_area_sum + tolerance:
+        diagnostics.append(Diagnostic(
+            code="REGION-AREA-MISMATCH",
+            severity=Severity.WARNING,
+            message=(
+                "可见区域面积大于各区域面积之和：并集不可能大于各部件之和，"
+                "这是布尔运算对带孔或自接触多边形求并时把孔填回造成的记账错误。"
+                "区域面积之和是可信值，已以它为准；区域几何本身仍是对的。"
+            ),
+            details={
+                "painted_area": painted_area,
+                "region_area_sum": region_area_sum,
+                "difference": painted_area - region_area_sum,
+                "tolerance": tolerance,
+            },
+            hints=(
+                "这是一处静默记账错误，画面不受影响；可用 arrangement 后端核对同一输入。",
+                "细丝带（lens 整个落在被压丝带内部）最容易触发。",
+            ),
+        ))
+        painted_area = region_area_sum
     whole_union = float(unary_union(list(bands.values())).area) if bands else 0.0
     section_seam = bool(strips) and abs(union_area - whole_union) > tolerance
     if section_seam:

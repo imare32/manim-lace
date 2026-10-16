@@ -37,6 +37,7 @@ from review_catalog import (  # noqa: E402
     CATEGORIES,
     CATEGORY_BY_KEY,
     MANIM_CATEGORIES,
+    Case,
     cases_for,
     catalog_stats,
 )
@@ -190,8 +191,29 @@ PURE_CASES_WITH_CHANNELS = tuple(
                  if channel not in {name for name, _reason in case.omitted}))
     for case in PURE_CASES if case.kind != "error"
 )
-PURE_CASE_PARAMS = tuple((case, channels) for case, channels in PURE_CASES_WITH_CHANNELS)
+
+#: Cases that cost seconds per solve instead of milliseconds — all of them implicit fields
+#: on a fine grid plus refinement passes, so the cost is in the sampler, not in a weave
+#: backend. Measured on this machine (full suite 217 s): ``imp-lemniscate`` 22 s,
+#: ``imp-saddle-cross`` 21 s and ``imp-pole`` 18 s across the expectation and determinism
+#: tests below. They carry the ``heavy`` marker so ``--skip-heavy`` can drop them; see
+#: ``tests/conftest.py``.
+HEAVY_CASE_KEYS = frozenset({"imp-lemniscate", "imp-saddle-cross", "imp-pole"})
+
+
+def _case_param(case: Case, *values: object) -> object:
+    """One ``pytest.param`` for ``case``, carrying ``heavy`` when the case is heavy."""
+    marks = (pytest.mark.heavy,) if case.key in HEAVY_CASE_KEYS else ()
+    return pytest.param(case, *values, marks=marks)
+
+
+PURE_CASE_PARAMS = tuple(
+    _case_param(case, channels) for case, channels in PURE_CASES_WITH_CHANNELS
+)
 PURE_CASE_IDS = [case.key for case, _channels in PURE_CASES_WITH_CHANNELS]
+
+#: The solve-twice check runs each case a second time, so it carries the same marks.
+DETERMINISM_PARAMS = tuple(_case_param(case) for case in PURE_CASES)
 
 
 @pytest.mark.parametrize(("case", "channels"), PURE_CASE_PARAMS, ids=PURE_CASE_IDS)
@@ -243,7 +265,7 @@ def test_pure_case_invariants_hold(case, channel) -> None:
     assert not failed, (case.key, channel, failed)
 
 
-@pytest.mark.parametrize("case", PURE_CASES, ids=lambda case: case.key)
+@pytest.mark.parametrize("case", DETERMINISM_PARAMS, ids=lambda case: case.key)
 def test_pure_case_solves_deterministically(case) -> None:
     if case.kind == "error":
         pytest.skip("error cases have no geometry to solve twice")
@@ -576,12 +598,16 @@ def test_page_script_only_references_markup_the_page_has() -> None:
         assert marker in page, f"script uses {selector}, page has no {marker}"
 
 
+@pytest.mark.heavy
 def test_the_raw_input_channel_is_rendered_first() -> None:
     """Every renderable case gets an ``input`` panel, ahead of the weave backends.
 
     The row is meant to read "what went in → what each backend made of it": without the
     raw input a reviewer cannot tell "the engine saw the wrong geometry" from "the engine
     wove it wrong". Error cases get no panel at all — there is no geometry to draw.
+
+    Heavy: this re-measures the whole catalog (~84 s of the 217 s suite), which is what the
+    page does once, not what a single edit needs to re-check. ``--skip-heavy`` drops it.
     """
     pytest.importorskip("manim")
     import build_review

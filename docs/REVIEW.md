@@ -184,11 +184,11 @@ Ctrl+V」，面板里那个输入框永远可用；复制那侧也一样，异�
 
 | 问题 | 实测 | 页面上怎么显示 |
 |---|---|---|
-| **boolean 区域后端在随机游走网络上病态** | `index-random-walks-6`（6 条路径 / 48 交叉）：boolean **>5 分钟且峰值内存 1.7GB**；同一输入 arrangement **2.1s**、stroke **0.2s**。`index-random-walks-12`（12 条 / 151 交叉）：boolean **>4 分钟未跑完**，arrangement **11.7s**。而 `spec-network`（27 条 / 196 交叉）boolean 只要 1.4s——所以不是交叉数的问题，是"许多短路径互相近切"这类输入 | 两张卡把 boolean 通道显式列为「本轮未纳入」，原因里带着上面的数字（`Case.omitted`） |
-| **arrangement 后端在密集随机游走上留下悬空描边** | `index-random-walks-6`（48 交叉）：`audit.dangling_ends` **20 处**、`audit.notch_gaps` **3 段 / 0.0507**；`index-random-walks-12`（151 交叉）：悬空端头 **18 处**。两个案例同通道另有 `REGION-LENS-APPROXIMATION` 等 5 个诊断 | 该案显示为**失败**芯片，`look_for` 直接写明"需要人眼定位" |
+| **boolean 区域后端在随机游走网络上病态**（已修） | `index-random-walks-6`（6 条路径 / 48 交叉）：boolean 曾 **>5 分钟且峰值内存 1.7GB**；同一输入 arrangement **2.1s**、stroke **0.2s**。`index-random-walks-12`（12 条 / 151 交叉）：boolean 曾 **>4 分钟未跑完**，arrangement **11.7s**。而 `spec-network`（27 条 / 196 交叉）boolean 只要 1.4s——所以不是交叉数的问题，是"许多短路径互相近切"这类输入 | 根因是 `_open_occlusion_holes` 的切分不保证消除孔洞、外层循环于是反复重切（实测一个 piece 切了 32 万次仍未终止），见 CHANGELOG 的孔洞展开条目。修完 boolean 是 **0.50s / 1.06s**——比同案的 arrangement 还快——两张卡的 boolean 通道因此**从「本轮未纳入」里撤出**（`Case.omitted` 已删），页面现在三个通道并排 |
+| **arrangement 后端在密集随机游走上留下悬空描边** | `index-random-walks-6`（48 交叉）：`audit.dangling_ends` **53 处**、`audit.notch_gaps` **3 段 / 0.0507**；`index-random-walks-12`（151 交叉）：悬空端头 **76 处**。两个案例同通道另有 `REGION-LENS-APPROXIMATION` 等 5 个诊断 | 该案显示为**失败**芯片，`look_for` 直接写明"需要人眼定位"。**本行原先记的是 20 / 18**：同行的 `notch_gaps` 逐位未变，只有断头数对不上，用 HEAD 的引擎 + HEAD 的审计独立复测仍是 53 / 76，所以那是写 20 / 18 时的旧口径数（同一提交收紧了口径，这两个数没有跟着重测），不是未提交改动带来的回归 |
 | **Manim 参数曲线路径上也有一个悬空描边端头** | `adp-parametric`（`ParametricFunction` 的 Lissajous 3:2）boolean 通道：`audit.dangling_ends` **1 处** | 同上；这条说明该签名不只出现在手工构造的退化输入上 |
 | **boolean 区域后端在细丝带玫瑰线上报出一个不可能的可见面积（静默）** | `ros-n10-pa-l12-o05`（n=10 PA 阶 1+2，offset 0.05）boolean 通道：`painted_area` **37.702956**，而同一份结果里 161 个区域的面积之和是 **10.183419**、分段并集 10.594701、整条丝带并集 10.183419；arrangement 后端在**同一输入**上给出 10.183419。比自己的区域之和还大 3.7 倍在数学上不可能（并集不可能大于各部件之和），而引擎的自检只判 `painted < 参考面积`，因此**没有** `REGION-AREA-MISMATCH`——一个不会自我暴露的错误数字。**这一档的画面本身看不出问题**（实机渲染的丝带干净、轮廓连续），错的是面积那本账 | `region.area_conserved` 与 `region.painted_le_sum` 都显示为**失败**，并写出两个数各自是多少；案例说明里写明这是本轮查出的缺陷、且画面看不出差异 |
-| **`Arc(angle=3π)` 这类"超过一圈"的圆弧会让两个区域后端跑不完** | `adp-arc-overlapping`：`Arc(angle=3π)` + 一条直线。stroke 通道 **1.1s** 出 **175** 个事件（大量共线重叠/端点接触噪声）并把整条圆弧切光（`RENDER-PATH-FULLY-CUT`）；boolean 与 arrangement **>60 秒未完成、峰值内存 2.7GB**。原因不是交叉数，而是**圆弧自我重叠**（后半个圈原路重走前半个圈） | 该案只渲染 stroke 通道，两个 ribbon 通道作为「本轮未纳入」列出并带上面的数字 |
+| **`Arc(angle=3π)` 这类"超过一圈"的圆弧会让两个区域后端跑到分钟级** | `adp-arc-overlapping`：`Arc(angle=3π)` + 一条直线。stroke 通道 **1.1s** 出 **175** 个事件（大量共线重叠/端点接触噪声）并把整条圆弧切光（`RENDER-PATH-FULLY-CUT`）；boolean 与 arrangement 原本 **>60 秒未完成、峰值内存 2.7GB**，`mark_flush_edges` 里两处全量比对改成索引之后**都能跑完**：boolean **17.9 → 17.7s**、arrangement **74.9 → 8.3s**（同一台机器，取两处改动后的实测）。原因不是交叉数，而是**圆弧自我重叠**（后半个圈原路重走前半个圈）产出的匝数把两处"每条边 × 每条弦/每段足迹"的比对推到百万次 | 该案只渲染 stroke 通道，两个 ribbon 通道作为「本轮未纳入」列出并带上面的数字（现在带的是能跑完的 17.7s / 8.3s，不再是"跑不完"） |
 | **近零面积碎片环的朝向是数值噪声** | 各后端都会吐出面积 ~1e-19 的 sliver 环，其外环的 `shoelace` 符号随机（引擎自己的 `RegionRing.counter_clockwise` 同理） | 朝向检查跳过面积 ≤1e-12 的环并计数，不误报 |
 | **布尔运算留下重复顶点** | 部分环带零长边（连续重复点），Shapely 因此判其无效；但实测 `region.area` 与环自身面积**逐位一致**，画面不受影响 | `region.rings_clean` 作为**读数**（不是失败）列出数量与前几个环名 |
 | **审计探针的安装时机是个坑** | `benchmarks/weave_audit.py` 记录的是 `mark_flush_edges` **求解时**收到的数据；若在求解之后才 import，记录为空，于是所有自交边都被误报成"不在任何透镜边界上"（第一版判定就是这样误报了 5 个案例） | `review_checks.ensure_audit_probe()` 在首次构建前安装探针，`audit_signatures` 再校验记录的区域就是本次求解的对象，否则报 `skip` 而不是编造失败 |
@@ -216,6 +216,18 @@ Ctrl+V」，面板里那个输入框永远可用；复制那侧也一样，异�
    一段落在某个面的内部、谁的环上都没有它，也就没人描）；
 2. 或者把"欠下的描边"作为一层交给渲染器：`weave` 里那些**没有落在任何区域边上**的足迹段，
    由引擎连同可见性判断一起发给渲染器，画在所有填充之上。
+
+**第 1 条已实测过，单独不够**：把透镜喂进 `_cells` 的 noded 输入之后剖分确实变了
+（`spec-self-intersecting` 的 `raw_face_count` 230 → 258），但**区域与 24 处断头一个没变**——
+因为 `0.64716,0.05298` 那处足迹的两侧**归同一个所有者**（都属于 `#15`，材质没变），多切出来
+的面被 `_node_geometry` 又并了回去。断头的真正原因在**归属**而不是剖分：`#15|#0` 这条界面在
+`V` 处结束，而界面继续往 `W` 走的那段（0.00042，之后是 0.16 长的 `#0|#14`）因为两侧是同一条
+路径、同一个颜色而被判"不可见"。也就是说，用"描每个区域自己的环"这套墨水模型，表达不了
+「同色相邻区域并起来之后的轮廓」——这正是第 2 条要解决的事。
+
+复核方式（三个数字就能重跑）：把每个 `audit.dangling_ends` 报出的端头量到最近一条描边的距离，
+两个后端都是 **24/24 落在 1e-4 以内、实测 0**——它们不是"停在开阔处"，是线真的到头了；再把
+每条记录的透镜足迹逐段取中点、在两侧各问一次 `topmost`，就能看到断点那一侧的两侧同主。
 
 两条路都要动 `render/regions.py` / `render/arrangement.py` / `manim_api.py` 的接口，并且要
 在 `benchmarks/weave_audit.py` 的 22 个玫瑰线配置上验证没有回退——这正是本轮留在页面上的

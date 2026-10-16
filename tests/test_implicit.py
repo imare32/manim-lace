@@ -15,6 +15,10 @@ import pytest
 from manim_lace import LaceEngine, sample_implicit
 from manim_lace.geometry.implicit import ORIENTATION_RULES
 
+#: The tests marked ``heavy`` below spend their time in the sampler (fine grids plus
+#: refinement passes) rather than in the weave backends: measured on this machine they are
+#: 3.5-7 s each, ~22 s together. ``--skip-heavy`` (see ``tests/conftest.py``) drops them.
+
 
 def _sample(field, x_range=(-2.0, 2.0), y_range=(-2.0, 2.0), **kwargs):
     """Sample one field and return its paths plus the honest summary."""
@@ -134,6 +138,7 @@ def test_the_same_field_gives_the_same_points_twice() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.heavy
 def test_an_ambiguous_saddle_is_decided_by_a_rule_and_reported() -> None:
     """``F = x*y`` at level 0: four corners alternate in the cell at the origin."""
     paths, summary = _sample(lambda x, y: x * y)
@@ -193,6 +198,7 @@ def test_the_saddle_pairing_is_not_resolution_stable() -> None:
     assert owners == ["x+y-", "x-y-", "x+y-", "x+y-", "x-y-"], owners
 
 
+@pytest.mark.heavy
 def test_refinement_can_stop_short_of_the_target_when_the_pass_cap_runs_out() -> None:
     """Starting coarser spends the pass budget and lands on a smaller final grid.
 
@@ -212,6 +218,7 @@ def test_refinement_can_stop_short_of_the_target_when_the_pass_cap_runs_out() ->
     ]
 
 
+@pytest.mark.heavy
 def test_a_lemniscate_loses_its_node_through_the_engine() -> None:
     """The measured cost of the same limitation, one level up: no crossing at the node.
 
@@ -238,6 +245,7 @@ def test_a_lemniscate_loses_its_node_through_the_engine() -> None:
     assert result.crossings == []
 
 
+@pytest.mark.heavy
 def test_a_pole_is_reported_as_a_missed_target_and_the_result_is_not_a_contour() -> None:
     """A pole is not a zero: this is where the extractor's one assumption breaks.
 
@@ -486,6 +494,7 @@ def test_the_engine_reports_the_implicit_summary_as_a_trace_event() -> None:
     assert events[0].data["x_range"] == [-2.0, 2.0]
 
 
+@pytest.mark.heavy
 def test_sampler_diagnostics_become_real_diagnostics_on_the_result() -> None:
     """A warning that only exists in the trace payload is a warning nobody sees."""
     engine = LaceEngine.from_implicit(lambda x, y: x * y, (-2.0, 2.0), (-2.0, 2.0), offset=0.1)

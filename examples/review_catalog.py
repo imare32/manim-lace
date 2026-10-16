@@ -444,10 +444,12 @@ def _adapter_arc_overlapping() -> Source:
 
     ``Arc(angle=3π)`` draws one and a half turns, so the last half retraces the first —
     a self-overlap rather than a self-crossing. Measured: 175 events in the stroke channel
-    (77 of them collinear-overlap-adjacent near-tangent/endpoint noise) and both region
-    backends exceed 60s and 2.7GB without finishing. It is in the catalog because an arc
-    with a large angle is an ordinary thing to write, and the review page should say what
-    happens rather than pretend the case is unremarkable.
+    (77 of them collinear-overlap-adjacent near-tangent/endpoint noise). The two region
+    backends used to exceed 60s and 2.7GB without finishing; the two indexed lookups in
+    ``mark_flush_edges`` took that to 17.7s (boolean) and 8.3s (arrangement), which is
+    still the most expensive input in the catalog by an order of magnitude. It is in the
+    catalog because an arc with a large angle is an ordinary thing to write, and the
+    review page should say what happens rather than pretend the case is unremarkable.
     """
     from manim import Arc, Line, VGroup
 
@@ -642,31 +644,28 @@ _CASES: tuple[Case, ...] = (
          tags=("平行", "网格退化")),
     Case("index-random-walks-6", "index", "随机游走 6 条（固定种子）",
          "固定种子 20261015 的随机游走：无序输入下的稳定性。"
-         "本案例也是页面上唯一一个把引擎的性能问题直接摊出来的案例："
-         "boolean 区域后端在这类输入上实测超过 5 分钟且峰值内存 1.7GB（arrangement 后端 2.1s，"
-         "stroke 0.2s），因此本轮不纳入 boolean 通道。",
+         "本案例是页面上最能摊出引擎性能的一例：boolean 区域后端曾在这类输入上实测超过 5 分钟、"
+         "峰值内存 1.7GB，当时这一行只跑 stroke 与 arrangement。孔洞展开的死循环修掉之后"
+         "boolean 降到 0.50s——比 arrangement 的 0.9s 还快——所以三个通道全部纳入。",
          "paths", lambda: _index("random_walks_6"), offset=0.07,
-         omitted=(("boolean", "实测 solve >5 分钟、峰值内存 1.7GB（同一输入 arrangement 2.1s、"
-                              "stroke 0.2s），属引擎侧性能问题，本轮不纳入"),),
          expect_any_diagnostics=("REGION-AREA-MISMATCH", "REGION-CONFLICTING-OVERLAP",
                                  "REGION-DROPPED-SLIVER", "REGION-LENS-APPROXIMATION",
                                  "REGION-OFF-CROSSING-OVERLAP"),
          look_for="48 处交叉里有大量近切：arrangement 后端报面积不守恒与透镜近似，"
-                  "并有 3 段缺口从未被描到（audit.notch_gaps 合计 0.0507）与 20 个悬空描边端头"
+                  "并有 3 段缺口从未被描到（audit.notch_gaps 合计 0.0507）与 53 个悬空描边端头"
                   "（audit.dangling_ends）——这两个签名是真实缺陷、需要人眼定位；"
-                  "也看 stroke 与 arrangement 的上下关系是否一致。",
+                  "也看三个通道的上下关系是否一致。",
          tags=("随机游走", "固定种子", "引擎性能问题")),
     Case("index-random-walks-12", "index", "随机游走 12 条（固定种子）",
-         "12 条更短步长的随机游走，交叉更多；boolean 后端同样病态（>4 分钟未跑完）。",
+         "12 条更短步长的随机游走，交叉更多；boolean 后端曾同样病态（>4 分钟未跑完），"
+         "现在是 1.06s，同样三个通道全部纳入。",
          "paths", lambda: _index("random_walks_12"), offset=0.07,
-         omitted=(("boolean", "实测 solve >4 分钟未完成（12 条路径 / 151 交叉），"
-                              "属引擎侧性能问题，本轮不纳入"),),
          expect_any_diagnostics=("REGION-AREA-MISMATCH", "REGION-CONFLICTING-OVERLAP",
                                  "REGION-DROPPED-SLIVER", "REGION-LENS-APPROXIMATION",
                                  "REGION-OFF-CROSSING-OVERLAP"),
-         look_for="与 6 条那张对照：交叉更多时 arrangement 的归属与缺口是否仍然自洽。"
+         look_for="与 6 条那张对照：交叉更多时各后端的归属与缺口是否仍然自洽。"
                   "实测这一张的 arrangement 通道有一个真实缺陷签名："
-                  "audit.dangling_ends 报出 18 个悬在丝带内部、没接上任何描边的端头，"
+                  "audit.dangling_ends 报出 76 个悬在丝带内部、没接上任何描边的端头，"
                   "正是需要人眼定位的东西。",
          tags=("随机游走", "固定种子", "引擎性能问题", "已知缺陷签名")),
     Case("index-repeated-points", "index", "重复点与零长边的折线",
@@ -841,14 +840,16 @@ _CASES: tuple[Case, ...] = (
     Case("adp-arc-overlapping", "adapter", "Arc 超过一整圈（自我重叠）",
          "`Arc(angle=3π)` 画一圈半，后半个圈把前半个圈原路重走一遍——这是自我重叠而不是"
          "自交。实测 stroke 通道报出 175 个事件（其中大量是共线重叠与端点接触噪声），"
-         "并让整条圆弧被切光（RENDER-PATH-FULLY-CUT）；两个 ribbon 后端都跑不完："
-         "超过 60 秒且峰值内存 2.7GB。这是一个很普通会写出来的输入，因此页面必须说出来"
-         "而不是假装它平平无奇。",
+         "并让整条圆弧被切光（RENDER-PATH-FULLY-CUT）；两个 ribbon 后端原本超过 60 秒"
+         "跑不完、峰值内存 2.7GB，现在都能跑完但仍是目录里最慢的一项：boolean 17.7 秒、"
+         "arrangement 8.3 秒，比第二名贵一个数量级。这是一个很普通会写出来的输入，"
+         "因此页面必须说出来而不是假装它平平无奇。",
          "manim", _adapter_arc_overlapping, offset=0.1,
          omitted=(
-             ("boolean", "实测 solve >60 秒未完成、峰值内存 2.7GB（同一输入 stroke 1.1s 出 175 个事件），"
-                         "属引擎侧性能问题，本轮不纳入"),
-             ("arrangement", "实测 solve >60 秒未完成（同 boolean 的输入），属引擎侧性能问题，本轮不纳入"),
+             ("boolean", "实测 solve 17.7 秒（同一输入 stroke 1.1s 出 175 个事件），仍是目录里"
+                         "最贵的一项，属引擎侧性能问题，本轮不纳入"),
+             ("arrangement", "实测 solve 8.3 秒（同 boolean 的输入，比 boolean 快但仍是第二贵），"
+                             "属引擎侧性能问题，本轮不纳入"),
          ),
          expect_min_crossings=150,
          expect_any_diagnostics=("RENDER-PATH-FULLY-CUT",),
@@ -933,15 +934,16 @@ _CASES: tuple[Case, ...] = (
          tags=("玫瑰线", "历史缺陷配置")),
     Case("ros-n10-pa-l12-o05", "rosette", "n=10 PA 阶 1+2（细丝带 offset 0.05）",
          "与第一张同源同解，只把半宽减半：透镜整个落在被压丝带内部。这一张是本轮查出的"
-         "真实缺陷：boolean 后端报 painted_area 37.702956，而它自己 161 个区域的面积之和只有 "
-         "10.183419、分段并集 10.594701、整条丝带并集 10.183419，arrangement 后端在同一输入上"
-         "给出 10.183419。painted_area 比它自己的区域之和还大 3.7 倍是数学上不可能的，"
-         "而引擎的自检只查 painted < 参考面积，所以它不会报 REGION-AREA-MISMATCH——"
-         "一个静默的错误数字。",
+         "真实缺陷，现已修复：boolean 后端曾报 painted_area 37.702956，而它自己 161 个区域的"
+         "面积之和只有 10.183419——比自身之和还大 3.7 倍，数学上不可能，而当时的自检只查 "
+         "painted < 参考面积，所以它从不报 REGION-AREA-MISMATCH，是个静默的错误数字。"
+         "现在两个后端都是 painted_area = union_area = region_area_sum = 10.183419，"
+         "并且 render_region_geometry 补上了反向自检（并集不可能大于各部件面积之和），"
+         "再出现这种数会自己报出来，而不是等审查页面去查。",
          "paths", lambda: _rosette_source(10, (1, 2), "PA"), offset=0.05,
          expect_crossings=70,
-         look_for="薄丝带下切口是否仍然守恒；两个 ribbon 通道的账目数字对不上，"
-                  "而这一档的画面本身看不出问题——错的是面积那本账，不是图。"
+         look_for="薄丝带下切口是否仍然守恒；这一档的画面看不出问题，"
+                  "错的是面积那本账而不是图——账已对上，图对不对仍要人眼看。"
                   "这正是两层都要有的理由：程序查账、人眼看图，各自能发现对方看不见的东西。",
          tags=("玫瑰线", "细丝带", "面积记账缺陷")),
     Case("ros-n5-ca-l2-o12", "rosette", "n=5 CA 阶 2（offset 0.12，已知退化）",

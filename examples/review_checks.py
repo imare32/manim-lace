@@ -486,11 +486,15 @@ def region_invariants(result: Any, *, backend: str = "boolean") -> list[Check]:
     ))
     # A union can never be larger than the sum of its parts, and this needs no geometry at
     # all: it is arithmetic on two numbers the engine already computed. That is what makes
-    # it the right check for a *silent* accounting error — on the thin-ribbon rosette the
-    # Boolean backend reports ``painted_area`` 37.702956 while its own 161 regions add up to
-    # 10.183419, and the engine's guard only looks for ``painted < reference``, so it never
-    # notices. A recomputed union would find the same thing but is O(n²) with the engine's
-    # verified-union routine, which is why it is kept for small inputs only.
+    # it the right check for a *silent* accounting error. It is the check that found one: on
+    # the thin-ribbon rosette the Boolean backend reported ``painted_area`` 37.702956 while
+    # its own 161 regions added up to 10.183419, and the engine's guard at the time only
+    # looked for ``painted < reference``, so it never noticed. The engine now holds the same
+    # bound itself (``render_region_geometry``) and corrects the number when it is violated;
+    # this check stays because a second, independent reading of the same invariant is the
+    # whole point of auditing. A recomputed union would find the same thing but is O(n²)
+    # with the engine's verified-union routine, which is why it is kept for small inputs
+    # only.
     inflated = painted - region_sum
     checks.append(Check(
         "region.painted_le_sum", "可见面积不超过区域面积之和",
