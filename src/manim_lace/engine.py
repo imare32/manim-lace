@@ -9,6 +9,7 @@ import numpy as np
 
 from .animation.trace import TraceRecorder
 from .diagnostics import Diagnostic, Severity
+from .geometry.implicit import sample_implicit
 from .geometry.intersections import CandidateStrategy, detect_crossings
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import (
@@ -46,6 +47,18 @@ class TraceCollector:
 
     def topology_callback(self, kind: str, data: dict[str, Any]) -> None:
         self.topology_events.append((kind, data))
+
+
+def _severity_from(value: str) -> Severity:
+    """Map a sampler's reported severity onto the diagnostic enum, defaulting to INFO.
+
+    An unknown spelling is deliberately not an error: a sampler that reports a severity the
+    engine does not know should still get its message out, at the mildest level.
+    """
+    try:
+        return Severity(value)
+    except ValueError:
+        return Severity.INFO
 
 
 class LaceEngine:
@@ -293,6 +306,49 @@ class LaceEngine:
         )
         return cls(paths, offset=offset, sampling_trace=summaries, **kwargs)
 
+    @classmethod
+    def from_implicit(
+        cls,
+        func: Callable[..., Any],
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+        *,
+        level: float = 0.0,
+        offset: float = 0.1,
+        resolution: tuple[int, int] = (96, 96),
+        max_error: float = 1e-3,
+        max_refine_passes: int = 4,
+        max_resolution: tuple[int, int] = (768, 768),
+        orientation: str = "gradient",
+        object_label: str | None = None,
+        **kwargs: object,
+    ) -> LaceEngine:
+        """Solve ``F(x, y) = level`` directly, without a Manim vector object (SPEC FR-008).
+
+        The contour is extracted by the independent isocontour sampler; each connected
+        branch becomes one path, so a level set with several components enters the weave as
+        several strands. See :func:`~manim_lace.geometry.implicit.sample_implicit` for the
+        error control, the branch provenance recorded per path, and the orientation rules.
+        """
+        summaries: list[dict[str, Any]] = []
+        paths = sample_implicit(
+            func, x_range, y_range, level=level, resolution=resolution,
+            max_error=max_error, max_refine_passes=max_refine_passes,
+            max_resolution=max_resolution, orientation=orientation,
+            object_label=object_label, subdivision_tracer=summaries.append,
+        )
+        if not paths:
+            # An empty level set is a real answer, but an engine with no paths cannot be
+            # solved; say why instead of letting the constructor report "at least one path
+            # is required", which would leave the caller guessing about their own function.
+            reported = summaries[0].get("diagnostics", ()) if summaries else ()
+            reason = str(reported[0]["message"]) if reported else ""
+            raise ValueError(
+                f"F(x, y) = {level} 在 x∈{x_range}、y∈{y_range} 内没有等值线，"
+                f"因此没有可编织的路径。{reason}"
+            )
+        return cls(paths, offset=offset, sampling_trace=summaries, **kwargs)
+
     def trace_sampled_path_ids(self, summary: dict[str, Any]) -> tuple[str, ...]:
         """The paths a subdivision summary produced, in path order.
 
@@ -309,6 +365,29 @@ class LaceEngine:
 
     def solve(self) -> LaceResult:
         trace = TraceRecorder()
+        # Diagnostics an input sampler reports through its summary (an implicit contour whose
+        # error target could not be met, a level that was never crossed, an ambiguous saddle
+        # resolved by rule). They belong to the input stage, so they are collected here and
+        # carried into the result as real ``Diagnostic`` objects: a warning that only exists
+        # in the trace payload is a warning nobody sees.
+        sampling_diagnostics: list[Diagnostic] = []
+        for summary in self.sampling_trace:
+            for reported in summary.get("diagnostics", ()):
+                diagnostic = Diagnostic(
+                    code=str(reported.get("code", "INPUT-UNKNOWN")),
+                    severity=_severity_from(str(reported.get("severity", "info"))),
+                    message=str(reported.get("message", "")),
+                    path_ids=self.trace_sampled_path_ids(summary),
+                    hints=tuple(str(hint) for hint in reported.get("hints", ()) or ()),
+                    details=dict(reported.get("details", {}) or {}),
+                )
+                sampling_diagnostics.append(diagnostic)
+                trace.emit(
+                    "diagnostics", "diagnostic", diagnostic.message,
+                    object_ids=diagnostic.path_ids,
+                    data={"code": diagnostic.code, "severity": diagnostic.severity.value,
+                          "details": diagnostic.details, "hints": diagnostic.hints},
+                )
         for summary in self.sampling_trace:
             trace.emit(
                 "input", "sampling.subdivision",
@@ -483,7 +562,12 @@ class LaceEngine:
             crossings=detected.crossings,
             topology=topology,
             pieces=output,
-            diagnostics=[*detected.diagnostics, *topology.diagnostics, *render_diagnostics],
+            diagnostics=[
+                *sampling_diagnostics,
+                *detected.diagnostics,
+                *topology.diagnostics,
+                *render_diagnostics,
+            ],
             trace=trace.events,
             render_mode=self.render_mode,
             detection_stats=detected.stats,

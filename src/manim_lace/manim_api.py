@@ -314,6 +314,51 @@ class Lace(VGroup):
         )
         return cls._from_engine(engine, render=render, style=style)
 
+    @classmethod
+    def from_implicit(
+        cls,
+        func: Any,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+        *,
+        level: float = 0.0,
+        offset: float = 0.1,
+        **kwargs: Any,
+    ) -> Lace:
+        """Create a Manim VGroup directly from ``F(x, y) = level`` (SPEC FR-008).
+
+        No ``ImplicitFunction`` object is needed: the isocontour sampler extracts the curve
+        itself, and each connected branch of the level set becomes its own strand. Geometry
+        options are forwarded to ``LaceEngine.from_implicit`` (``resolution``, ``max_error``,
+        ``orientation``, ...); style options are consumed by this wrapper as usual.
+        """
+        style = _pop_style(kwargs)
+        render = _pop_render(kwargs)
+        engine = LaceEngine.from_implicit(
+            func, x_range, y_range, level=level, offset=offset, render_mode=render, **kwargs
+        )
+        return cls._from_engine(engine, render=render, style=style)
+
+    @classmethod
+    def from_paths(cls, paths: Any, *, offset: float = 0.1, **kwargs: Any) -> Lace:
+        """Create a Manim VGroup from already-normalized polylines or coordinate arrays.
+
+        Every entry may be a :class:`~manim_lace.model.PolylinePath` — so its closed
+        state, source metadata, source parameters and optional source-curve probe are
+        kept — or an ``(N, 2)``/``(N, 3)`` array, which becomes an open path. Unlike
+        ``Lace(source)`` this does not run the Manim extraction adapter, so it is the
+        entry point for geometry that was never a Manim object (benchmark sets, test
+        fixtures, captured traced paths). The output layers are the same as for any
+        other ``Lace``.
+
+        Geometry options go to :class:`~manim_lace.engine.LaceEngine`; style options
+        (``stroke_color``, ``stroke_width_px``, ``palette``, ...) are consumed here.
+        """
+        style = _pop_style(kwargs)
+        render = _pop_render(kwargs)
+        engine = LaceEngine(paths, offset=offset, render_mode=render, **kwargs)
+        return cls._from_engine(engine, render=render, style=style)
+
     def as_mobject(self) -> Lace:
         return self
 

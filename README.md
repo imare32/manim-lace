@@ -32,7 +32,7 @@
 | 可视化线宽 | 已实现像素对齐换算：`px_to_stroke_width` / `px_to_units`（`render/pixels.py`）在目标输出分辨率和 Manim 画幅高度之间转换，`Lace` 的 `stroke_width_px` 参数直接以输出像素指定线宽；未指定时仍用 `max(1.0, 200.0 * offset)` 启发式 |
 | 实体 Ribbon、多边形面域与孔洞 | 已实现两套后端（`ribbon_backend`）：`boolean` 用受验证的布尔几何按"该交叉局部"交集精确切除，**自交同样按局部交集切被压的那一遍**；`arrangement` 走**平面剖分**——把丝带边界（含自交分段边界）noding 后 `polygonize` 出全部面，逐面判定归属，因此区域**永不重叠**、共点交叉也能守恒。两者输出同样的 `RibbonRegion`/`RegionRing`（带 role、外环逆时针、孔洞顺时针）与面积核对 |
 | 美学策略（M6） | 已实现：`manim_lace.style` 提供可插拔调色板（56 色和色色卡 + 7 套配色）、path/piece/layer/degree 分组、边框设计、切口端处理（覆盖余量 + 真实端头轮廓）与密度感知的视觉简化；样式不改变拓扑（`apply_style` 只读结果），密度简化只影响"画哪些片段"且逐条上报 |
-| 隐式方程直接等值线提取 | 未实现；可先传入 Manim `ImplicitFunction` 的矢量对象 |
+| 隐式方程直接等值线提取 | 已实现（FR-008）：`sample_implicit` / `LaceEngine.from_implicit` / `Lace.from_implicit` 直接对 `F(x,y)=level` 做 marching squares，**多连通分支各成一条路径**并在 `source.metadata` 记录分支来源（level、网格、分支序号、残差、朝向规则与结果）。误差是**实测**的：每遍用 `|F−level|/|∇F|`（世界单位）估几何误差，超目标就按 `max_resolution`/`max_refine_passes` 加密并再测；鞍点由双线性中心值裁决并计数。两件做不到的事有明确信号：自触水平集的交点会丢失（八字结点、十字原点，见下文），极点会被插值造出假等值线（残差永远达不到目标，`GEOM-IMPLICIT-ERROR-TARGET-MISSED` 点名超标分支） |
 | 鲁棒多线共点分解 | 未实现；当前只能识别并诊断多线共点，不做唯一穿插顺序推断 |
 
 ## 安装
@@ -172,6 +172,34 @@ result = engine.solve()
 ```
 
 显式函数使用 `LaceEngine.from_graph(lambda x: np.sin(x), (-4, 4), ...)`。函数在不连续点附近时，优先显式传入 `breakpoints`；`jump_threshold` 只能作为用户可控的启发式断线规则，不保证自动识别所有奇点。
+
+隐式曲线用 `sample_implicit` / `LaceEngine.from_implicit` / `Lace.from_implicit` 直接从方程取，不需要 `ImplicitFunction` 对象：
+
+```python
+from manim_lace import Lace, LaceEngine, sample_implicit
+
+# 一个水平集的两个连通分支 → 两条独立股线；分支来源记在每条路径的 source.metadata 里
+paths = sample_implicit(lambda x, y: (x*x + y*y - 1.0) * (x*x + y*y - 4.0),
+                        (-3, 3), (-3, 3), max_error=1e-3, orientation="gradient")
+engine = LaceEngine.from_implicit(lambda x, y: x*x + y*y - 1.0, (-2, 2), (-2, 2), offset=0.08)
+lace = Lace.from_implicit(lambda x, y: (x*x+y*y)**2 - (x*x - y*y), (-1.5, 1.5), (-1, 1),
+                          offset=0.05, palette="natsu")
+```
+
+`level` 默认 0（即 `F(x,y)=0` 的写法），`resolution` 是起始网格、`max_error` 是**世界单位**的目标几何误差（每遍实测 `|F−level|/|∇F|`，超目标就加密后重测，`max_refine_passes=0` 表示只跑一遍）、`orientation` 取 `"gradient"`（默认，把 `F<level` 一侧放在左侧）/`"ccw"`/`"none"`。点过界或目标达不到不会静默：区间内没有等值线时引擎抛错并说明原因，残差超标时 `GEOM-IMPLICIT-ERROR-TARGET-MISSED` 会点名是哪些分支。
+
+已经拿到规范化折线（基准集、测试夹具、回溯出来的轨迹路径）时，用 `Lace.from_paths` 直接进渲染层，不经过 Manim 提取适配器：
+
+```python
+from manim_lace import Lace
+
+lace = Lace.from_paths(
+    [np.array([[-2.0, -1.0], [2.0, 1.0]]), np.array([[-2.0, 1.0], [2.0, -1.0]])],
+    offset=0.14, render="ribbon", ribbon_backend="arrangement", palette="natsu",
+)
+```
+
+每一项可以是 `PolylinePath`（闭合状态、来源元数据、参数映射与来源曲线探针都会保留）或 `(N, 2)`/`(N, 3)` 数组（按开放路径处理）；几何参数转给 `LaceEngine`，样式参数由门面消费，输出图层与其它入口完全一致。人工审查页面（见下）就是靠它把纯几何的测试图形送进真实 Manim 渲染通道的。
 
 ## Manim 场景示例
 
@@ -338,6 +366,27 @@ python examples/build_gallery.py -q l            # 更小更快的渲染
 
 实现方式：脚本用探针记录每个场景 `construct` 期间真正创建的 `Lace`（`play`/`wait`/`add` 被替换为空操作，因此数据采集与渲染是两件事），所以交叉数、可见区域数、面积核算、诊断、配色选择、密度省略数、trace 事件统计全部来自对象本身；编织图案的文案取自 `scene_gallery.GALLERY` 里的 `GalleryEntry`，与场景共用同一处定义。这也是它立刻暴露出两处**内容不实**的原因：四圆格栅原本是四个外切圆（0 交叉），五角星原本不自交——现在两者都是真的编织。
 
+## 人工审查页面：程序判定 + 人眼过一遍
+
+状态画廊展示的是"项目做出来的图案"；`media/review/index.html` 审查的是**测试与基准用的那些图形**，每个案例并排五个面板：**原始输入（中心线 + 检出交叉）** → stroke → ribbon(boolean) → ribbon(arrangement) → 编织结果（交叉编号）。第一个面板是引擎拿到的几何本身，没有它就没法把"引擎看错了几何"和"引擎织错了"分开。它存在的理由是：程序判定只能抓住它被写出来要抓的东西，所以每一格除了读数还必须有人签一次字，而"程序全通过、人眼有问题"的那些格子正是检查还缺的那类断言。
+
+```bash
+python examples/build_review.py                    # 渲染全部案例 + 写页面（默认 720p）
+python examples/build_review.py --probe            # 只测量不渲染，打印逐案例读数表
+python examples/build_review.py --category rosette # 只做一类
+python examples/build_review.py --cases deg-bow    # 只做一个案例
+python examples/build_review.py --no-render        # 复用媒体，只重算判定与页面
+python examples/build_review.py --verdicts docs/review-verdicts.json   # 载入上一轮人审
+```
+
+案例目录在 `examples/review_catalog.py`（六类：SPEC §10.2 基准集、`tests/test_index.py` 的九个索引场景、退化与特殊事件合成图形、Manim 输入适配层含两个**必须失败**的输入、状态画廊图案、玫瑰线含两个已知退化配置），它同时是页面、探针与测试的唯一来源。每个案例声明自己的预期（交叉数、自交数、必须出现/禁止出现的诊断码），`tests/test_review_catalog.py` 逐条断言，页面则把「目录预期 vs 实测」直接印在卡片上。
+
+程序判定（`examples/review_checks.py`）给出的是可证伪的读数与不变量：按类型分的交叉数、自交数、**交替缺陷**、上下关系来源、精化数、最差 `sinθ`、面积核算（契约是 `painted_area == union_area`；`band_area` 是各丝带面积之**和**，拿它当参考会在每个普通交叉上误报）、环的闭合/简单/朝向、用 Shapely 独立重算的环并集面积、`benchmarks/weave_audit.py` 的三类缺陷签名（多画的线 / 少画的线 / 悬空端头，阈值都是 0）、三通道拓扑一致性（FR-040）、以及每个案例解两次的确定性。求解耗时作为读数一并列出，页面因此也能看出"某个后端在某类输入上意外昂贵"。
+
+人眼这一层：**通过 / 存疑 / 有问题**，十二个缺陷标签多选，备注写在格子里；结论存在浏览器 `localStorage`，可导出 JSON、可导入合并，也可用 `--verdicts` 烧进下一轮页面。工具栏能直接筛到"只看未审核"「只看程序检查失败」「只看程序有警告」「只看『程序通过但人审有问题』」。聚焦模式里 `←`/`→` 逐张（**并保持你当前看的那个通道**，标题旁显示通道名）、`1`/`2`/`3` 判定，**闪烁对照 A/B** 在两个通道之间每 0.5 秒交替，用来找两个后端之间肉眼难辨的上下关系差异。另有 `--no-page`（试渲染某个案例但不改写页面）与 `--probe`（只测量不渲染）。
+
+完整口径、已知会带诊断的案例清单与扩展步骤见 [`docs/REVIEW.md`](docs/REVIEW.md)。
+
 ## 运行测试、lint 与基准
 
 ```bash
@@ -462,7 +511,11 @@ examples/scene_style.py        # 配色、边框、切口端与密度简化画�
 examples/scene_rosette.py      # 星形玫瑰线画廊，并把玫瑰线交给编织器
 examples/rosette.py            # 示例自带的星形玫瑰线几何模块（manim_lace 不导入它）
 examples/build_gallery.py      # 渲染上述场景并生成 media/gallery/index.html 状态画廊
+examples/review_catalog.py     # 人工审查案例目录（六类，页面/探针/测试的唯一来源）
+examples/review_checks.py      # 程序判定：事实读数与不变量（不依赖 Manim）
+examples/build_review.py       # 渲染审查媒体并生成 media/review/index.html 审查页面
 media/gallery/                 # 生成物：状态画廊页面 + 静帧 + 两段动画视频（media/ 不入库）
+media/review/                  # 生成物：审查页面 + 每案例三通道静帧 + 标注图（media/ 不入库）
 ```
 
 运行基准（会打印剪枝比、耗时与事件指纹，并在两套候选策略不一致时返回非零退出码）：

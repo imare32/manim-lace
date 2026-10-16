@@ -171,10 +171,28 @@ def dangling_ends(regions):
     A stroke may end where it meets another stroke (a T-junction or a corner) or on the
     silhouette; if it ends anywhere else — both sides painted, nothing to join — the line
     just stops in the middle of the strand, which is what a reader sees as a stray mark
-    (``docs/ROSETTE_RIBBON_OUTLINE_TICKS.md`` §9). Measured on the `n = 7` CA card: 4 on
-    the Boolean panel, 0 on the arrangement's. Joining is judged at 1e-4: strands that
+    (``docs/ROSETTE_RIBBON_OUTLINE_TICKS.md`` §9). Joining is judged at 1e-4: strands that
     meet to within a hair of each other read as joined (the Boolean's own cuts can leave
     that much), while a stroke that stops in open fill is 0.01 and up away from anything.
+    One entry per *visual* end: the two regions a boundary separates each stroke it, so the
+    same end arrives twice and is counted once (``spec-self-intersecting``: 47 stroke ends
+    on the Boolean panel are 24 a reader can see).
+
+    "Two strokes meet here" is *not* enough to call an end joined. Two regions that share a
+    boundary both stroke the same segment, so at such a vertex the only other stroke leaves
+    in the *same* direction: that is one line ending, not a junction. The rule that excused
+    it — any second stroke at the vertex meant "joined" — hid the class the human review
+    found by eye, on ``spec-self-intersecting``: the arrangement backend's arm stops at
+    ``(0.6472, 0.0530)``, in the middle of the ribbon, because its continuation is a section
+    seam. An end is joined only if some other stroke leaves the vertex in a direction of its
+    own — the continuation of the line, a corner, or a T-junction — or if a stroke passes
+    *through* the vertex without ending there.
+
+    A stroke a later fill paints over is not reported either: the strand it belongs to is
+    under everything there, so the end reads as nothing at all. With that filter and the
+    one-per-end count together, the `n = 7` CA card reports 0 on both panels where the first
+    version reported 4 on the Boolean's, and the `n = 5` CA card's Boolean panel 17 where it
+    reported 28.
     """
     from shapely.strtree import STRtree
 
@@ -185,13 +203,21 @@ def dangling_ends(regions):
         )
         for region in regions
     }
-    fill_tree = STRtree(list(fills.values()))
-    fill_ids = list(fills)
+    ordered = sorted(regions, key=lambda region: (region.draw_index, region.region_id))
+    index_of = {region.region_id: index for index, region in enumerate(ordered)}
+    order_tree = STRtree([fills[region.region_id] for region in ordered])
 
-    def covered(point):
-        return any(
-            fills[fill_ids[index]].intersects(point) for index in fill_tree.query(point)
-        )
+    def topmost(point):
+        """Index in ``ordered`` of the last-painted region that covers ``point``, or None.
+
+        Asked region by region, like ``mark_flush_edges`` does: the overlay engine can drop
+        a part that only touches its neighbours along an edge.
+        """
+        best = None
+        for index in order_tree.query(point):
+            if fills[ordered[index].region_id].intersects(point) and (best is None or index > best):
+                best = index
+        return best
 
     strokes: list[tuple[str, int, np.ndarray, np.ndarray]] = []
     for region in regions:
@@ -212,12 +238,21 @@ def dangling_ends(regions):
             key = (round(float(vertex[0]), 9), round(float(vertex[1]), 9))
             endings.setdefault(key, []).append(position)
 
+    def outward(position: int, vertex: np.ndarray) -> np.ndarray | None:
+        """The direction the stroke leaves ``vertex`` in, or None for a null edge."""
+        _, _, start, end = strokes[position]
+        start_distance = float(np.hypot(*(np.asarray(start) - vertex)))
+        end_distance = float(np.hypot(*(np.asarray(end) - vertex)))
+        other = end if end_distance >= start_distance else start
+        span = float(np.hypot(*(np.asarray(other) - vertex)))
+        if span <= 1e-9:
+            return None
+        return (np.asarray(other, dtype=float) - vertex) / span
+
     dangling = []
+    seen: set[tuple[float, float]] = set()
     for key, owners in endings.items():
         vertex = np.array(key)
-        if len(owners) >= 2:
-            continue  # two strokes meet here
-        owner = owners[0]
         point = Point(*vertex)
         # The stroke's own line runs through its end, so it must not count as the
         # neighbour this end joins; the query is buffered because a bare point query is
@@ -225,26 +260,45 @@ def dangling_ends(regions):
         # can be outside the box of a point that is not exactly on it.
         candidates = (
             [] if stroke_tree is None
-            else [index for index in stroke_tree.query(point.buffer(1e-4)) if index != owner]
+            else [index for index in stroke_tree.query(point.buffer(1e-4)) if index not in owners]
         )
+        # A stroke that passes through without ending here carries the boundary on, whatever
+        # direction it runs in.
         if any(float(lines[index].distance(point)) <= 1e-4 for index in candidates):
-            continue  # lands in (or a hair away from) another stroke
-        _, _, start, end = strokes[owner]
-        other = (
-            end
-            if float(np.hypot(*(np.asarray(end) - vertex)))
-            < float(np.hypot(*(np.asarray(start) - vertex)))
-            else start
-        )
-        direction = np.asarray(vertex) - np.asarray(other)
-        direction = direction / float(np.linalg.norm(direction))
-        normal = np.array([-direction[1], direction[0]])
-        if not (
-            covered(Point(*(vertex + normal * 2e-4)))
-            and covered(Point(*(vertex - normal * 2e-4)))
-        ):
-            continue  # ends on the ribbon's outline
-        dangling.append((strokes[owner][0], float(vertex[0]), float(vertex[1])))
+            continue
+        for owner in owners:
+            direction = outward(owner, vertex)
+            if direction is None:
+                continue
+            # Another stroke leaving this vertex in a direction of its own is a join: the
+            # reverse of this one continues the line, any other angle is a corner or a T.
+            # A stroke leaving in the *same* direction is the same line drawn twice.
+            joined = False
+            for other in owners:
+                if other == owner:
+                    continue
+                other_direction = outward(other, vertex)
+                if other_direction is not None and float(np.dot(direction, other_direction)) <= 0.999:
+                    joined = True
+                    break
+            if joined:
+                continue
+            normal = np.array([-direction[1], direction[0]])
+            outer = topmost(Point(*(vertex + normal * 2e-4)))
+            inner = topmost(Point(*(vertex - normal * 2e-4)))
+            if outer is None or inner is None:
+                continue  # ends on the ribbon's outline
+            # A stroke a later fill paints over is invisible: the strand it belongs to is
+            # under everything there, so the end reads as nothing at all. Only the ends a
+            # reader can see are defects, and the arm of a weave notch is visible on its own
+            # side of the line (the over pass covers the other side).
+            our_index = index_of[strokes[owner][0]]
+            if min(outer, inner) > our_index:
+                continue  # buried under a later strand
+            if key in seen:
+                continue  # the same visual end, drawn twice by the two regions it separates
+            seen.add(key)
+            dangling.append((strokes[owner][0], float(vertex[0]), float(vertex[1])))
     return dangling
 
 

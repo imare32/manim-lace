@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from .animation.plan import ANIMATION_MODES, DEFAULT_STAGE_DURATIONS, DEFAULT_STAGE_MODES
 from .diagnostics import Diagnostic, InputPathError, LaceError, Severity, WeaveConflictError
 from .engine import LaceEngine, TraceCollector
+from .geometry.implicit import ORIENTATION_RULES, sample_implicit
 from .geometry.sampling import sample_graph, sample_parametric
 from .model import (
     CapStyle,
@@ -91,6 +92,7 @@ __all__ = [
     "LaceEngine",
     "LaceError",
     "LaceResult",
+    "ORIENTATION_RULES",
     "PALETTES",
     "Palette",
     "Pass",
@@ -117,6 +119,7 @@ __all__ = [
     "px_to_units",
     "register_palette",
     "sample_graph",
+    "sample_implicit",
     "sample_parametric",
     "simplify_for_density",
     "stroke_piece_outline",
