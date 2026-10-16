@@ -409,8 +409,24 @@ def detect_crossings(
             if np.linalg.norm(np.asarray(prior.point) - np.asarray(hit.point)) > position_tol * 4:
                 continue
             path_i, path_j = paths[hit.path_i], paths[hit.path_j]
-            if _arc_distance(prior.s_i, hit.s_i, path_i.length, path_i.closed) <= position_tol * 8 and \
-               _arc_distance(prior.s_j, hit.s_j, path_j.length, path_j.closed) <= position_tol * 8:
+            aligned = (
+                _arc_distance(prior.s_i, hit.s_i, path_i.length, path_i.closed) <= position_tol * 8
+                and _arc_distance(prior.s_j, hit.s_j, path_j.length, path_j.closed) <= position_tol * 8
+            )
+            # The two arcs of a self-crossing are interchangeable, and the seam of a closed
+            # path makes them *swap roles* between two reports of the same crossing: the
+            # seam point is arc 0 to one report and arc ``length`` to the other. On
+            # ``spec-self-intersecting`` (closed, length 27.2169) the pair (0.0, 6.7335) and
+            # the pair (6.7335, 27.2169) are one crossing reported twice, not two crossings
+            # that happen to share a point — and treating them as two made the engine cut
+            # the under pass twice and decide the over/under relation twice at one place,
+            # which is what left the notch arm 0.0216 short of its continuation.
+            swapped = (
+                path_i is path_j
+                and _arc_distance(prior.s_i, hit.s_j, path_i.length, path_i.closed) <= position_tol * 8
+                and _arc_distance(prior.s_j, hit.s_i, path_j.length, path_j.closed) <= position_tol * 8
+            )
+            if aligned or swapped:
                 duplicate = True
                 break
         if not duplicate:

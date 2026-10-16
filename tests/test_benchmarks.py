@@ -11,7 +11,9 @@ from manim_lace.geometry.intersections import detect_crossings
 GOLDEN_DIGESTS = {
     "simple": "11b968e3d73b7dfb8af48527f9e1f176d598bf31",  # 9 crossings
     "dense_smooth": "20398e1e88ca05ae7701cd67da41e643992ea82f",  # 2 crossings
-    "self_intersecting": "e12ac7be9b4d8d4ae5acaba8243315eecf2c297d",  # 32 crossings
+    # 32 -> 31 crossings: the Lissajous is closed and one of its self-crossings sits on the
+    # seam, which used to be reported as two events (see geometry/intersections.py).
+    "self_intersecting": "7c7c64fc0ff93ce334f0c6dcc31c2a78a3840031",  # 31 crossings
     "path_network": "097e5dccf04ea6bfb8815cd79307b44e616f1de6",  # 196 crossings
 }
 

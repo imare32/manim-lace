@@ -592,23 +592,27 @@ _CASES: tuple[Case, ...] = (
          tags=("密采样", "剪枝")),
     Case("spec-self-intersecting", "spec", "大量自交曲线（Lissajous 5:4）",
          "SPEC §10.2 第三类：1501 点的 Lissajous 曲线，同一交点被经过两次。"
-         "实测 32 个交叉全部是自交，严格交替在这条曲线上无法全程成立（14 处被放宽、"
-         "28 处逐次同侧），三个通道的分配完全一致。这条曲线还**在同一坐标上被经过三次**"
-         "（弧长参数 0.00、6.73、27.22），引擎在那里记录了两个交叉事件"
-         "（X0000 配 0.00/6.73，X0015 配 6.73/27.22），两处的透镜因此互相重叠；"
-         "boolean 后端如实报 REGION-COINCIDENT-CROSSINGS / REGION-DRAW-ORDER-CYCLE，"
-         "这是该后端的已知降级（arrangement 同输入 0 诊断）。",
+         "实测 31 个交叉全部是自交，严格交替**可以全程成立**（0 处放宽、0 处逐次同侧），"
+         "三个通道的分配完全一致。这条曲线在同一坐标上被经过两次：弧长 0.00 与 27.22 是"
+         "**闭合路径接缝上的同一个位置**，与 6.73 相交——那里本来只是一个交叉。引擎曾按"
+         "接缝两侧各报一次、把它当成两个交叉事件（X0000 配 0.00/6.73、X0015 配 6.73/27.22），"
+         "于是凭空多出一个共点交叉和一条无法满足的交替约束（14 处被放宽、28 处逐次同侧，"
+         "并报出 REGION-COINCIDENT-CROSSINGS）。交叉去重按弧长取模之后两者合成一个事件，"
+         "这些诊断随之消失，boolean 的未描缺口也从 3 段 / 0.0386 降到 2 段 / 0.0274。",
          "paths", lambda: _benchmark("self_intersecting"), offset=0.08,
-         expect_crossings=32, expect_self_crossings=32,
-         expect_diagnostics=("TOPOLOGY-ALTERNATION-RELAXED", "REGION-COINCIDENT-CROSSINGS"),
+         expect_crossings=31, expect_self_crossings=31,
+         # Pinned as a regression guard: both of these only ever appeared because one
+         # crossing was reported twice at the seam of a closed path.
+         forbid_diagnostics=("TOPOLOGY-ALTERNATION-RELAXED", "REGION-COINCIDENT-CROSSINGS"),
          look_for="自交处两次经过是否各自被正确切分，有没有在丝带中间留下横线或缺口。"
                   "人眼点名过两件事，程序判定现在都能报出来：①boolean 通道四个角交叉处的"
-                  "『V 字形差一点点没有闭合』——3 段缺口从未被描到"
-                  "（audit.notch_gaps 合计 0.0386），缺口两端各是一个描边端头；"
-                  "②arrangement 通道有两处短线『戳进丝带』——两个通道各有 24 个可见的"
-                  "描边端头落在丝带内部（audit.dangling_ends，47/40 条描边去重后的数目），"
-                  "两个后端断在同一批位置上。也就是说这不是某一个后端的错，而是共点交叉处"
-                  "缺口手臂的本性：手臂到那里就断了。",
+                  "『V 字形差一点点没有闭合』——2 段缺口从未被描到"
+                  "（audit.notch_gaps 合计 0.0274），缺口两端各是一个描边端头；"
+                  "②arrangement 通道有两处短线『戳进丝带』——两个通道各有 24 / 26 个可见的"
+                  "描边端头落在丝带内部（audit.dangling_ends，描边去重后的数目）。"
+                  "这两个签名仍在，成因也已经量清楚：断点处的**透镜足迹两侧归同一个所有者**"
+                  "（都是 #15，材质没变），所以那条手臂到头了；要继续它就得让足迹与归属出自"
+                  "同一个对象，见 docs/REVIEW.md「还没解决的：缺口手臂该断在哪」。",
          tags=("自交", "参数曲线", "已知缺陷签名", "共点交叉")),
     Case("spec-network", "spec", "多路径网络（12 竖 + 12 横 + 3 圆）",
          "SPEC §10.2 第四类：27 条路径构成的交叉网络，考验多路径下的去重与归属。",
@@ -689,12 +693,18 @@ _CASES: tuple[Case, ...] = (
          "paths", lambda: _deg_bow(), offset=0.15,
          expect_crossings=1, expect_self_crossings=1, tags=("自交",)),
     Case("deg-figure-eight", "degenerate", "八字（闭合自交）",
-         "一条闭合八字曲线，接缝刻意远离交点。boolean 后端在这条闭合自交路径上会自报共点交叉"
-         "与绘制顺序成环，arrangement 后端同输入 0 诊断——两张图正好对照。",
+         "一条闭合八字曲线，曲线从交点起、又回到交点：那个自交的弧长是 0.00 与 4.71"
+         "（长度 9.429 的一半），也就是**交点正落在闭合接缝上**。这里正是交叉去重最容易漏"
+         "的地方——接缝那一点对一个事件是弧长 0、对另一个是弧长 L，按相同角色比对就会被当成"
+         "两个事件，于是凭空冒出一个共点交叉和一条无法满足的交替约束。实测原来确实如此"
+         "（自报 REGION-COINCIDENT-CROSSINGS 与 REGION-DRAW-ORDER-CYCLE）；按弧长取模去重"
+         "之后只剩 1 个交叉、0 诊断，两个后端也不再需要对照。",
          "paths", lambda: _deg_figure_eight(), offset=0.09,
-         expect_min_crossings=1,
-         expect_any_diagnostics=("REGION-COINCIDENT-CROSSINGS", "REGION-DRAW-ORDER-CYCLE"),
-         tags=("自交", "闭合路径")),
+         expect_crossings=1, expect_self_crossings=1,
+         # Regression guard: both of these only ever appeared because the crossing sits on
+         # the seam and was counted twice.
+         forbid_diagnostics=("REGION-COINCIDENT-CROSSINGS", "REGION-DRAW-ORDER-CYCLE"),
+         tags=("自交", "闭合路径", "接缝去重")),
     Case("deg-pentagram", "degenerate", "五角星 {5/2}（5 处自交，严格交替）",
          "沿路径数下去是 10 遍（偶数），所以严格交替可解：五个自交点都应有确定上下关系。",
          "paths", lambda: _deg_pentagram(), offset=0.12,
