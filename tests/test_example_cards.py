@@ -28,6 +28,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+# The gallery scenes under test import Manim at module scope, and ``manim`` is an
+# optional extra: CI installs ``.[dev]`` only, so without this guard collection itself
+# fails instead of the module skipping (same convention as the other optional modules).
+manim = pytest.importorskip("manim")
+
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 if str(EXAMPLES) not in sys.path:
     sys.path.insert(0, str(EXAMPLES))

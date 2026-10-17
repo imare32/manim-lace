@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — CI 的收集阶段不再因为缺少 manim 而整轮中断
+
+- Fix `tests/test_example_cards.py`：它从示例场景（`examples/scene_gallery.py`、
+  `examples/scene_rosette.py`）取卡片构造器，而两者都在模块层 `from manim import *`；
+  该测试模块自己没有守卫，于是 CI（只装 `.[dev]`，没装可选的 `manim` extra）在
+  **收集阶段**就抛 `ModuleNotFoundError: No module named 'manim'`，把整轮 630+ 用例一起打断。
+  按 `tests/test_optional_manim.py` / `test_optional_style_manim.py` 的既有约定补上
+  `pytest.importorskip("manim")`；有 manim 的本地环境照旧全部运行，CI 里则与另外两个模块
+  一样记作 `skipped`。
+
 ## Unreleased — 显式编织边界层：区域无法承载的可见缺口不再断开
 
 - Add experimental `ribbon_backend="hybrid"`：布尔后端继续负责填充、切口和**后画遮挡**；
