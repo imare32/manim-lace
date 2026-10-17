@@ -27,3 +27,8 @@ coverage.xml
 htmlcov/
 
 references/
+
+# 本地运行与工具产物
+.agents/
+logs/
+trace.json
