@@ -600,19 +600,19 @@ _CASES: tuple[Case, ...] = (
          "并报出 REGION-COINCIDENT-CROSSINGS）。交叉去重按弧长取模之后两者合成一个事件，"
          "这些诊断随之消失，boolean 的未描缺口也从 3 段 / 0.0386 降到 2 段 / 0.0274。",
          "paths", lambda: _benchmark("self_intersecting"), offset=0.08,
+         channels=("stroke", "boolean", "arrangement", "hybrid"),
          expect_crossings=31, expect_self_crossings=31,
          # Pinned as a regression guard: both of these only ever appeared because one
          # crossing was reported twice at the seam of a closed path.
          forbid_diagnostics=("TOPOLOGY-ALTERNATION-RELAXED", "REGION-COINCIDENT-CROSSINGS"),
          look_for="自交处两次经过是否各自被正确切分，有没有在丝带中间留下横线或缺口。"
-                  "人眼点名过两件事，程序判定现在都能报出来：①boolean 通道四个角交叉处的"
-                  "『V 字形差一点点没有闭合』——2 段缺口从未被描到"
-                  "（audit.notch_gaps 合计 0.0274），缺口两端各是一个描边端头；"
-                  "②arrangement 通道有两处短线『戳进丝带』——两个通道各有 24 / 26 个可见的"
-                  "描边端头落在丝带内部（audit.dangling_ends，描边去重后的数目）。"
-                  "这两个签名仍在，成因也已经量清楚：断点处的**透镜足迹两侧归同一个所有者**"
-                  "（都是 #15，材质没变），所以那条手臂到头了；要继续它就得让足迹与归属出自"
-                  "同一个对象，见 docs/REVIEW.md「还没解决的：缺口手臂该断在哪」。",
+                  "人眼点名过两类：boolean 的四个角交叉口有『V 字形差一点点没闭合』，"
+                  "arrangement 有长边没有像 boolean 那样被后画填充正确遮挡。"
+                  "新增的 experimental hybrid 通道以 boolean 的遮挡为底，只从 arrangement"
+                  "补入短、共线且接在既有断点上的缺口；它应当既闭合 V 形，又不出现"
+                  "arrangement 的长横线，也不留布尔 overlay 画在自己填充上的 10 个亚像素"
+                  "孤立黑点。与 flush 接缝重合的两条短刺现在由共享的"
+                  "`missing_weave_outlines` 直接判掉，boolean 参考通道上也不再出现。",
          tags=("自交", "参数曲线", "已知缺陷签名", "共点交叉")),
     Case("spec-network", "spec", "多路径网络（12 竖 + 12 横 + 3 圆）",
          "SPEC §10.2 第四类：27 条路径构成的交叉网络，考验多路径下的去重与归属。",
@@ -656,8 +656,8 @@ _CASES: tuple[Case, ...] = (
                                  "REGION-DROPPED-SLIVER", "REGION-LENS-APPROXIMATION",
                                  "REGION-OFF-CROSSING-OVERLAP"),
          look_for="48 处交叉里有大量近切：arrangement 后端报面积不守恒与透镜近似，"
-                  "并有 3 段缺口从未被描到（audit.notch_gaps 合计 0.0507）与 53 个悬空描边端头"
-                  "（audit.dangling_ends）——这两个签名是真实缺陷、需要人眼定位；"
+                  "并有 0 段缺口从未被描到，但仍保留 40 个可见悬空描边端头"
+                  "（audit.dangling_ends）——长切弦残余是真实缺陷、需要人眼定位；"
                   "也看三个通道的上下关系是否一致。",
          tags=("随机游走", "固定种子", "引擎性能问题")),
     Case("index-random-walks-12", "index", "随机游走 12 条（固定种子）",
@@ -669,7 +669,7 @@ _CASES: tuple[Case, ...] = (
                                  "REGION-OFF-CROSSING-OVERLAP"),
          look_for="与 6 条那张对照：交叉更多时各后端的归属与缺口是否仍然自洽。"
                   "实测这一张的 arrangement 通道有一个真实缺陷签名："
-                  "audit.dangling_ends 报出 76 个悬在丝带内部、没接上任何描边的端头，"
+                  "audit.dangling_ends 报出 62 个悬在丝带内部、没接上任何描边的端头，"
                   "正是需要人眼定位的东西。",
          tags=("随机游走", "固定种子", "引擎性能问题", "已知缺陷签名")),
     Case("index-repeated-points", "index", "重复点与零长边的折线",
@@ -744,8 +744,8 @@ _CASES: tuple[Case, ...] = (
          "paths", lambda: _deg_t_junction(), offset=0.14,
          expect_crossings=1,
          expect_diagnostics=("GEOM-ENDPOINT_TOUCH",),
-         look_for="T 型接触处有没有被当成普通交叉切口（默认不该切）；"
-                  "把 event_policy 设成 weave 时同一个输入会真的织起来。",
+         look_for="T 型接触处有没有被当成普通交叉切口（默认不该切）；竖线端头应被横线丝带"
+                  "盖住，不该露出半个带宽的端头；把 event_policy 设成 weave 时同一个输入会真的织起来。",
          tags=("端点接触",)),
     Case("deg-near-tangent", "degenerate", "真近切（sinθ ≤ 1e-7）",
          "两条几乎完全平行的股线在中间相交一次：这是唯一会得到 kind=near_tangent 的构造"
@@ -916,7 +916,8 @@ _CASES: tuple[Case, ...] = (
          "曲线自交点与直线的交点落在同一点：那份卡片声明了 free 模式。",
          "manim", lambda: _gallery("build_infinity"),
          expect_any_diagnostics=("REGION-COINCIDENT-CROSSINGS", "REGION-AREA-MISMATCH"),
-         look_for="共点那一处：两个交叉互相反向扣除会让覆盖面积不守恒，看画面是否真的缺了一块。",
+         look_for="共点那一处：两个交叉互相反向扣除会让覆盖面积不守恒，看画面是否真的缺了一块；"
+                  "arrangement 通道在共点处可能留下一段半明半暗的透镜边（先画的分段描、被后画的盖住一半）。",
          tags=("画廊", "共点交叉", "自交")),
     Case("gal-chain", "gallery", "链条（3 个交错圆）",
          "三个交错排列的圆模拟链环。",
@@ -959,13 +960,20 @@ _CASES: tuple[Case, ...] = (
     Case("ros-n5-ca-l2-o12", "rosette", "n=5 CA 阶 2（offset 0.12，已知退化）",
          "文档承认的共点交叉退化配置：boolean 报共点交叉与面积不平衡，arrangement 报透镜近似。"
          "本轮页面复现出与仓库审计脚本完全相同的数字：boolean 通道 "
-         "audit.notch_gaps 6 段 / 合计 1.4400、audit.dangling_ends 5 处"
+         "audit.dangling_ends 17 处，arrangement 通道 audit.dangling_ends 4 处"
          "（见 CHANGELOG 里 n5 CA L2 o12 那一行）——两边独立得到同一组数字，"
          "说明判定链条是可信的。",
          "paths", lambda: _rosette_source(5, (2,), "CA"), offset=0.12,
+         channels=("stroke", "boolean", "arrangement", "hybrid"),
          expect_any_diagnostics=("REGION-COINCIDENT-CROSSINGS", "REGION-LENS-APPROXIMATION"),
-         look_for="两张 ribbon 图各自错在哪：是缺口、是断头、还是上下关系与另一张不同。"
-                  "这是最需要人眼、程序判不了的一张。",
+         look_for="各 ribbon 图各自错在哪：是缺口、是断头、还是上下关系与另一张不同。"
+                  "这是最需要人眼、程序判不了的一张。"
+                  "hybrid 面板在这里应当和 boolean 完全一致：那 6 条横切口"
+                  "（长度都是 0.24 = 2 * offset，整条横贯丝带）现在由共享的 flush 判据在"
+                  "两个通道上都判掉了，hybrid 自己没有额外要补的（bridge 0、patch 0），"
+                  "摆着它是为了让「判据在两条通道上结果相同」这件事本身可见。"
+                  "注意共点交叉的退化根因（共点归属与面积记账）在这两个面板里都还在，"
+                  "本判据只去掉多余的内部描边，不修退化本身。",
          tags=("玫瑰线", "已知退化", "共点交叉", "已知缺陷签名")),
 
     # --- implicit -----------------------------------------------------------

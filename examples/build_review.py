@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
 import html
 import json
 import shutil
@@ -82,7 +83,7 @@ SCRATCH = ROOT / "media" / "_review_build"
 QUALITY = {"l": "low_quality", "m": "medium_quality", "h": "high_quality", "k": "fourk_quality"}
 PIXEL_HEIGHT = {"l": 480, "m": 720, "h": 1080, "k": 2160}
 
-#: One uniform style for every case, so the three channels are comparable and two cases
+#: One uniform style for every case, so its declared channels are comparable and two cases
 #: can be compared without mentally discounting a colour choice. Strands take a palette
 #: colour per path because the ribbon channels show their cut *only* as a colour change.
 RIBBON_STYLE: dict[str, Any] = {
@@ -120,7 +121,8 @@ RAW_INPUT_PX = 2.4
 def channel_plan(case: Case) -> tuple[tuple[str, str], ...]:
     """``(channel, backend)`` pairs to build for a case.
 
-    ``stroke`` has no ribbon backend; the other two channels name the backend they run.
+    ``stroke`` has no ribbon backend; ribbon channels name the backend they run
+    (``boolean`` / ``arrangement`` / experimental ``hybrid``).
     A case may omit channels it cannot afford (``Case.omitted``), which the page then
     shows explicitly with the measured reason instead of quietly drawing fewer panels.
     """
@@ -535,7 +537,7 @@ def channels_to_render(measurement: CaseMeasurement) -> list[str]:
     if measurement.case.kind == "error" or not measurement.channels:
         return []
     # The raw input comes first: a reviewer reads the row left to right as "what went in →
-    # what the three channels made of it → where the crossings ended up".
+    # what the declared channels made of it → where the crossings ended up".
     channels = ["input", *[channel for channel, _backend in channel_plan(measurement.case)]]
     crossings = next(
         (data["facts"]["crossings"] for data in measurement.channels.values()), 0
@@ -1415,6 +1417,7 @@ def _card_html(measurement: CaseMeasurement, rendered: dict[str, bool], focus_hi
             "stroke": "stroke（中心线切口）",
             "boolean": "ribbon · boolean",
             "arrangement": "ribbon · arrangement",
+            "hybrid": "ribbon · hybrid（实验）",
             "annotate": "编织结果（交叉编号）",
         }[channel]
         shots.append(_shot_html(case, channel, label,
@@ -1760,11 +1763,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     selected = _select_cases(args)
+    # Building many Manim/Cairo mobjects before running the pure NumPy implicit
+    # extractor can leave native state behind that corrupts the later marching-squares
+    # frames (observed as a closure ``cell``, or a ``dict_itemiterator``, reaching a
+    # float comparison; it kills the run at ``imp-pole`` whenever the implicit cases
+    # are measured last).  The page is rebuilt in its declared order below, so only the
+    # execution order changes: measure the self-contained implicit cases first, then
+    # the rest.  ``--no-render`` needs this too -- it still builds every Manim source.
+    processing = list(selected)
+    if not args.probe:
+        processing.sort(key=lambda case: case.category != "implicit")
     started = time.perf_counter()
     measurements: list[CaseMeasurement] = []
     rendered_now = False
     try:
-        for case in selected:
+        for case in processing:
             case_started = time.perf_counter()
             measurement = measure_case(
                 case,
@@ -1787,8 +1800,13 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 rendered_now = True
             print(f"[review] {case.key:28s} {_summary(measurement)}  {elapsed:.1f}s", flush=True)
+            gc.collect()
     finally:
         shutil.rmtree(SCRATCH, ignore_errors=True)
+
+    if not args.probe:
+        by_key = {measurement.case.key: measurement for measurement in measurements}
+        measurements = [by_key[case.key] for case in selected]
 
     if args.probe:
         _print_probe_summary(measurements, time.perf_counter() - started)

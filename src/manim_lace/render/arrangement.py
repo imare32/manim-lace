@@ -18,7 +18,10 @@ The consequences are the ones a planar embedding is supposed to have:
 
 What is left to decide rather than compute is reported: a face covered by strands that do
 not cross there (parallel overlap), or by crossings whose assignments contradict each
-other at the same point, is resolved deterministically by the path order and reported as
+other at the same point, is resolved deterministically by the same painter order the
+Boolean backend uses — the strand painted last owns the face — except at a diagnosed
+endpoint contact, where the strand that ends there yields to the one it ends on
+(``diagnosed_contact_yields``). Both outcomes are reported as
 ``REGION-CONFLICTING-OVERLAP`` / ``REGION-OFF-CROSSING-OVERLAP``.
 
 Shapely is imported inside the entry point, so the core stays importable without the
@@ -50,7 +53,9 @@ from .regions import (
     _StripBuilder,
     build_bands,
     build_sections,
+    diagnosed_contact_yields,
     mark_flush_edges,
+    missing_weave_outlines,
 )
 
 __all__ = ["render_arrangement_regions"]
@@ -226,7 +231,7 @@ def render_arrangement_regions(
     # Congestion is reported but, unlike in the Boolean backend, it cannot change the
     # result here: ownership is decided per face instead of by paint order.
     layers, congested = paint_order([path.path_id for path in paths], path_edges)
-
+    path_position = {path.path_id: index for index, path in enumerate(paths)}
     # The lens of a crossing is the local footprint of the over ribbon; a face inside it
     # is owned by the strand on top, which is exactly what the assignment says. A
     # self-crossing has no second path to name, so the over side is named by its sections
@@ -234,6 +239,7 @@ def render_arrangement_regions(
     # section sorts first can give it to the under pass, which reverses the weave there
     # and strokes the notch on the ribbon that is supposed to be on top.
     lenses: dict[str, Any | None] = {}
+    lens_over: dict[str, Any | None] = {}
     over_sections_of: dict[str, tuple[str, ...]] = {}
     over_path_of: dict[str, str] = {}
     approximated = 0
@@ -272,17 +278,41 @@ def render_arrangement_regions(
             if lens is not None and abs(float(lens.area) - expected) > 0.1 * expected:
                 approximated += 1
             lenses[crossing.crossing_id] = lens
+            lens_over[crossing.crossing_id] = strips[1]
             continue
         first, second = bands.get(under), bands.get(over)
         lenses[crossing.crossing_id] = (
             _local_lens(first, second, crossing.point, Point)
             if first is not None and second is not None else None
         )
+        lens_over[crossing.crossing_id] = second
+
+    # Crossings that share their point form a coincident node: their lenses overlap, so
+    # no per-face decision can be a decided weave there. Reported instead of hidden; the
+    # lens side a self-crossing leaves between two sections of one path is stroked by the
+    # section painted first only, so it reads like the cutting backend's (see
+    # ``mark_flush_edges``'s ``hide_later_same_path_lens``).
+    coincident: dict[tuple[float, float], list[str]] = {}
+    for crossing in weavable:
+        key = (round(float(crossing.point[0]), 9), round(float(crossing.point[1]), 9))
+        coincident.setdefault(key, []).append(crossing.crossing_id)
+    coincident_groups = [ids for ids in coincident.values() if len(ids) > 1]
+    coincident_ids = {crossing_id for ids in coincident_groups for crossing_id in ids}
 
     union_area = _covered_area(list(bands.values()))
     tolerance = max(area_tolerance * max(union_area, 1.0), 1e-18)
     cells, slivers, cell_stats = _cells(node_band, LineString, polygonize, unary_union, tolerance)
 
+    # At a diagnosed endpoint contact nothing is woven and nothing is cut, so the two
+    # bands overlap there; the face has to go to one of them. The strand that ends
+    # there yields, otherwise its cap is the face and the through ribbon is bitten
+    # out around it — the same defect the Boolean backend shows in paint order.
+    yielding_paths = {
+        (ending, through)
+        for ending, _ending_arc, through, _through_arc in diagnosed_contact_yields(
+            paths, crossings, topology
+        )
+    }
     walk = BoundedRecords()
     owners: dict[str, list[Any]] = {}
     conflicting = 0
@@ -316,7 +346,7 @@ def render_arrangement_regions(
                     # A self-crossing: the over side is the set of sections that meet the
                     # path at the over arc, exactly the passes the Boolean backend leaves
                     # whole there. Only when none of them covers this face (a window too
-                    # short for the overlap) does the choice fall back to the path order.
+                    # short for the overlap) does the choice fall back to painter order.
                     decisions.extend(node for node in covering if node in over_sections)
                     continue
                 over = over_path_of[crossing.crossing_id]
@@ -328,13 +358,31 @@ def render_arrangement_regions(
                 contradictory = len({node_path[node] for node in distinct}) > 1
                 if contradictory:
                     conflicting += 1
-                owner = min(distinct, key=lambda node: (-layers[node_path[node]], node))
+                owner = min(distinct, key=lambda node: (
+                    -layers[node_path[node]],
+                    path_position[node_path[node]],
+                    node,
+                ))
                 decision = "conflicting-lens" if contradictory else "lens"
                 lens_decided_count += 1
             else:
                 if len({node_path[node] for node in covering}) > 1:
                     off_crossing += 1
-                owner = min(covering, key=lambda node: (-layers[node_path[node]], node))
+                # The same key the Boolean backend paints by, read from the other end:
+                # there the *last* node of ``(layer, path position, node id)`` is the one
+                # still visible, so the face goes to the maximum. Deciding this by node
+                # id alone made the two backends disagree on which strand shows wherever
+                # two bands overlap without crossing, as soon as the ids do not sort in
+                # input order (the T contact was one such case).
+                owner = max(covering, key=lambda node: (
+                    0 if any(
+                        (node_path[node], node_path[other]) in yielding_paths
+                        for other in covering if other != node
+                    ) else 1,
+                    layers[node_path[node]],
+                    path_position[node_path[node]],
+                    node,
+                ))
                 decision = "off-crossing"
         walk.add({"kind": "face", "decision": decision, "owner": owner,
                   "area": float(cell.area), "covering_count": len(covering)})
@@ -431,19 +479,53 @@ def render_arrangement_regions(
                 "tolerance": tolerance,
             },
         ))
+    if coincident_groups:
+        diagnostics.append(Diagnostic(
+            code="REGION-COINCIDENT-CROSSINGS",
+            severity=Severity.WARNING,
+            message=(
+                f"{len(coincident_groups)} 处有多个编织交叉落在同一点：透镜互相重叠，"
+                "重叠面只能逐个面决定归属；同一路径两个分段之间的透镜边由先画的那一段"
+                "描边（与 boolean 后端一致），交叉处的编织线可能看起来不完整。"
+                "面积仍然守恒（与 boolean 后端在此处的失守不同）。"
+            ),
+            details={
+                "groups": coincident_groups,
+                "crossing_ids": sorted(coincident_ids),
+            },
+            hints=("把丝带错开、减小 offset，或改用描边后端（它按中心线切口，不受该限制）。",),
+        ))
     covered_lenses = [lens for lens in lenses.values() if lens is not None]
     hidden_area = _covered_area(covered_lenses)
     weave_edges: list[tuple[np.ndarray, np.ndarray]] = []
-    for lens in covered_lenses:
+    weave_visible_edges: list[tuple[np.ndarray, np.ndarray]] = []
+    edge_tolerance = max(area_tolerance, 1e-9)
+    for crossing_id, lens in lenses.items():
+        if lens is None:
+            continue
+        over = lens_over.get(crossing_id)
         for polygon in (lens.geoms if lens.geom_type != "Polygon" else [lens]):
             ring = np.asarray(polygon.exterior.coords, dtype=float)[:, :2]
             for start, end in zip(ring[:-1], ring[1:], strict=False):
-                weave_edges.append((start, end))
+                edge = (start, end)
+                weave_edges.append(edge)
+                if over is not None and over.boundary.distance(
+                    Point(*(0.5 * (start + end)))
+                ) <= edge_tolerance:
+                    weave_visible_edges.append(edge)
     flush_edge_count = mark_flush_edges(
         regions,
         cuts=_cut_lines(paths, sections, offset=offset),
         weave=weave_edges,
+        weave_visible=weave_visible_edges,
         node_bands=node_band,
+        hide_later_same_path_lens=True,
+    )
+    outline_edges = missing_weave_outlines(
+        regions,
+        weave_visible_edges,
+        max_flush_bridge=0.05 * offset,
+        max_lens_bridge=0.30 * offset,
     )
     return RegionRenderResult(
         regions=regions,
@@ -471,7 +553,9 @@ def render_arrangement_regions(
             "off_crossing_count": off_crossing,
             "uncovered_count": uncovered,
             "flush_edge_count": flush_edge_count,
+            "outline_edge_count": len(outline_edges),
             **cell_stats,
             **walk.as_payload("steps"),
         },
+        outline_edges=outline_edges,
     )

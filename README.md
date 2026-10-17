@@ -30,7 +30,7 @@
 | 基于算法轨迹的动画计划 | 已实现 renderer-neutral trace plan；Manim 动画适配器为初始版本，实机渲染已跑通 |
 | 细粒度算法轨迹 | 已完成（M5）：候选对逐条判定、约束传播步骤、自适应细分决策、面域遍历归属全部是真实的 `TraceEvent`，计数精确、记录列表有界（`*_count` / `*_truncated`） |
 | 可视化线宽 | 已实现像素对齐换算：`px_to_stroke_width` / `px_to_units`（`render/pixels.py`）在目标输出分辨率和 Manim 画幅高度之间转换，`Lace` 的 `stroke_width_px` 参数直接以输出像素指定线宽；未指定时仍用 `max(1.0, 200.0 * offset)` 启发式 |
-| 实体 Ribbon、多边形面域与孔洞 | 已实现两套后端（`ribbon_backend`）：`boolean` 用受验证的布尔几何按"该交叉局部"交集精确切除，**自交同样按局部交集切被压的那一遍**；`arrangement` 走**平面剖分**——把丝带边界（含自交分段边界）noding 后 `polygonize` 出全部面，逐面判定归属，因此区域**永不重叠**、共点交叉也能守恒。两者输出同样的 `RibbonRegion`/`RegionRing`（带 role、外环逆时针、孔洞顺时针）与面积核对 |
+| 实体 Ribbon、多边形面域与孔洞 | 已实现两套完整后端（`ribbon_backend`）和一个实验组合后端：`boolean` 用受验证的布尔几何按"该交叉局部"交集精确切除，**自交同样按局部交集切被压的那一遍**；`arrangement` 走**平面剖分**——把丝带边界（含自交分段边界）noding 后 `polygonize` 出全部面，逐面判定归属，因此区域**永不重叠**、共点交叉也能守恒；`hybrid` 保留 Boolean 的绘制遮挡，只从剖分结果补短得可证的缺口和确实缺失的填充面。三者输出同样的 `RibbonRegion`/`RegionRing`（带 role、外环逆时针、孔洞顺时针）与面积核对 |
 | 美学策略（M6） | 已实现：`manim_lace.style` 提供可插拔调色板（56 色和色色卡 + 7 套配色）、path/piece/layer/degree 分组、边框设计、切口端处理（覆盖余量 + 真实端头轮廓）与密度感知的视觉简化；样式不改变拓扑（`apply_style` 只读结果），密度简化只影响"画哪些片段"且逐条上报 |
 | 隐式方程直接等值线提取 | 已实现（FR-008）：`sample_implicit` / `LaceEngine.from_implicit` / `Lace.from_implicit` 直接对 `F(x,y)=level` 做 marching squares，**多连通分支各成一条路径**并在 `source.metadata` 记录分支来源（level、网格、分支序号、残差、朝向规则与结果）。误差是**实测**的：每遍用 `|F−level|/|∇F|`（世界单位）估几何误差，超目标就按 `max_resolution`/`max_refine_passes` 加密并再测；鞍点由双线性中心值裁决并计数。两件做不到的事有明确信号：自触水平集的交点会丢失（八字结点、十字原点，见下文），极点会被插值造出假等值线（残差永远达不到目标，`GEOM-IMPLICIT-ERROR-TARGET-MISSED` 点名超标分支） |
 | 鲁棒多线共点分解 | 未实现；当前只能识别并诊断多线共点，不做唯一穿插顺序推断 |
@@ -88,6 +88,8 @@ print("trace events:", len(result.trace))
 - `result.crossings`：交叉候选及路径弧长位置；精化成功的交叉还会带 `refined=True` 与来源曲线参数 `parameter_a` / `parameter_b`；
 - `result.topology.assignments`：每个已解交叉的过／欠分配；
 - `result.pieces`：Stroke 后端切分出来的可见折线片段；
+- `result.outline_edges`：ribbon 后端中落在区域填充内部、区域外环无法承载的可见编织边界；
+  渲染器应在填充之后补描这些边，stroke 后端该列表为空；
 - `result.diagnostics`：结构化诊断；
 - `result.trace`：实际求解过程留下的结构化轨迹（含细粒度事件：`crossing.candidate_pairs`、`topology.propagation`、`sampling.subdivision`、`region.face_walk`）；
 - `result.detection_stats`：候选筛选统计（策略、线段数、候选对数、窄相位次数、网格单元数、暴力上界、精化事件数）。
@@ -122,6 +124,9 @@ print(subdivision.stage, subdivision.data["split_count"])       # input, 真实�
 ribbon = LaceEngine(paths, render_mode="ribbon", ribbon_backend="arrangement").solve()
 walk = next(e for e in ribbon.trace if e.event_type == "region.face_walk").data
 print(walk["backend"], walk["node_kind"], walk["owner_count"], walk["steps"][0]["decision"])
+
+hybrid = LaceEngine(paths, render_mode="ribbon", ribbon_backend="hybrid").solve()
+print(hybrid.pieces, hybrid.fill_underlay)     # 实验性：Boolean 遮挡 + arrangement 局部修补
 ```
 
 `LaceEngine.from_parametric` / `from_graph` 会自动把采样摘要带进引擎，所以 `Lace.from_parametric(...).build_animation(mode="algorithm")`
@@ -368,7 +373,7 @@ python examples/build_gallery.py -q l            # 更小更快的渲染
 
 ## 人工审查页面：程序判定 + 人眼过一遍
 
-状态画廊展示的是"项目做出来的图案"；`media/review/index.html` 审查的是**测试与基准用的那些图形**，每个案例并排五个面板：**原始输入（中心线 + 检出交叉）** → stroke → ribbon(boolean) → ribbon(arrangement) → 编织结果（交叉编号）。第一个面板是引擎拿到的几何本身，没有它就没法把"引擎看错了几何"和"引擎织错了"分开。它存在的理由是：程序判定只能抓住它被写出来要抓的东西，所以每一格除了读数还必须有人签一次字，而"程序全通过、人眼有问题"的那些格子正是检查还缺的那类断言。
+状态画廊展示的是"项目做出来的图案"；`media/review/index.html` 审查的是**测试与基准用的那些图形**，默认并排五个面板：**原始输入（中心线 + 检出交叉）** → stroke → ribbon(boolean) → ribbon(arrangement) → 编织结果（交叉编号）。需要对照实验组合的案例（当前是 `spec-self-intersecting` 与 `ros-n5-ca-l2-o12`）再增加一个 `hybrid` 面板；画面集合以 `Case.channels` 为准。第一个面板是引擎拿到的几何本身，没有它就没法把"引擎看错了几何"和"引擎织错了"分开。它存在的理由是：程序判定只能抓住它被写出来要抓的东西，所以每一格除了读数还必须有人签一次字，而"程序全通过、人眼有问题"的那些格子正是检查还缺的那类断言。
 
 ```bash
 python examples/build_review.py                    # 渲染全部案例 + 写页面（默认 720p）
@@ -381,7 +386,7 @@ python examples/build_review.py --verdicts docs/review-verdicts.json   # 载入�
 
 案例目录在 `examples/review_catalog.py`（六类：SPEC §10.2 基准集、`tests/test_index.py` 的九个索引场景、退化与特殊事件合成图形、Manim 输入适配层含两个**必须失败**的输入、状态画廊图案、玫瑰线含两个已知退化配置），它同时是页面、探针与测试的唯一来源。每个案例声明自己的预期（交叉数、自交数、必须出现/禁止出现的诊断码），`tests/test_review_catalog.py` 逐条断言，页面则把「目录预期 vs 实测」直接印在卡片上。
 
-程序判定（`examples/review_checks.py`）给出的是可证伪的读数与不变量：按类型分的交叉数、自交数、**交替缺陷**、上下关系来源、精化数、最差 `sinθ`、面积核算（契约是 `painted_area == union_area`；`band_area` 是各丝带面积之**和**，拿它当参考会在每个普通交叉上误报）、环的闭合/简单/朝向、用 Shapely 独立重算的环并集面积、`benchmarks/weave_audit.py` 的三类缺陷签名（多画的线 / 少画的线 / 悬空端头，阈值都是 0）、三通道拓扑一致性（FR-040）、以及每个案例解两次的确定性。求解耗时作为读数一并列出，页面因此也能看出"某个后端在某类输入上意外昂贵"。
+程序判定（`examples/review_checks.py`）给出的是可证伪的读数与不变量：按类型分的交叉数、自交数、**交替缺陷**、上下关系来源、精化数、最差 `sinθ`、面积核算（契约是 `painted_area == union_area`；`band_area` 是各丝带面积之**和**，拿它当参考会在每个普通交叉上误报）、环的闭合/简单/朝向、用 Shapely 独立重算的环并集面积、`benchmarks/weave_audit.py` 的三类缺陷签名（多画的线 / 少画的线 / 悬空端头，阈值都是 0）、声明的各通道拓扑一致性（FR-040）、以及每个案例解两次的确定性。求解耗时作为读数一并列出，页面因此也能看出"某个后端在某类输入上意外昂贵"。
 
 人眼这一层：**通过 / 存疑 / 有问题**，十二个缺陷标签多选，备注写在格子里；结论存在浏览器 `localStorage`，可导出 JSON、可导入合并，也可用 `--verdicts` 烧进下一轮页面。工具栏能直接筛到"只看未审核"「只看程序检查失败」「只看程序有警告」「只看『程序通过但人审有问题』」。聚焦模式里 `←`/`→` 逐张（**并保持你当前看的那个通道**，标题旁显示通道名）、`1`/`2`/`3` 判定，**闪烁对照 A/B** 在两个通道之间每 0.5 秒交替，用来找两个后端之间肉眼难辨的上下关系差异。另有 `--no-page`（试渲染某个案例但不改写页面）与 `--probe`（只测量不渲染）。
 
@@ -419,16 +424,22 @@ python benchmarks/bench_crossings.py --repeat 3
 - 边框从**可见**几何的包围盒生成（`pattern_bounds`，被完全切掉的片段不会撑大画框），环一律闭合且逆时针；会把边框推进图案内部（`inset` 过大）或圆角半径放不下的配置判为 `ValueError`，不静默近似。
 - 每个片段都带确定性 `draw_index`：按"被压路径先画"的路径分层（最长路分层）排序，环按路径顺序确定性打破。两条股线交叉偶数次时"谁先画"必然成环，这是正常编织图案，可见性由切口决定，因此只有环上存在被 `min_sin` 钳制的近似断口时才报 `RENDER-DRAW-ORDER-CYCLE`（info）。Manim 侧按该顺序建组、设置对应 cap 与 `z_index`，不会与几何层不一致。
 - `render="ribbon"` 已实现（需要 `pip install 'manim-lace[geometry]'`，即 Shapely；缺失时抛出带安装提示的 `ImportError`）。它把丝带当**有面积的面域**构造：每条路径一条偏移带（`join`/`miter_limit` 控制拐角连接），在交叉处从被压带里扣除"该交叉局部"的 `被压带 ∩ 上方带`——即上方丝带真实覆盖的那块面积，因此没有半径近似、没有浅角钳制，也不需要端帽补偿。`result.pieces` 在 ribbon 模式下是 `RibbonRegion`（外环 + 孔洞环，role 分别为 `exterior` / `source_contour` / `occlusion`，外环逆时针、孔洞顺时针）。两种后端消费**同一份**交叉与拓扑（`FR-040`）。
-- ribbon 模式有两套实现，`ribbon_backend="boolean"`（默认）/`"arrangement"`：
+- ribbon 模式有两套完整实现，`ribbon_backend="boolean"`（默认）/`"arrangement"`，以及实验性的 `"hybrid"`：
   - **`boolean`**：按交叉局部交集切除，**自交走同一条路**。自交的两次经过是同一条路径的两个不同分段，被压的那一遍同样按"两条偏移带在该交叉处的局部交叠"精确切掉，所以上下关系由几何决定、不依赖绘制顺序（在 90° 的 bow／八字上，切除面积正好等于解析值 `4·offset²`）。为了让"某一遍的局部料"成为独立几何、不至于把上方那一遍也挖掉，带自交的路径会在交叉点两侧各多切一刀（就是 `REGION-SECTION-SEAM` 在说的那些切分点）。切口**只切断丝带，不在丝带中间留洞**：被压带的切口就是上方丝带的局部脚印，在斜接拐角附近这个脚印可能完全落在带内部，于是切除结果变成"带绕着一个洞还连着"。洞没法当缺口画——Manim 的填充不支持孔洞，适配层只能把洞涂成背景色——那是否可见就取决于绘制顺序，而两条股线交叉两次以上时上下关系必然成环、不存在一致的顺序（那正是 `REGION-DRAW-ORDER-CYCLE` 在说的情形）。所以后端会把这种洞**沿该交叉的切口线切开**（`regions._open_occlusion_holes`），让填充本身在切口处停住：上方丝带的区域永远盖住自己的脚印，两种绘制顺序下看到的都对；切开的弦按既有机制记为 flush 接缝，不描边、并由填色补上。`source_contour` 孔（闭合股线的内部）不动，那是真正的空隙。切口之后相邻分段仍可能重叠一块（面积之和大于可见面积），此时报 `REGION-OVERLAPPING-SECTIONS`（info）；`REGION-DRAW-ORDER-CYCLE` 只说明路径层面的约束成环、顺序被确定性打破，**不再决定任何交叉的结果**。多个交叉落在同一点（`REGION-COINCIDENT-CROSSINGS`）时各交叉的扣除会互相抵消，覆盖面积不再守恒。
   - **`arrangement`**：把全部丝带边界（路径带边界 + 自交分段边界）noding 后剖分成面，每个面按"该处上方的股线"归属唯一所有者——因此区域**永不重叠**（`region_area_sum == painted_area`）、自交的上下关系体现为真实边界、共点交叉仍然守恒（`painted_area == union_area`）。无法从几何唯一确定的面会如实上报：`REGION-CONFLICTING-OVERLAP`（同一面上有互相矛盾的多个交叉，通常是共点）、`REGION-OFF-CROSSING-OVERLAP`（多条丝带平行重叠、附近没有交叉）、`REGION-DROPPED-SLIVER`（近乎相切产生的碎片面）、`REGION-LENS-APPROXIMATION`（自交的局部窗口不足以覆盖重叠）。
-  - 两者在普通交叉与**自交**上都面积逐位一致（`tests/test_arrangement.py` 对照断言）；真正的分歧只剩布尔模型表达不了的情形（残留的重叠分段、共点交叉）——这正是保留两套实现的意义。
+  - **`hybrid`**：以 `boolean` 的区域、绘制顺序和遮挡为主。它从 Boolean 的可见未接续端点出发，沿反向笔画方向在一条 `max(tolerance, 0.02 * offset)` 的**细带**（不是理想射线，端点处两方向差几分之一度就够让射线漏过下一条描边）内找下一个 Boolean 边界，只沿 arrangement 已有可见边界走到那里，再把这一段作为最高层补线；边界证据不连续或连线长过 `0.5 * offset` 就拒绝。长度 `<= 0.05 * offset` 且中点落在某个布尔填充内部的 Boolean `outline_edges` 直接丢弃——它们是布尔画在自己填充上的孤立黑点（与布尔 **flush 接缝**重合的 `outline_edges` 已经由共享的 `missing_weave_outlines` 判掉——`flush` 就是"这条缝不该描"，覆盖它的环边即答案，不再升成补线，hybrid 因此没有多余的本地判据）。Boolean 并集真实缺失的 arrangement 面则作为 `fill_underlay` 填在下方，永不描边。它适合当前需要同时消除 Boolean 小缺口与 arrangement 长内部边的审查案例，但会如实报 `REGION-HYBRID-EXPERIMENTAL`，默认结果仍走 `boolean`。
+  - 两套完整后端在普通交叉与**自交**上都面积逐位一致（`tests/test_arrangement.py` 对照断言）；真正的分歧只剩布尔模型表达不了的情形（残留的重叠分段、共点交叉）——这正是保留两套实现的意义。
 - ribbon 模式其余边界（都有诊断）：交叉没有上下关系时报 `REGION-MISSING-ASSIGNMENT`；偏移轮廓无效时受控修复并报 `REGION-INVALID-OUTLINE`；切分点落在折线顶点上时分段并集比整带少一个拐角连接，报 `REGION-SECTION-SEAM`（info）；过／欠关系成环且存在分段时报 `REGION-DRAW-ORDER-CYCLE`（info）。面积口径：`painted_area`（区域并集＝实际绘制面积）与 `union_area`（构建出的丝带并集）应当相等，`region_area_sum` 是含重叠的求和。Manim 侧孔洞是独立图层（Manim 没有奇偶填充规则），默认用 `hole_color` 涂成背景色，可用 `draw_holes=False` 自行处理。
 - Manim 侧的 ribbon 图层：`lace.ribbons` 与 `result.pieces` 一一对应（按 `draw_index` 排序、`z_index` 同步），`lace.holes` 是独立孔洞层。自交被切成两个分段后，相邻分段之间会留下一条**接缝**（横跨股线的切分弦），记在 `RibbonRegion.flush_edges` 上：它不代表股线的边界，所以带接缝的片段填充不描边，轮廓改由 `lace.outlines` 里逐条**开口折线**（run）描出——沿接缝描边会在一条笔直穿过的股线中间画出一道横线。同一层里还有同一个接缝的"填色重述"（填充色、`z_index = -0.5`，低于所有填充）：相邻两片是各自独立的多边形，共享边上的像素两边都只覆盖一部分，不补一笔就会在股线中间透出一条背景色细线。绘制 `lace.ribbons` 的场景必须同时绘制 `lace.outlines`（`build_animation` 与画廊场景都已如此），否则这些片段会丢掉轮廓。
+- arrangement 会把缺口两侧最终归到同一区域时，可见边界可能落在该区域多边形内部；它不在
+  `flush_edges`，也不属于任何外环。`result.outline_edges` 显式列出这些边，`lace.outlines`
+  在全部填充之后补描。arrangement 的所有可见外环/run 也统一放在这一层，避免后画填充把
+  同一条边界的一半盖住；短 `stroke → flush detour → stroke` 和共线的一侧透镜缺口只做受限
+  桥接，真正横跨股线的接缝仍保持不描。
 - 输入为文字、SVG 时，提取的是矢量轮廓，不是字形的语义中心线笔画。
 - Stroke 片段不变式（有测试保证）：同一路径的片段弧长区间互不重叠、也不超过路径总长；接缝（闭合路径的弧长 0）落在可见弧内部时，跨接缝的可见弧输出为**一个**片段——接缝不是切口，劈成两段会在接缝处留下两个 butt 端头对接的楔形缝；切口本身盖住接缝时输出为一个 `piece-seam` 加其余可见弧段；开放路径的切口一旦覆盖整条中心线，就不输出片段并报 `RENDER-PATH-FULLY-CUT`。
 - 样式层的参数同样在构造时校验，不静默退化：`StylePolicy` 的 `group_by`/`color_mode`/`opacity`/`fill_opacity`/`buckets`/`piece_order`/颜色值/配色名，`BorderSpec` 的 `corner`/`margin`/`thickness`/`radius`/`inset`/`bands`/`samples`，`CapTreatment` 的 `style`/`cover_allowance`/`samples`，`DensityPolicy` 的 `cluster_radius`/`cell_size`/`sliver_length`/`sliver_fraction`/`min_cluster_size`，以及 `Lace(palette=..., style_policy=...)` 同时给出。
-- 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`、`refine` 必须是布尔值、`conflict_strategy ∈ {"error","manual","relax"}`、`event_policy` 是 `EventPolicy`/字段映射/统一取值或 `None` 且取值合法（`endpoint_touch`、`near_tangent` 取 `"diagnose"|"weave"|"ignore"`，`collinear_overlap`、`multiway` 取 `"diagnose"|"ignore"`）、`cap_style ∈ {"butt","round","square"}`、`join ∈ {"miter","bevel","round"}` 且 `miter_limit > 0`、`ribbon_backend ∈ {"boolean","arrangement"}`。
+- 参数非法一律抛 `ValueError`，且都在 `LaceEngine` 构造时校验（不会拖到 `solve()` 中途才失败）：`offset > 0`、`position_tol > 0`、`0 < angle_tol < 1`、`0 < min_sin <= 1`、`overshoot >= 0`、`min_piece_length >= 0`、`weave_mode ∈ {"alternating","free","manual"}`、`manual_over` 取值只能是 `"a"`/`"b"`、`candidate_strategy ∈ {"grid","brute_force"}`、`refine` 必须是布尔值、`conflict_strategy ∈ {"error","manual","relax"}`、`event_policy` 是 `EventPolicy`/字段映射/统一取值或 `None` 且取值合法（`endpoint_touch`、`near_tangent` 取 `"diagnose"|"weave"|"ignore"`，`collinear_overlap`、`multiway` 取 `"diagnose"|"ignore"`）、`cap_style ∈ {"butt","round","square"}`、`join ∈ {"miter","bevel","round"}` 且 `miter_limit > 0`、`ribbon_backend ∈ {"boolean","arrangement","hybrid"}`。
 - 候选加速只剪枝、不改语义：网格与暴力枚举必须给出逐事件、逐诊断、逐片段一致的结果（`tests/test_index.py`、`tests/test_benchmarks.py` 的黄金指纹）。
 - 交叉精化（`refine=True`，默认开启）只精化已有事件，不产生新事件，也不改变事件的最大集合：候选仍在采样折线上判定。精化要求两侧路径都带来源曲线探针（`PolylinePath.curve`，由 `sample_parametric` / `sample_graph` / Manim 适配器提供）与来源参数映射（`PolylinePath.parameters`），成功时事件带 `refined=True`、`parameter_a/parameter_b`、曲线弧长与由**真实局部切向**算出的 `sin_angle`。探针缺失、探针抛错或返回非有限值、Newton 不收敛、解跑出候选邻域、或路径在该处**确实拐折**（无唯一局部切向）时，一律回退到折线估计并保持 `refined=False`，不会用"平滑过的"结果冒充几何。
 - 精化后的 `segment_a`/`u_a` 描述的是精化参数所在的采样段，`s_a`/`s_b` 是折线累计弧长加上曲线在段内的真实弧长；闭合路径的弧长位置取模到 `[0, length)`。自交事件在精化后仍保证 `s_a < s_b`。
@@ -464,8 +475,9 @@ python benchmarks/bench_crossings.py --repeat 3
 | 区域 | `REGION-COINCIDENT-CROSSINGS` | warning | 多个交叉落在同一点，各交叉扣除的重叠区互相抵消，覆盖面积无法保证守恒 |
 | 区域 | `REGION-DRAW-ORDER-CYCLE` | info | 路径层面的过／欠约束成环，绘制顺序按节点顺序确定性打破；交叉处的上下关系已由几何切口决定，该环不再影响编织结果 |
 | 区域 | `REGION-SECTION-SEAM` | info | 切分点落在折线顶点，分段并集比整带少一个拐角连接的面积 |
-| 区域 | `REGION-CONFLICTING-OVERLAP` | warning | 剖分后端：同一个面落在多个上下关系相反的交叉内（多为共点），按路径顺序确定性归属 |
-| 区域 | `REGION-OFF-CROSSING-OVERLAP` | info | 剖分后端：多条丝带平行重叠且附近没有交叉，按路径顺序确定性归属 |
+| 区域 | `REGION-CONFLICTING-OVERLAP` | warning | 剖分后端：同一个面落在多个上下关系相反的交叉内（多为共点），按绘制层、再按路径顺序确定性归属 |
+| 区域 | `REGION-OFF-CROSSING-OVERLAP` | info | 剖分后端：多条丝带平行重叠且附近没有交叉，按与 boolean 相同的绘制顺序确定性归属（后画者拥有该面；端点接触处结束股让位） |
+| 区域 | `REGION-HYBRID-EXPERIMENTAL` | info | 实验性 hybrid 后端：记录 Boolean 主层的显式边界数、接受的 arrangement 短桥接数与补片面积；它不改变拓扑，也不是默认后端 |
 | 区域 | `REGION-DROPPED-SLIVER` | info | 剖分后端：近乎相切产生的碎片面已忽略（含数量与总面积） |
 | 区域 | `REGION-LENS-APPROXIMATION` | info | 剖分后端：自交的局部窗口不足以完整覆盖重叠，面归属可能不精确 |
 | 区域 | `REGION-MISSING-ASSIGNMENT` | warning | ribbon 模式下交叉缺少上下关系，该处没有扣除面积 |
@@ -515,7 +527,7 @@ examples/review_catalog.py     # 人工审查案例目录（六类，页面/探�
 examples/review_checks.py      # 程序判定：事实读数与不变量（不依赖 Manim）
 examples/build_review.py       # 渲染审查媒体并生成 media/review/index.html 审查页面
 media/gallery/                 # 生成物：状态画廊页面 + 静帧 + 两段动画视频（media/ 不入库）
-media/review/                  # 生成物：审查页面 + 每案例三通道静帧 + 标注图（media/ 不入库）
+media/review/                  # 生成物：审查页面 + 每案例声明的通道静帧 + 标注图（media/ 不入库）
 ```
 
 运行基准（会打印剪枝比、耗时与事件指纹，并在两套候选策略不一致时返回非零退出码）：

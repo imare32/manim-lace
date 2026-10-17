@@ -45,6 +45,18 @@ CAPTURED: dict = {}
 _ORIGINAL_MARK = regions_module.mark_flush_edges
 
 
+def _overlay_segments(edges):
+    """Normalise the engine's explicit outline layer for the audit walks."""
+    segments = []
+    for edge in edges or ():
+        if hasattr(edge, "start") and hasattr(edge, "end"):
+            start, end = edge.start, edge.end
+        else:
+            start, end = edge
+        segments.append((np.asarray(start, dtype=float), np.asarray(end, dtype=float)))
+    return segments
+
+
 def _spy(regions, *, cuts, weave=(), node_bands=None, **kwargs):
     CAPTURED.clear()
     CAPTURED.update(cuts=cuts, weave=weave, node_bands=node_bands, regions=list(regions))
@@ -58,7 +70,7 @@ SUPERSAMPLE = 2
 PANEL = 700
 
 
-def notch_gaps(regions, tolerance=1e-6):
+def notch_gaps(regions, overlay_edges=(), tolerance=1e-6):
     """Pieces of a crossing's lens boundary that no stroke covers.
 
     The weave notch — where the pass on top crosses the one below — has to be stroked
@@ -71,6 +83,20 @@ def notch_gaps(regions, tolerance=1e-6):
     strokes' intervals along it are merged and whatever is left is a gap. Only gaps
     whose midpoint is inside the ribbon (both sides covered, and the visible strand
     changes across the line) are counted.
+
+    A lens edge a ring itself carries as a *flush* edge is not a gap either. ``flush`` is
+    the region walk's verdict that the piece must not be stroked -- a section-cut seam, a
+    side another strand covers, an interior boundary that is not weave -- so the ring
+    covering it is the answer, not a defect. Counting those made this audit the advocate
+    of precisely the lines ``missing_weave_outlines`` must not draw: ``docs/REVIEW.md``
+    §206 recorded the case where following a named gap painted a 44 px tick across the
+    strand. Two measured consequences on the review page: ``spec-self-intersecting``
+    reports 0 either way (without this clause the matching guard in
+    ``missing_weave_outlines`` re-opens it at 2), and the arrangement channel of
+    ``index-random-walks-6`` / ``index-random-walks-12`` / ``ros-n5-ca-l2-o12`` stops
+    naming 7 / 22 / 1 segments as gaps because those segments lie on flush ring edges.
+    Read that as the rule refusing to call a seam a missing line, not as the dense random
+    walks getting healthier.
     """
     weave = CAPTURED.get("weave") or ()
     fills = {
@@ -93,15 +119,23 @@ def notch_gaps(regions, tolerance=1e-6):
         return None if best is None else ordered[best].region_id
 
     strokes = []
+    seams = []
     for region in regions:
         points = np.asarray(region.exterior.points, dtype=float)
         flush = set(region.flush_edges)
         for index in range(len(points) - 1):
-            if index in flush:
-                continue
             start, end = points[index], points[index + 1]
-            if float(np.hypot(*(end - start))) > 1e-9:
+            if float(np.hypot(*(end - start))) <= 1e-9:
+                continue
+            if index in flush:
+                seams.append((start, end))
+            else:
                 strokes.append((start, end))
+    strokes.extend(_overlay_segments(overlay_edges))
+    # A flush ring edge is the walk's "do not stroke this", so it covers the recorded
+    # lens edge it lies on just as a stroke does. ``drawn_at`` below still asks about
+    # strokes only: it is the weaker "some line is drawn near here" fallback.
+    covering = [*strokes, *seams]
 
     def drawn_at(point, direction):
         """Is a stroke passing through ``point`` roughly along ``direction``?"""
@@ -127,7 +161,7 @@ def notch_gaps(regions, tolerance=1e-6):
         direction = (end - start) / span
         normal = np.array([-direction[1], direction[0]])
         intervals = []
-        for s_start, s_end in strokes:
+        for s_start, s_end in covering:
             if abs(float(np.dot(s_start - start, normal))) > tolerance:
                 continue
             if abs(float(np.dot(s_end - start, normal))) > tolerance:
@@ -165,7 +199,7 @@ def notch_gaps(regions, tolerance=1e-6):
     return gaps, total
 
 
-def dangling_ends(regions):
+def dangling_ends(regions, overlay_edges=()):
     """Stroke ends that stop inside the ribbon instead of at a boundary.
 
     A stroke may end where it meets another stroke (a T-junction or a corner) or on the
@@ -229,6 +263,10 @@ def dangling_ends(regions):
             if float(np.hypot(*(ring[index + 1] - ring[index]))) <= 1e-9:
                 continue
             strokes.append((region.region_id, index, ring[index], ring[index + 1]))
+    for index, (start, end) in enumerate(_overlay_segments(overlay_edges)):
+        if float(np.hypot(*(end - start))) <= 1e-9:
+            continue
+        strokes.append(("__outline__", -1 - index, start, end))
     lines = [LineString([start, end]) for _, _, start, end in strokes]
     stroke_tree = STRtree(lines) if lines else None
 
@@ -267,6 +305,8 @@ def dangling_ends(regions):
         if any(float(lines[index].distance(point)) <= 1e-4 for index in candidates):
             continue
         for owner in owners:
+            if strokes[owner][0] == "__outline__":
+                continue
             direction = outward(owner, vertex)
             if direction is None:
                 continue
@@ -390,7 +430,9 @@ def _hex(color) -> tuple[int, int, int]:
     return (128, 128, 128)
 
 
-def render_panel(regions, colors, title, violations, centre=None, span=None):
+def render_panel(
+    regions, colors, title, violations, overlay_edges=(), centre=None, span=None
+):
     """One backend's regions as the renderer draws them: fills, holes, outline strokes."""
     ordered = sorted(regions, key=lambda region: (region.draw_index, region.region_id))
     all_points = np.vstack([np.asarray(r.exterior.points, dtype=float) for r in ordered])
@@ -424,6 +466,8 @@ def render_panel(regions, colors, title, violations, centre=None, span=None):
             if float(np.hypot(*(end - start))) <= 0.0 or index in flush:
                 continue
             draw.line([to_pixel(start), to_pixel(end)], fill="#111111", width=SUPERSAMPLE)
+    for start, end in _overlay_segments(overlay_edges):
+        draw.line([to_pixel(start), to_pixel(end)], fill="#111111", width=SUPERSAMPLE)
     for region_id, index, start, end, on_band in violations:
         draw.line([to_pixel(start), to_pixel(end)], fill="#ff0000", width=4 * SUPERSAMPLE)
         draw.ellipse(
@@ -461,21 +505,23 @@ def run(configs):
                 kwargs["ribbon_backend"] = "arrangement"
             lace = Lace(source, **kwargs)
             regions = lace.result.pieces
+            overlay_edges = getattr(lace.result, "outline_edges", ())
             paths = sorted({region.path_id for region in regions})
             region_colors = {path: colours[index % len(colours)] for index, path in enumerate(paths)}
             violations, over_marked = audit(regions)
-            gaps, gap_length = notch_gaps(regions)
-            dangling = dangling_ends(regions)
+            gaps, gap_length = notch_gaps(regions, overlay_edges)
+            dangling = dangling_ends(regions, overlay_edges)
             rows.append((name, backend, len(regions), len(violations), len(over_marked),
                          gaps, gap_length, len(dangling)))
             verdict = f"defects={len(violations)}" if violations else "clean"
             full, _ = render_panel(
-                regions, region_colors, f"{backend}: {len(regions)} faces", violations
+                regions, region_colors, f"{backend}: {len(regions)} faces", violations,
+                overlay_edges=overlay_edges,
             )
             centre, span = zoom_target(regions, violations)
             zoom, _ = render_panel(
                 regions, region_colors, f"{backend} zoom ({verdict})", violations,
-                centre=centre, span=span,
+                overlay_edges=overlay_edges, centre=centre, span=span,
             )
             panels.extend((full, zoom))
         header = Image.new("RGB", (2 * PANEL + 30, 46), "#ffffff")

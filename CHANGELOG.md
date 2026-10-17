@@ -1,5 +1,150 @@
 # Changelog
 
+## Unreleased — 显式编织边界层：区域无法承载的可见缺口不再断开
+
+- Add experimental `ribbon_backend="hybrid"`：布尔后端继续负责填充、切口和**后画遮挡**；
+  平面剖分只贡献两类局部修复——（1）布尔"可见未接续端点"沿反向笔画方向，在
+  `max(tolerance, 0.02 * offset)` 的**细带**内搜索下一个布尔边界，且该直连被 arrangement
+  可见边端到端覆盖（最长 `0.5 * offset`，证据有洞即拒绝）时，输出为最高层 `outline_edges`
+  桥接；（2）长度 `<= 0.05 * offset` 且中点落在某个布尔填充内部的 Boolean `outline_edges`
+  直接丢弃——它们是布尔 overlay 画在自己填充上的孤立黑点。另外布尔并集确实缺失时返回
+  `fill_underlay` 补片，只填充不描边、画在布尔区域之下。这样 `spec-self-intersecting` 的
+  四角 V 形缺口被补住（4 条桥接），同时不会把 arrangement 那批扎过丝带的长边升描边层，
+  也不留孤立黑点。结果通过 `REGION-HYBRID-EXPERIMENTAL` 报告 bridge/patch 计数；审查页为
+  `spec-self-intersecting` 与 `ros-n5-ca-l2-o12` 两个案例增加 `hybrid` 通道，默认后端仍是
+  `boolean`。上一轮加在 hybrid 里的"与 flush 接缝重合即丢弃"本地判据已删除：同一判决上收到
+  共享函数（见下一条），hybrid 不再需要自己的副本。
+- Fix `render/regions.py::missing_weave_outlines` 与 `benchmarks/weave_audit.py::notch_gaps`：
+  `flush` 是区域走查对"这条缝不能描"的判决，但 `missing_weave_outlines` 把 recorded lens edge
+  重新升成 overlay 时没有问过它——自交手臂窗口的截断面正带在 `arm_lens` 边界里被记成 recorded
+  lens edge（`weave_edges.extend(_boundary_segments(arm_lens))`），于是同一条缝被重新描上：
+  `spec-self-intersecting` 上就是人眼第二轮点名的 `0.0112` / `0.0163` 两条 stub，
+  `ros-n5-ca-l2-o12` 上是 6 条 `0.24 = 2 * offset` 的横切口。现在 flush 环边与描边一样算作
+  **覆盖**，落在它上面的 recorded lens edge 不再升成 overlay。这个函数 boolean 与 arrangement
+  都调（`render/arrangement.py` 走同一条路径），所以两个后端一起变干净：57 个可跑案例合计少画
+  **48** 条内部描边——boolean **43** 条（spec 12→10、random-walks-6 25→6、random-walks-12 25→13、
+  `adp-arc-overlapping` 731→727、n5 CA L2 o12 6→0），arrangement **5** 条（random-walks-6 11→8、
+  `adp-parametric` 2→0）；其余案例一条不动。全量面板逐像素对照（对改动前备份，阈值 8/255）只有
+  **6 张**变了，两张 hybrid 面板 `0 px`——判据上收是行为等价的搬运，`ros-n5-ca-l2-o12` 的 hybrid
+  面板现在与同案 boolean 面板逐像素相同。`notch_gaps` 同时学会同一件事，否则单点上收会让它把那条
+  截面接缝重新报成缺口（`docs/REVIEW.md` §206 早已判它是误报，顺着它描出来是一根 44 px 竖刺）；
+  这条子句不是空转：5 张卡的 arrangement 芯片因此从"检查失败"变成通过（random-walks-6 `7` 段 /
+  random-walks-12 `22` 段 / n5 `1` 段 / `deg-figure-eight` `5` 段 / `gal-infinity` `9` 段），这些
+  段都落在 flush 环边上——**读数变好、画面没变**。代价是读数回到真实值：spec 的 boolean
+  `dangling_ends` 2 → 4，random-walks-6 boolean 24 → 36、arrangement 38 → 39，random-walks-12
+  boolean 40 → 48——原先那些端头是被不该画的 stub / 覆盖边以 T 形接合"接上"的，而 hybrid 的 4 条
+  桥接补的正是 spec 那 4 个 V 形端头。全页合计 `检查失败` 14 → 9 项、`警告` 10 → 11 项（多的那 1 项
+  是本轮首次进页面的 n5 hybrid 面板自带的 `region.area_conserved`）。`flush` 绕行桥接
+  （`max_flush_bridge`）不受影响：它是按设计在一条 flush 边串两端之间接断头的短弦，不是把被否掉的
+  缝重新描一遍。
+- Fix `render/regions.py` / `render/arrangement.py`：区域环现在是填充和大部分轮廓的唯一来源，
+  但当布尔/剖分把缺口两侧的可见面归到同一个区域时，真实的编织边界会落在一个多边形内部，
+  区域环上根本没有可描的边。引擎新增 `outline_edges`，把这类“可见但不在任何区域环上”的
+  透镜段显式返回；Manim 适配器将它们作为最高层的开口描边绘出，审计器也把它们计入覆盖区间。
+- Fix arrangement 的描边层：剖分面的填充不再各自带 stroke，所有可见外环/run 统一放进
+  `Lace.outlines` 并画在全部填充之上。此前后画的下一个面会把先画 stroke 盖掉一半，
+  同一条边界看起来忽粗忽细；布尔后端保留原有交错绘制顺序。
+- Fix arrangement 的短透镜缺口：同一个最终区域吃掉半条透镜边时，只在缺口一端是**没有
+  延续的描边端点**、且尚存 stroke 与缺口共线时补 `outline_edges`。不按端点附近随意连线，
+  因此不会把截面接缝重新画成横线。
+- Fix flush 绕行桥接：布尔运算偶尔生成 `stroke → flush detour → stroke`，两条正常边界
+  之间只剩一条极短直连边。flush 绕行本身仍不描；桥接只在绕行回到阈值内时输出，避免把
+  真正的横向接缝或交叉切口误连成丝带内部的线。
+- 复测：
+  - `spec-self-intersecting`：boolean 缺口 `2 → 0`、可见断头 `24 → 2`；arrangement
+    可见断头 `15 → 0`，`outline_edges` 为 30 条；新增的补线全部来自已记录透镜边且短于
+    `0.30 * offset`。boolean 剩余 2 处是共点切弦，arrangement 现在不再把半条透镜边留成
+    丝带内部的短线。
+  - hybrid 复测（4K，与 boolean 逐像素对照）：`spec-self-intersecting` 只接受 **4** 条桥接
+    （最长 `0.0345`，阈值 `0.5 * offset = 0.04`），人眼点名的四角缺口全部闭合；hybrid 另外把
+    **10** 条亚像素 Boolean overlay（`0.0003..0.0018`，中点都落在填充内，正是布尔自己画在填充
+    上的孤立黑点）丢掉，`outline_edges` 只剩那 4 条桥接。boolean 通道现在是 10 条 overlay
+    （两条 flush 接缝 stub 已由共享判据去掉），所以逐像素差图相对 boolean 仍是 4 处角点：
+    4 条桥接的补线 + 10 条黑点的移除。hybrid 的 weave audit 因先后跑了两个子后端、探针记录的
+    不是返回的区域，如实报 `skip`（不编造成通过）；boolean 通道的 `audit.dangling_ends` 现在
+    是 **4** 处而不是 2 处——那两条 stub 原先以 T 形接合盖住了其中两个 V 形端头，hybrid 那 4 条
+    桥接补的就是这 4 个。
+  - flush 判据上收到共享函数后的全量复测（57 个可跑案例）：两个后端合计少画 **48** 条
+    内部描边——boolean **43** 条（`spec-self-intersecting` 12→10、`index-random-walks-6` 25→6、
+    `index-random-walks-12` 25→13、`adp-arc-overlapping` 731→727、`ros-n5-ca-l2-o12` 6→0），
+    arrangement **5** 条（`index-random-walks-6` 11→8、`adp-parametric` 2→0），其余案例
+    一条不动。面板逐像素对照（对改动前备份，阈值 8/255）只有 **6 张**变了，两张 hybrid 面板
+    `0 px`；把被去掉的墨迹标红后，看到的就是 `mark_flush_edges` 自己点名的两类"不该描"的边：
+    横穿丝带的接缝短线，与躺在丝带中间的粗笔画。**残余**：剩下的 overlay 里还有一族压在 flush
+    墨迹上，那是 `max_flush_bridge` 的绕行桥接弦（walks-6 3 条、walks-12 9 条、
+    `adp-arc-overlapping` 397 条），按构造短于 `0.05 * offset`（≈1 px）、作用是接上两个断头，
+    本轮未动；arrangement 侧同类残余另有 walks-6 1 条、walks-12 5 条，判别式的这条子句不碰
+    第二条规则，所以它们原样留下。
+  - `notch_gaps` 的 flush 子句让 5 张卡的 arrangement 芯片从"检查失败"变成通过
+    （`index-random-walks-6` `7` 段 / `index-random-walks-12` `22` 段 / `ros-n5-ca-l2-o12`
+    `1` 段 / `deg-figure-eight` `5` 段 / `gal-infinity` `9` 段，全部落在 flush 环边上）：
+    读数变好、画面没变。后两张是共点退化的展示案例，`REGION-COINCIDENT-CROSSINGS` 等诊断仍在。
+  - `index-random-walks-6`：arrangement 可见断头本页读数 **39**（判据上收去掉 3 条 arrangement
+    overlay 后由 38 变 39；更早一轮记的 40 已不是当前读数）。
+  - `index-random-walks-12`：arrangement 可见断头 **63**（判据前后一致；更早一轮记的 62 已不是
+    当前读数）。
+  - `adp-parametric` 的 arrangement 断头仍为 1（overlay 2 → 0，断头读数不变所以画面只差 3 px）；
+    `gal-infinity` 仍保留 1 处共点退化残余。
+  - 24 组玫瑰线双后端审计中，普通配置仍全部为四项 0；`n5 CA L2 o12` 的 boolean
+    缺口 `6 → 0`（17 个断头保留），`n5 PO L2 o12` 的 boolean 缺口 `5 → 1`、断头
+    `21 → 7`，其余残余仍只在已声明的共点退化配置上。
+- Add 回归测试：`tests/test_regions.py` 覆盖 flush 短绕行桥接和 `LaceResult.outline_edges`
+  的有限性；`tests/test_optional_manim.py` 断言显式边界层画在填充之上。审计脚本在生成
+  对比图时也实际画出 `outline_edges`。
+
+## Unreleased — 共点交叉：arrangement 不再把透镜边描成扎进丝带的线，并如实上报共点
+
+- Fix `render/arrangement.py`：同一路径的两个分段都带着自交透镜边时，**后画**的那一份原先把描边
+  画在两个填充之上——共点处（`gal-infinity` 的"双纽线自交 + 两次直线×曲线"同点）就成了从 V 形
+  缺口顶点扎到截面切口的一根全长黑线，而 boolean 同位置纯绿。现在同一路径的透镜边由**先画**的
+  分段描（`mark_flush_edges(..., hide_later_same_path_lens=True)`，仅 arrangement 传入），让位
+  条件是先画区域的环也带着同一条边；boolean 的既有行为（被压分段的切口可能到不了那儿，
+  `n=7 CA` 的教训）不变。修完那半段只剩半明半暗（被后画填充盖住一半），与 boolean 的半遮描边
+  同性质。
+- Add 共点诊断：arrangement 现在也报 `REGION-COINCIDENT-CROSSINGS`（此前只有 boolean 报），
+  `details` 给出共点的交叉分组；面积仍然守恒，message 说明"同一路径两个分段之间的透镜边由先画
+  的那一段描边，交叉处编织线可能不完整"。
+- Add `tests/test_regions.py::test_the_later_section_hides_its_duplicate_of_a_same_path_lens_edge`
+  （含"不带该参数时两份都描"的反向断言，保住 boolean 的行为）与
+  `tests/test_arrangement.py::test_a_coincident_node_is_reported_and_keeps_no_stroke_inside_it`
+  （figure-eight + 过原点的直线：共点被上报，且曲线两个分段之间不再有描边）。
+- 复测（`benchmarks/weave_audit.py` 的四个配置，与 HEAD 逐项对照）：`n5 CA L2 o12` 断头
+  **17 → 13**、缺口 0 → 0；`n5 PO L2 o12`、`n10 PA L1p2 o08`、`n7 CA L2 o10` 逐项不变。
+  试过并**否决**的另一条路：把共点处的透镜整段判给后画分段——那根线只是镜像到另一半，
+  消不掉（实测 `(+0.046,+0.138)` → `(-0.046,+0.138)`）。
+
+## Unreleased — 非交叉重叠：两个 ribbon 后端改用同一把绘制键
+
+- Fix `render/arrangement.py` 的无透镜面归属：原先取 `(-层, path_id 字典序)` 的最小值，而
+  boolean 按输入顺序绘制，于是**没有交叉的重叠**（平行重叠、L 形角、被诊断的近切/共点）在 id
+  与输入顺序不一致时，两个后端会显示不同的股线。实测：首个路径 id 为 `z`、第二个为 `a` 的平行
+  重叠，旧 arrangement 把重叠面给了 `a`（先画），boolean 显示的是 `z`（后画）。现在
+  arrangement 取 `(层, 输入位置, 节点)` 的最大值——正是 boolean 绘制顺序里最后画的那条；
+  端点接触仍优先由 `diagnosed_contact_yields` 覆盖（结束股让位，压过这把键）。共点矛盾的
+  归属键也从"层 → 节点 id"改成"层 → 输入位置 → 节点"。
+- 已知残余（记入 `docs/REVIEW.md`）：L 形角两条股线都在同一点结束，没有贯通股可让，始终有
+  一条股的平头端盖落在另一条带里；两个后端现在同赢家、结果确定，但外观是降级，真解法是给
+  共享端点做 miter 接头。
+- Add `tests/test_arrangement.py::test_both_backends_agree_on_which_strand_shows_at_an_unwoven_overlap`：
+  平行重叠 / L 角 / id 反序的 T 接触三种输入，断言两个后端覆盖探针的是同一条股线。
+
+## Unreleased — 诊断的端点接触：结束的那条股线让位，端头不再戳进贯通丝带
+
+- Fix 两个 ribbon 后端的绘制归属：`endpoint_touch` 默认只诊断、不切口，两条丝带在那里
+  本来就重叠，"谁可见"完全由绘制先后（boolean）或面归属（arrangement）决定；此前 boolean
+  按**输入顺序**、arrangement 按 **path_id 字典序**，于是 `deg-t-junction` 的 boolean 把
+  竖线画在最后，其端头与两条侧边露出约半个带宽（offset 0.14），端盖横线落在横线丝带中间；
+  把两条路径的输入顺序换一下，同一个缺陷就跑到 arrangement 上（横线区域被咬掉
+  `0.28 × 0.14 = 0.0392`，0.5600 → 0.5208）。两个后端原先的"正常"都只是顺序的巧合。
+- 规则来自输入而不是列表顺序：在**开放路径的端点**落在另一条上的接触处，**结束的股线让位**
+  ——boolean 里它先画（`draw_index` 更小），arrangement 里它不拥有重叠面
+  （`diagnosed_contact_yields`）。拓扑不变：仍无 assignment、仍报 `GEOM-ENDPOINT-TOUCH`、
+  仍不切口（两个区域各自完整，boolean 的 `REGION-OVERLAPPING-SECTIONS` 照旧如实上报）。
+  两条都在该点结束（L 形角）或都不在（折线顶点擦碰）时不套用规则，保留各后端的确定性兜底。
+- Add `tests/test_regions.py::test_the_strand_that_ends_on_another_is_painted_under_it` 与
+  `tests/test_arrangement.py::test_the_t_contact_face_goes_to_the_through_strand_in_either_input_order`：
+  两种输入顺序都断言同一个赢家，并要求 boolean 的两个区域面积不变（只改画序、不切口）。
+
 ## Unreleased — 引擎：闭合路径接缝上的自交不再被当成两个交叉
 
 - Fix `geometry/intersections.py` 的交叉去重：闭合路径上**弧长 0 与弧长 L 是同一个位置**，

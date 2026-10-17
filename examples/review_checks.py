@@ -589,9 +589,10 @@ def audit_signatures(result: Any) -> list[Check]:
             "审计探针记录的区域不是本次求解的对象（探针安装晚于求解，或数据已过期）："
             "跳过缺陷签名而不是误报",
         )]
+    overlay_edges = getattr(result, "outline_edges", ())
     violations, over_marked = weave_audit.audit(regions)
-    gaps, gap_length = weave_audit.notch_gaps(regions)
-    dangling = weave_audit.dangling_ends(regions)
+    gaps, gap_length = weave_audit.notch_gaps(regions, overlay_edges)
+    dangling = weave_audit.dangling_ends(regions, overlay_edges)
     return [
         Check(
             "audit.defect_edges", "没有画进丝带内部的描边",

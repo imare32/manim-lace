@@ -231,7 +231,9 @@ pass 时，**它本身就是缺口**——被前一个测试吞掉，于是 wher
 同属一个区域时，在那里描边反而是"丝带中间的线"，不算）。升级前该栏在 22 组上报假缺口（把接缝
 帽当成缺口线等），升级后 48 组里 46 组为 0。
 
-**残留（诚实降级）**：`n5 CA L2 o12`（boolean 6 处/1.44）与 `n5 PO L2 o12`（boolean 4 处/0.72）。
+**残留（诚实降级，更新后）**：显式 `outline_edges` 层把 `n5 CA L2 o12` 的 boolean 缺口从
+6 处/1.44 降到 **0**；`n5 PO L2 o12` 从 5 处/0.835 降到 **1 段/0.1641**。两者的断头仍分别
+保留 17 与 7 处。
 这两个配置的交叉**大量共点**（n5 CA 上 `X0002/X0003/X0011` 在同一点，全部 11 处交叉共点），引擎
 已经分别报 `REGION-COINCIDENT-CROSSINGS`（boolean：各交叉各自扣除的重叠区互相抵消，该方法在这
 种退化配置下无法保证面积）与 `REGION-LENS-APPROXIMATION`（arrangement），另有 `GEOM-NEAR_TANGENT`
@@ -271,6 +273,7 @@ pass 时，**它本身就是缺口**——被前一个测试吞掉，于是 wher
 原卡与报告卡），判据直接复用 `benchmarks/weave_audit.py::dangling_ends`，实测在旧切口状态下
 失败并列出 6 处（正含用户指出的两处）。
 
-**残留（诚实降级，与 §9 同一批）**：`n5 CA L2 o12` 与 `n5 PO L2 o12` 仍有缺口与断头，二者交叉
-大量共点、引擎分别报 `REGION-COINCIDENT-CROSSINGS` 与 `REGION-LENS-APPROXIMATION`，同一配置
-arrangement 后端干净。48 组里其余 46 组四项（缺陷/漏轮廓/缺口/断头）全 0。
+**残留（诚实降级，与 §9 同一批）**：`n5 CA L2 o12` 与 `n5 PO L2 o12` 仍有少量缺口或断头；
+二者交叉大量共点、引擎分别报 `REGION-COINCIDENT-CROSSINGS` 与
+`REGION-LENS-APPROXIMATION`。显式边界层已消掉大部分可见缺口，普通配置仍全部为四项
+（缺陷/漏轮廓/缺口/断头）0。

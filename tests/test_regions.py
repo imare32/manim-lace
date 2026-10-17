@@ -13,6 +13,7 @@ from manim_lace.render.regions import (
     RibbonRegion,
     _drop_folds,
     mark_flush_edges,
+    missing_weave_outlines,
     render_region_geometry,
 )
 
@@ -74,6 +75,112 @@ def test_the_under_ribbon_loses_exactly_the_over_ribbon_footprint():
     # No radius heuristic: the removed area is the exact Boolean intersection.
     assert visible == pytest.approx(under_band.area - lens.area, abs=1e-9)
     assert not any(d.code == "REGION-AREA-MISMATCH" for d in result.diagnostics)
+
+
+def test_the_strand_that_ends_on_another_is_painted_under_it():
+    # A T junction is diagnosed, not woven, so nothing is cut: both bands stay whole and
+    # overlap. Then the paint order is the whole picture, and it may not depend on the
+    # order the two paths were handed in — with the source order it put the ending
+    # strand last and its cap showed as a stub half a ribbon width inside the through
+    # ribbon (deg-t-junction, Boolean channel).
+    offset = 0.14
+    through = PolylinePath(np.array([[-1.0, 0.0], [1.0, 0.0]]), path_id="through")
+    ending = PolylinePath(np.array([[0.0, 0.0], [0.0, 1.0]]), path_id="ending")
+    for ordered in ([through, ending], [ending, through]):
+        result = LaceEngine(ordered, offset=offset, render_mode="ribbon").solve()
+        assert [crossing.kind for crossing in result.crossings] == ["endpoint_touch"]
+        assert result.topology.assignments == {}
+        first: dict[str, int] = {}
+        for region in result.pieces:
+            first[region.path_id] = min(
+                first.get(region.path_id, region.draw_index), region.draw_index
+            )
+        assert first["ending"] < first["through"], ordered
+        # Still no cut, just the paint order: both bands keep their own area and cover
+        # the contact point.
+        for region in result.pieces:
+            polygon = Polygon(region.exterior.points, [hole.points for hole in region.holes])
+            assert polygon.covers(Point(0.0, 0.0))
+        assert sum(region.area for region in result.pieces) == pytest.approx(
+            _band([[-1.0, 0.0], [1.0, 0.0]], offset, cap_style="flat").area
+            + _band([[0.0, 0.0], [0.0, 1.0]], offset, cap_style="flat").area,
+            abs=1e-9,
+        )
+
+
+def test_the_engine_returns_explicit_overlay_outlines_for_a_lens_inside_a_region():
+    # A Lissajous 5:4 curve creates the same lens-inside-a-region case as the
+    # spec-self-intersecting review page: the Boolean region rings cannot carry every
+    # visible notch. Those absent edges are part of the result now, not something the
+    # Manim adapter has to rediscover.
+    t = np.linspace(0.0, 2.0 * np.pi, 1001)
+    curve = PolylinePath(
+        np.column_stack((np.sin(5.0 * t + np.pi / 4.0), np.sin(4.0 * t))),
+        path_id="self-lissajous",
+    )
+    result = LaceEngine(
+        [curve],
+        offset=0.08,
+        render_mode="ribbon",
+        weave_mode="free",
+    ).solve()
+
+    assert result.outline_edges
+    for edge in result.outline_edges:
+        assert np.isfinite(edge.start).all()
+        assert np.isfinite(edge.end).all()
+        assert np.linalg.norm(np.asarray(edge.end) - np.asarray(edge.start)) > 1e-9
+
+
+def test_overlay_outlines_never_reexpose_flush_ring_ink():
+    # ``flush`` is the region walk's verdict that a piece of the boundary must not be
+    # stroked: the section-cut seam of a self-crossing, a side another strand covers, or
+    # an interior boundary that is not weave. Such an edge already has its ink from the
+    # ring that carries it (the fill is right); re-exposing it as an overlay paints the
+    # suppressed line back on -- a spur or a chord straight across the middle of the
+    # ribbon, which is what the human review marked on the spec-self-intersecting page.
+    # The Rule-A path (a recorded lens edge the rings cannot carry) therefore must never
+    # emit a piece a ring already carries. Rule B -- the ``max_flush_bridge`` chord that
+    # joins two strokes *across* a run of flush edges -- is a different mechanism, and on
+    # this input none of its chords coincides with a single flush edge, so the invariant
+    # is asserted over the whole overlay.
+    t = np.linspace(0.0, 2.0 * np.pi, 1001)
+    curve = PolylinePath(
+        np.column_stack((np.sin(5.0 * t + np.pi / 4.0), np.sin(4.0 * t))),
+        path_id="self-lissajous",
+    )
+    engine = LaceEngine(
+        [curve],
+        offset=0.08,
+        render_mode="ribbon",
+        weave_mode="free",
+    )
+    result = engine.solve()
+    boolean = render_region_geometry(
+        engine.paths, result.crossings, result.topology, offset=0.08
+    )
+
+    flush_lines = [
+        LineString([tuple(start), tuple(end)]).buffer(1e-9)
+        for region in boolean.regions
+        for index, (start, end) in enumerate(
+            zip(
+                np.asarray(region.exterior.points, dtype=float)[:-1],
+                np.asarray(region.exterior.points, dtype=float)[1:],
+                strict=False,
+            )
+        )
+        if index in set(region.flush_edges)
+    ]
+    assert flush_lines
+    assert boolean.outline_edges
+    for edge in boolean.outline_edges:
+        line = LineString(
+            [tuple(np.asarray(edge.start, dtype=float)), tuple(np.asarray(edge.end, dtype=float))]
+        )
+        assert not any(
+            seam.contains(line) for seam in flush_lines
+        ), f"overlay repeats flush ring ink: {edge}"
 
 
 @pytest.mark.parametrize("offset", [0.1, 0.2, 0.35])
@@ -391,6 +498,128 @@ def test_the_weave_notch_is_stroked_even_where_it_is_its_own_band_edge():
     # Edge 3 is the piece of A's top side under C: C is painted over both sides of it,
     # so the notch is hidden underneath and C's own outline is the one owed.
     assert a.flush_edges == (3,), a.flush_edges
+
+
+def test_the_later_section_hides_its_duplicate_of_a_same_path_lens_edge():
+    # Two sections of one self-crossing path both carry the lens side between them. In
+    # the cutting backend only the section painted first owns that edge — the pass above
+    # keeps its whole band — so its stroke ends up under the fill of the pass on top. The
+    # arrangement backend gives the edge to both sections, and the later one's stroke
+    # lands on top of both fills: the same-path lens side then shows as a full line
+    # inside one colour (measured on ``gal-infinity``). With the flag the later section
+    # hides its duplicate and the earlier one's stroke is the one owed.
+    def rectangle(region_id, x0, y0, x1, y1, draw_index):
+        ring = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]], dtype=float)
+        return RibbonRegion(
+            region_id=region_id, path_id="P0000",
+            exterior=RegionRing(points=ring, role="exterior"),
+            area=float(Polygon(ring).area), draw_index=draw_index,
+        )
+
+    def build():
+        # Two pairs of sections of one path; each pair shares the lens side between them.
+        return [
+            rectangle("half#0.region0", 0.0, 0.0, 1.0, 1.0, 0),
+            rectangle("half#1.region0", 1.0, 0.0, 2.0, 1.0, 1),
+            rectangle("full#0.region0", 4.0, 0.0, 5.0, 2.0, 0),
+            rectangle("full#1.region0", 5.0, 0.0, 6.0, 2.0, 1),
+        ]
+
+    def shared_edge(region, x):
+        """Index of the edge that runs vertically on the pair's shared side."""
+        points = region.exterior.points
+        for index in range(len(points) - 1):
+            middle = 0.5 * (points[index][0] + points[index + 1][0])
+            if abs(middle - x) < 1e-12:
+                return index
+        raise AssertionError(f"no vertical edge at x={x} in {region.region_id}")
+
+    lens = [
+        (np.array([1.0, 0.0]), np.array([1.0, 1.0])),
+        (np.array([5.0, 0.0]), np.array([5.0, 2.0])),
+    ]
+    regions = build()
+    mark_flush_edges(regions, cuts={}, weave=lens, hide_later_same_path_lens=True)
+    # The section painted first owes the stroke; the later one's copy is a duplicate.
+    assert shared_edge(regions[0], 1.0) not in regions[0].flush_edges
+    assert shared_edge(regions[1], 1.0) in regions[1].flush_edges
+    assert shared_edge(regions[2], 5.0) not in regions[2].flush_edges
+    assert shared_edge(regions[3], 5.0) in regions[3].flush_edges
+
+    # Without the flag both copies are stroked: that is the cutting backend's situation,
+    # where the pass on top keeps its whole band and does not carry that edge.
+    plain = build()
+    mark_flush_edges(plain, cuts={}, weave=lens)
+    assert shared_edge(plain[0], 1.0) not in plain[0].flush_edges
+    assert shared_edge(plain[1], 1.0) not in plain[1].flush_edges
+
+
+def test_a_short_flush_detour_is_bridged_with_an_explicit_outline():
+    # A Boolean can leave ``stroke -> flush detour -> stroke`` where the two normal
+    # boundary runs end just apart. The flush detour itself must stay hidden, but the
+    # tiny chord connecting the runs is the visible material boundary and has to be
+    # emitted as an explicit overlay.
+    ring = np.array([
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [1.01, 1.01],
+        [0.999, 1.0],
+        [0.0, 1.0],
+        [0.0, 0.0],
+    ])
+    region = RibbonRegion(
+        region_id="A.region0",
+        path_id="P0000",
+        exterior=RegionRing(points=ring, role="exterior"),
+        area=float(Polygon(ring).area),
+        draw_index=0,
+        flush_edges=(2, 3),
+    )
+
+    overlay = missing_weave_outlines([region], [], max_flush_bridge=0.02)
+
+    assert [(edge.start, edge.end) for edge in overlay] == [
+        ((1.0, 1.0), (0.999, 1.0))
+    ]
+
+
+def test_a_short_lens_gap_is_closed_when_one_end_continues_a_stroke():
+    # A planar face can merge the two sides of a lens edge after the opposite half has
+    # already been stroked. The uncovered half is still the continuation of that stroke;
+    # closing it prevents the short line from ending inside the ribbon.
+    region_a = RibbonRegion(
+        region_id="A.region0",
+        path_id="A",
+        exterior=RegionRing(
+            points=np.array([[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5], [0.0, 0.0]]),
+            role="exterior",
+        ),
+        area=0.25,
+        draw_index=0,
+        flush_edges=(1,),
+    )
+    region_b = RibbonRegion(
+        region_id="B.region0",
+        path_id="B",
+        exterior=RegionRing(
+            points=np.array([[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0], [0.5, 0.0]]),
+            role="exterior",
+        ),
+        area=0.5,
+        draw_index=1,
+        flush_edges=(3,),
+    )
+
+    overlay = missing_weave_outlines(
+        [region_a, region_b],
+        [(np.array([0.0, 0.5]), np.array([1.0, 0.5]))],
+        max_lens_bridge=0.6,
+    )
+
+    assert [(edge.start, edge.end) for edge in overlay] == [
+        ((0.5, 0.5), (1.0, 0.5))
+    ]
 
 
 def test_the_flush_indices_address_the_ring_the_renderer_draws():

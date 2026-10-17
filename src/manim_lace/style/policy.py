@@ -242,6 +242,19 @@ class StylePlan:
                 return assignment
         return None
 
+    def assignment_for_path(self, path_id: str) -> StyleAssignment | None:
+        """The first assignment for a source path, used by fill-only repair regions.
+
+        A hybrid underlay can create a patch whose synthetic ``region_id`` was not
+        present when the style plan was built.  The patch still belongs to one source
+        path, so it must use that path's colour rather than falling back to a uniform
+        fill (which can be visibly wrong in multi-strand scenes).
+        """
+        for assignment in self.assignments:
+            if assignment.path_id == str(path_id):
+                return assignment
+        return None
+
     def color_for(self, object_id: str) -> str | None:
         assignment = self.assignment_for(object_id)
         return assignment.color if assignment else None

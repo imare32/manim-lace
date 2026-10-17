@@ -129,6 +129,8 @@ def test_apply_style_paints_each_path_with_its_own_palette_colour():
         }
         assert len(colours) == 1
     assert plan.assignment_for(result.pieces[0].piece_id) is not None
+    assert plan.assignment_for_path(result.paths[0].path_id) is not None
+    assert plan.assignment_for_path("missing") is None
     assert plan.color_for("nope") is None
     assert plan.ordered()[0].object_id in {p.piece_id for p in result.pieces}
 

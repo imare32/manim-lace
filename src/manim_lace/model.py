@@ -44,8 +44,9 @@ JoinStyle = Literal["miter", "bevel", "round"]
 #: Which ribbon implementation to use (SPEC FR-054): ``boolean`` cuts the overlap out of
 #: the under ribbon and resolves self-crossings with ordered sections, ``arrangement``
 #: extracts the planar arrangement of the ribbon boundaries and decides ownership per
-#: face. Both consume the same crossings and assignment.
-RibbonBackend = Literal["boolean", "arrangement"]
+#: face, and ``hybrid`` keeps Boolean occlusion while borrowing local repairs from the
+#: arrangement. All consume the same crossings and assignment.
+RibbonBackend = Literal["boolean", "arrangement", "hybrid"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,3 +309,8 @@ class LaceResult:
     trace: list[TraceEvent]
     render_mode: str = "stroke"
     detection_stats: CrossingStats | None = None
+    #: Visible weave boundaries that no region exterior can carry (ribbon backends).
+    #: Renderers must stroke these after the fills; the stroke backend leaves it empty.
+    outline_edges: list[Any] = field(default_factory=list)
+    #: Fill-only repair regions below ``pieces`` for the experimental hybrid backend.
+    fill_underlay: list[Any] = field(default_factory=list)

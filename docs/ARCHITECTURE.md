@@ -52,10 +52,11 @@ that produced the hit.
 
 ## Region backends (`render/regions.py`, `render/arrangement.py`, SPEC FR-052..FR-058)
 
-Two implementations exist behind `ribbon_backend`, because the interesting question is not
-"which one is right" but "where do they have to disagree". Both consume the same
-`WeaveTopology`, return the same `RegionRenderResult`, and are compared by
-`tests/test_arrangement.py`.
+Three implementations exist behind `ribbon_backend`: the two complete backends below,
+because the interesting question is not "which one is right" but "where do they have to
+disagree", plus an experimental hybrid that keeps Boolean occlusion and borrows only
+local repairs from the arrangement. All consume the same `WeaveTopology`, return the same
+`RegionRenderResult`, and are compared by `tests/test_arrangement.py`.
 
 ### Boolean cutting (`ribbon_backend='boolean'`, the default)
 
@@ -113,6 +114,23 @@ instead of breaking the core import.
   colour at `z_index = -0.5`, below every fill: two abutting polygons each paint only part of
   the pixels on their shared edge, and without it the background shows through as a hairline
   across the strand. Scenes must draw `Lace.outlines` together with `Lace.ribbons`.
+- Some visible weave notches end up *inside* a final owner polygon: the two faces on either
+  side were merged after ownership was decided, so no exterior ring carries the boundary. Both
+  backends expose those absent segments as `RegionRenderResult.outline_edges`, propagated to
+  `LaceResult.outline_edges`; the Manim facade strokes them above every fill in
+  `Lace.outlines`. A constrained bridge also closes the `stroke -> flush detour -> stroke`
+  case when the two flush chords return to almost the same point, and closes a short recorded
+  arrangement lens edge only when an uncovered, collinear stroke end needs its continuation.
+  True transverse seams stay hidden, and so is any piece a ring already carries as a *flush*
+  edge: `flush` is the walk's own verdict that the piece must **not** be stroked — the
+  section-cut seam of a self-crossing, a side another strand covers, a non-weave interior
+  boundary — so the ring covering it is the answer, not a missing edge. Counting flush ink
+  as coverage is what keeps the overlay from painting back the very lines the walk
+  suppressed (`docs/DEFECT_HUNTING.md` §9).
+- The arrangement backend paints every filled face first and every visible ring/run afterwards:
+  its faces are interior-disjoint, so a later fill must never cut a previously drawn outline
+  in half. The Boolean backend keeps its interleaved painter order because that is part of its
+  cutting model.
 - A ring the Boolean backend hands out is cleaned of *folds* before anything uses it
   (`_drop_folds`, applied in `_ring_points` so exteriors, holes and both backends get it). A
   cut that only touches the boundary — the tip of a weave lens is the usual case — can make
@@ -134,10 +152,11 @@ exactly one owner:
 - one covering node → that node;
 - several covering nodes → the strand that the local crossing says is on top (the lens of
   that crossing contains the face);
-- several contradictory crossings on the same face → the deterministic path order, reported
-  as `REGION-CONFLICTING-OVERLAP`;
-- several strands with no crossing nearby → the path order, reported as
-  `REGION-OFF-CROSSING-OVERLAP`.
+- several contradictory crossings on the same face → the highest painter layer, then the
+  path order, reported as `REGION-CONFLICTING-OVERLAP`;
+- several strands with no crossing nearby → the same painter order the Boolean backend
+  paints by (the strand painted last owns the face), except at a diagnosed endpoint
+  contact where the ending strand yields, reported as `REGION-OFF-CROSSING-OVERLAP`.
 
 Consequences, all verified in the tests: regions never overlap
 (`region_area_sum == painted_area`), `painted_area == union_area` even where several
@@ -147,6 +166,43 @@ things the arrangement cannot compute are reported instead: slivers from near-ta
 boundaries (`REGION-DROPPED-SLIVER`) and a self-crossing whose local window is too short to
 contain its overlap (`REGION-LENS-APPROXIMATION`, checked against the analytic
 `4 * offset^2 / sin(theta)`).
+
+### Experimental hybrid (`ribbon_backend='hybrid'`)
+
+The hybrid is deliberately asymmetric. Its primary result is the Boolean one, because
+painter order already answers the question the arrangement backend struggles to express
+when regions are disjoint: a long edge that is physically under another pass must be
+covered by that pass's later fill. The arrangement result is then used only as evidence
+for two local repairs:
+
+- a *visible Boolean open end* — a stroke end that stops inside the ribbon rather than
+  joining another stroke or sitting under a later fill — is walked against the next
+  Boolean boundary along the reversed stroke direction, and the straight connector is
+  added as a top-layer `outline_edges` bridge **only when arrangement centerlines cover
+  that connector end to end** (within a hairline normal band, `max(tolerance,
+  0.02 * offset)`). The band, rather than an ideal ray, is what makes the walk find the
+  far side: at an open end the stroke direction and the arrangement boundary differ by a
+  fraction of a degree, invisible at stroke width but enough to slip past the next stroke
+  over a connector that long. A connector is at most `0.5 * offset`; a hole in the
+  arrangement evidence rejects it. No arrangement edge is added merely for being short —
+  that is how the first draft produced isolated black dots;
+- Boolean `outline_edges` that are sub-pixel (`<= 0.05 * offset`) **and** whose midpoint
+  lies inside a Boolean fill are dropped. The Boolean overlay paints them after every
+  fill, so they show as lone black specks on top of a ribbon the hybrid is meant to keep
+  clean;
+- when the Boolean union is genuinely smaller than the arrangement union (coincident
+  crossings and similar degenerate configurations), the missing arrangement face is
+  returned as a fill-only `RibbonRegion` in `fill_underlay`. The adapter draws that layer
+  below the Boolean fills and always with `stroke_width=0`, so the repair cannot become
+  a new visible line.
+
+The result reports `REGION-HYBRID-EXPERIMENTAL` with the Boolean/arrangement outline-edge
+counts, the number of accepted bridges and the patch count/area. Because the hybrid runs
+both child backends, the weave-audit probe (which records the *last* `mark_flush_edges`
+call) no longer matches the returned regions, so the audit signatures report `skip`
+rather than a fabricated verdict. It is not a replacement for either complete backend: it
+is the measured combination of Boolean occlusion and arrangement proof that a small piece
+is missing.
 
 ### Cost
 

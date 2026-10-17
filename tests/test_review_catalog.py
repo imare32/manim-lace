@@ -143,7 +143,7 @@ def test_catalog_is_structurally_sound() -> None:
         assert case.title and case.prose, case.key
         assert case.offset > 0, case.key
         assert case.weave_mode in {"alternating", "free", "manual"}, case.key
-        assert set(case.channels) <= {"stroke", "boolean", "arrangement"}, case.key
+        assert set(case.channels) <= {"stroke", "boolean", "arrangement", "hybrid"}, case.key
         assert set(case.engine) <= ALLOWED_ENGINE_KEYS, (case.key, set(case.engine))
         if case.kind == "error":
             assert case.expect_error, f"{case.key} must name the error it expects"

@@ -377,3 +377,103 @@ def test_ribbon_algorithm_mode_reads_out_the_face_walk():
     assert note is not None
     assert walk["backend"] in note
     assert str(walk["owner_count"]) in note
+
+
+def test_explicit_overlay_outlines_are_painted_above_the_ribbon_fills():
+    from manim_lace.manim_api import _region_groups
+    from manim_lace.render.regions import OutlineEdge, RegionRing, RibbonRegion
+
+    ring = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]])
+    region = RibbonRegion(
+        region_id="A.region0",
+        path_id="A",
+        exterior=RegionRing(points=ring, role="exterior"),
+        area=1.0,
+        draw_index=0,
+    )
+    overlay = OutlineEdge(
+        start=(0.25, 0.25),
+        end=(0.75, 0.75),
+    )
+
+    ribbons, _, outlines = _region_groups(
+        [region],
+        fill_color="white",
+        fill_opacity=1.0,
+        stroke_color="black",
+        stroke_width=2.0,
+        stroke_opacity=1.0,
+        hole_color="white",
+        draw_holes=True,
+        overlay_edges=[overlay],
+    )
+
+    fill_top = max(float(mob.z_index) for mob in ribbons)
+    assert any(float(mob.z_index) > fill_top for mob in outlines)
+
+
+def test_arrangement_rings_are_stroked_above_every_fill():
+    from manim_lace.manim_api import _region_groups
+    from manim_lace.render.regions import RegionRing, RibbonRegion
+
+    ring = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]])
+    region = RibbonRegion(
+        region_id="A.region0",
+        path_id="A",
+        exterior=RegionRing(points=ring, role="exterior"),
+        area=1.0,
+        draw_index=0,
+    )
+
+    ribbons, _, outlines = _region_groups(
+        [region],
+        fill_color="white",
+        fill_opacity=1.0,
+        stroke_color="black",
+        stroke_width=2.0,
+        stroke_opacity=1.0,
+        hole_color="white",
+        draw_holes=True,
+        outline_above_fills=True,
+    )
+
+    assert float(ribbons[0].get_stroke_width()) == 0.0
+    fill_top = max(float(mob.z_index) for mob in ribbons)
+    assert outlines
+    assert min(float(mob.z_index) for mob in outlines) > fill_top
+
+
+def test_hybrid_fill_underlay_is_drawn_below_and_without_an_outline():
+    from manim_lace.manim_api import _region_groups
+    from manim_lace.render.regions import RegionRing, RibbonRegion
+
+    def square(name, x, draw_index):
+        ring = np.array([
+            [x, 0.0], [x + 1.0, 0.0], [x + 1.0, 1.0], [x, 1.0], [x, 0.0],
+        ])
+        return RibbonRegion(
+            region_id=name,
+            path_id=name,
+            exterior=RegionRing(points=ring, role="exterior"),
+            area=1.0,
+            draw_index=draw_index,
+        )
+
+    primary = square("A", 0.0, 0)
+    repair = square("hybrid:patch", 1.0, 0)
+    ribbons, _, _ = _region_groups(
+        [primary],
+        fill_color="white",
+        fill_opacity=1.0,
+        stroke_color="black",
+        stroke_width=2.0,
+        stroke_opacity=1.0,
+        hole_color="white",
+        draw_holes=True,
+        underlay_regions=[repair],
+    )
+
+    underlay, real = ribbons[0], ribbons[1]
+    assert float(underlay.z_index) < float(real.z_index)
+    assert float(underlay.get_stroke_width()) == 0.0
+    assert float(real.get_stroke_width()) > 0.0

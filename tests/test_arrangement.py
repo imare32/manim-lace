@@ -12,6 +12,7 @@ import pytest
 
 from manim_lace import LaceEngine, PolylinePath
 from manim_lace.render.arrangement import render_arrangement_regions
+from manim_lace.render.hybrid import render_hybrid_regions
 from manim_lace.render.regions import render_region_geometry
 
 shapely = pytest.importorskip("shapely")
@@ -82,6 +83,154 @@ def test_the_two_backends_agree_on_ordinary_crossings():
         # simply does not give it to the strand underneath.
         assert arrangement.removed_area == pytest.approx(boolean.removed_area, abs=1e-9)
         assert arrangement.region_area_sum == pytest.approx(boolean.region_area_sum, abs=1e-9)
+
+
+def test_the_t_contact_face_goes_to_the_through_strand_in_either_input_order():
+    # Nothing is cut at a diagnosed endpoint contact, so the overlap face has to go to
+    # one of the two bands. The strand that ends there must yield: otherwise that face
+    # is its cap and the through ribbon is bitten out around it. Deciding it by path id
+    # made the channel look right only while the through path's id happened to sort
+    # first (deg-t-junction: swapping the two paths broke it).
+    offset = 0.14
+    through = PolylinePath(np.array([[-1.0, 0.0], [1.0, 0.0]]), path_id="through")
+    ending = PolylinePath(np.array([[0.0, 0.0], [0.0, 1.0]]), path_id="ending")
+    for ordered in ([through, ending], [ending, through]):
+        engine = LaceEngine(ordered, offset=offset, render_mode="ribbon")
+        result = engine.solve()
+        arrangement = render_arrangement_regions(
+            engine.paths, result.crossings, result.topology, offset=offset
+        )
+        covers = {
+            region.path_id: Polygon(
+                region.exterior.points, [hole.points for hole in region.holes]
+            ).covers(Point(0.0, 0.0))
+            for region in arrangement.regions
+        }
+        assert covers == {"through": True, "ending": False}, ordered
+        assert "REGION-OFF-CROSSING-OVERLAP" in _codes(arrangement)
+
+
+def _covering(regions, probe):
+    return [
+        region for region in regions
+        if Polygon(region.exterior.points, [hole.points for hole in region.holes])
+        .covers(Point(*probe))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "paths", "probe"),
+    [
+        # Two parallel bands: no crossing at all, the overlap is a face nobody decides.
+        (
+            "parallel overlap",
+            [
+                PolylinePath(np.array([[-1.0, 0.0], [1.0, 0.0]]), path_id="a"),
+                PolylinePath(np.array([[-1.0, 0.1], [1.0, 0.1]]), path_id="z"),
+            ],
+            (0.0, 0.05),
+        ),
+        # An L corner: both strands end at the shared point, so the endpoint-contact
+        # rule has no through side to name and the shared painter order decides.
+        (
+            "L corner",
+            [
+                PolylinePath(np.array([[-1.0, 0.0], [0.0, 0.0]]), path_id="a"),
+                PolylinePath(np.array([[0.0, 0.0], [0.0, 1.0]]), path_id="z"),
+            ],
+            (-0.05, 0.05),
+        ),
+        # A diagnosed T contact whose ids sort opposite to the input order: the rule
+        # ("the ending strand yields") has to beat the id tie-break, not follow it.
+        (
+            "T contact, ids reversed",
+            [
+                PolylinePath(np.array([[0.0, 0.0], [0.0, 1.0]]), path_id="a"),
+                PolylinePath(np.array([[-1.0, 0.0], [1.0, 0.0]]), path_id="z"),
+            ],
+            (0.0, 0.0),
+        ),
+    ],
+    ids=["parallel", "corner", "contact"],
+)
+def test_both_backends_agree_on_which_strand_shows_at_an_unwoven_overlap(label, paths, probe):
+    # Where two bands overlap without a weave, the Boolean backend resolves it by paint
+    # order and the arrangement by face ownership. Those two used different keys (input
+    # order vs path id), so the same input could show different strands per backend as
+    # soon as ids do not sort in input order. Both now read the same key: the strand
+    # painted last is the one visible (and, at an endpoint contact, the ending strand
+    # yields regardless of either order).
+    _, _, arrangement, boolean = _both(paths)
+    assert len(_covering(boolean.regions, probe)) >= 1, label
+    shown = max(
+        (region.draw_index, region.path_id) for region in _covering(boolean.regions, probe)
+    )[1]
+    owners = {region.path_id for region in _covering(arrangement.regions, probe)}
+    assert shown == "z", (label, shown)
+    assert owners == {"z"}, (label, owners)
+
+
+def test_a_coincident_node_is_reported_and_keeps_no_stroke_inside_it():
+    # The figure eight crosses itself where the line crosses it: one point, three events
+    # — ``gal-infinity``'s configuration. The section caps through the node bisect every
+    # lens side, so the boundary left between two sections of the curve is only half a
+    # ribbon wide; stroking it drew a line that stopped in the middle of the strand. The
+    # node is reported now, and nothing is stroked inside it (the fragments are seams).
+    offset = 0.12
+    paths = [
+        PolylinePath(FIGURE_EIGHT, path_id="eight"),
+        PolylinePath(np.array([[-2.0, 0.0], [2.0, 0.0]]), path_id="line"),
+    ]
+    engine = LaceEngine(paths, offset=offset, render_mode="ribbon", weave_mode="free")
+    result = engine.solve()
+    arrangement = render_arrangement_regions(
+        engine.paths, result.crossings, result.topology, offset=offset
+    )
+    assert "REGION-COINCIDENT-CROSSINGS" in _codes(arrangement)
+    diagnostic = next(
+        item for item in arrangement.diagnostics if item.code == "REGION-COINCIDENT-CROSSINGS"
+    )
+    assert diagnostic.details["groups"], diagnostic.details
+    assert arrangement.painted_area == pytest.approx(arrangement.union_area, abs=1e-9)
+    fills = {
+        region.region_id: Polygon(
+            region.exterior.points, [hole.points for hole in region.holes] or None
+        )
+        for region in arrangement.regions
+    }
+    ordered = sorted(
+        arrangement.regions, key=lambda region: (region.draw_index, region.region_id)
+    )
+
+    def topmost(point):
+        best = None
+        for region in ordered:
+            if fills[region.region_id].intersects(point):
+                best = region
+        return best
+
+    for region in arrangement.regions:
+        if not region.path_id.startswith("eight"):
+            continue
+        points = region.exterior.points
+        for index in range(len(points) - 1):
+            if index in region.flush_edges:
+                continue
+            start, end = points[index], points[index + 1]
+            direction = end - start
+            normal = np.array([-direction[1], direction[0]])
+            normal = normal / float(np.linalg.norm(normal))
+            middle = 0.5 * (start + end)
+            left = topmost(Point(*(middle + normal * 1e-6)))
+            right = topmost(Point(*(middle - normal * 1e-6)))
+            if left is None or right is None:
+                continue  # a silhouette against the background
+            assert not (left.path_id == right.path_id == region.path_id), (
+                # Two sections of the curve meet here, inside a coincident node: the
+                # boundary between them is the half of a lens side the section cap left,
+                # and stroking it draws a line that stops in the middle of the strand.
+                region.region_id, index, start, end, left.region_id, right.region_id,
+            )
 
 
 def test_a_self_crossing_lens_equals_the_analytic_overlap():
@@ -353,8 +502,127 @@ def test_the_engine_can_select_the_backend():
         event for event in arrangement.trace if event.event_type == "region.accounting"
     ).data
     assert accounting["painted_area"] == pytest.approx(accounting["union_area"], abs=1e-9)
+    hybrid = LaceEngine(
+        paths, offset=0.15, render_mode="ribbon", ribbon_backend="hybrid"
+    ).solve()
+    assert hybrid.fill_underlay == []
+    assert "REGION-HYBRID-EXPERIMENTAL" in {item.code for item in hybrid.diagnostics}
     with pytest.raises(ValueError):
         LaceEngine(paths, render_mode="ribbon", ribbon_backend="quadtree")
+
+
+def test_hybrid_keeps_boolean_regions_and_only_drops_specks():
+    # The 5:4 Lissajous is the case where Boolean draws sub-pixel overlay specks on top of
+    # its own fills, while the arrangement exposes long same-colour boundaries. Hybrid must
+    # keep the former's painter occlusion and let the latter contribute only a short local
+    # repair. The flush-seam overlay edges Boolean used to re-expose along its own ring --
+    # the two spurs the human review marked -- are filtered out earlier, inside
+    # ``missing_weave_outlines``, so hybrid has only the specks left to drop.
+    from manim_lace.benchmarks import scenarios
+
+    offset = 0.08
+    engine = LaceEngine(
+        scenarios()["self_intersecting"],
+        offset=offset,
+        render_mode="ribbon",
+        weave_mode="alternating",
+        conflict_strategy="relax",
+    )
+    result = engine.solve()
+    boolean = render_region_geometry(
+        engine.paths, result.crossings, result.topology, offset=offset
+    )
+    hybrid = render_hybrid_regions(
+        engine.paths, result.crossings, result.topology, offset=offset
+    )
+    assert [region.region_id for region in hybrid.regions] == [
+        region.region_id for region in boolean.regions
+    ]
+    polygons = [
+        Polygon(region.exterior.points, [hole.points for hole in region.holes] or None)
+        for region in boolean.regions
+    ]
+    boolean_keys = {((edge.start), (edge.end)) for edge in boolean.outline_edges}
+    hybrid_keys = {((edge.start), (edge.end)) for edge in hybrid.outline_edges}
+
+    # Every Boolean overlay edge the hybrid drops is a sub-pixel speck drawn inside a
+    # Boolean fill -- the isolated black dots this backend exists to remove.
+    dropped = [
+        edge for edge in boolean.outline_edges
+        if ((edge.start), (edge.end)) not in hybrid_keys
+    ]
+    assert dropped
+    for edge in dropped:
+        start = np.asarray(edge.start, dtype=float)
+        end = np.asarray(edge.end, dtype=float)
+        assert float(np.hypot(*(end - start))) <= 0.05 * offset
+        assert any(
+            polygon.contains(Point(*(0.5 * (start + end)))) for polygon in polygons
+        ), f"dropped overlay edge is not a sub-pixel interior speck: {edge}"
+    assert len(dropped) == 10
+
+    # Every added edge is a short bridge that closes one of the four V-notches without
+    # promoting an arrangement region ring.
+    added = [
+        edge for edge in hybrid.outline_edges
+        if ((edge.start), (edge.end)) not in boolean_keys
+    ]
+    assert len(added) == 4
+    assert max(
+        float(np.hypot(*(np.asarray(edge.end) - np.asarray(edge.start))))
+        for edge in hybrid.outline_edges
+    ) <= 0.5 * offset
+    assert hybrid.painted_area == pytest.approx(hybrid.union_area, rel=1e-9)
+
+
+def test_hybrid_returns_missing_boolean_area_as_fill_only_patches():
+    # Three strands meet at the origin. The Boolean union is intentionally incomplete;
+    # the arrangement still has the correct union. Hybrid keeps Boolean ink but exposes
+    # the missing area as fill-only patches drawn below it, never as extra outlines.
+    paths = [BOW, np.array([[-1.2, 0.0], [1.2, 0.0]])]
+    engine = LaceEngine(
+        paths,
+        offset=0.12,
+        render_mode="ribbon",
+        weave_mode="free",
+        conflict_strategy="relax",
+    )
+    result = engine.solve()
+    hybrid = render_hybrid_regions(
+        engine.paths, result.crossings, result.topology, offset=0.12
+    )
+    assert hybrid.fill_underlay
+    assert hybrid.painted_area == pytest.approx(hybrid.union_area, rel=1e-9)
+    assert all(not region.flush_edges for region in hybrid.fill_underlay)
+    diagnostic = next(
+        item for item in hybrid.diagnostics if item.code == "REGION-HYBRID-EXPERIMENTAL"
+    )
+    assert diagnostic.details["patch_count"] == len(hybrid.fill_underlay)
+    assert diagnostic.details["patch_area"] > 0.0
+
+
+@pytest.mark.heavy
+def test_hybrid_patches_dense_random_walk_overlaps_without_one_shot_union():
+    # Regression for the GEOS "unable to assign free hole to a shell" failure: the
+    # Boolean pieces are numerous, overlapping and locally invalid, so the repair
+    # difference must be indexed and repaired face by face instead of one big union.
+    rng = np.random.default_rng(20261015)
+    paths = []
+    for index in range(12):
+        walk = np.cumsum(rng.normal(scale=0.6, size=(16, 2)), axis=0)
+        walk += rng.normal(scale=2.0, size=2)
+        paths.append(PolylinePath(walk, path_id=f"R{index:03d}"))
+    result = LaceEngine(
+        paths,
+        offset=0.07,
+        render_mode="ribbon",
+        ribbon_backend="hybrid",
+    ).solve()
+    assert result.fill_underlay
+    diagnostic = next(
+        item for item in result.diagnostics if item.code == "REGION-HYBRID-EXPERIMENTAL"
+    )
+    assert diagnostic.details["patch_area"] > 0.0
 
 
 def test_a_dense_self_intersecting_curve_is_covered_exactly():

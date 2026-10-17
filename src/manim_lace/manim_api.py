@@ -170,6 +170,9 @@ class Lace(VGroup):
                 hole_color=style["hole_color"],
                 draw_holes=style["draw_holes"],
                 plan=self.style_plan,
+                overlay_edges=getattr(self.result, "outline_edges", ()),
+                underlay_regions=getattr(self.result, "fill_underlay", ()),
+                outline_above_fills=self.engine.ribbon_backend == "arrangement",
             )
         else:
             self.holes = VGroup()
@@ -614,6 +617,9 @@ def _region_groups(
     hole_color: Any,
     draw_holes: bool,
     plan: StylePlan | None = None,
+    overlay_edges: Any = (),
+    underlay_regions: Any = (),
+    outline_above_fills: bool = False,
 ) -> tuple[VGroup, VGroup, VGroup]:
     """Turn ribbon regions into a filled VGroup, a hole VGroup and an outline VGroup.
 
@@ -631,14 +637,47 @@ def _region_groups(
     a member of the outline group too, told apart by its ``z_index``.
 
     A style plan, when given, supplies per-region colours and opacity instead of the
-    uniform ones.
+    uniform ones. ``underlay_regions`` are fill-only repairs drawn below every primary
+    region; the experimental hybrid backend uses them to close area the Boolean cut
+    genuinely missed without promoting any repair boundary to an outline.
+    ``outline_above_fills`` is for the arrangement backend, whose regions are
+    interior-disjoint: there is no later fill that is allowed to cover an under strand,
+    so every visible outline has to be painted after every fill. Without that flag the
+    interleaved painter order is kept for the Boolean and hybrid backends.
     """
     ordered = _paint_order(regions, plan)
     ribbons = VGroup()
     holes = VGroup()
     outlines = VGroup()
+    for index, region in enumerate(sorted(
+        underlay_regions,
+        key=lambda item: (getattr(item, "draw_index", 0), _object_id(item)),
+    )):
+        assignment = plan.assignment_for(_object_id(region)) if plan is not None else None
+        if assignment is None and plan is not None:
+            assignment = plan.assignment_for_path(getattr(region, "path_id", ""))
+        fill = assignment.paint_color if assignment is not None else (
+            fill_color if fill_color is not None else stroke_color
+        )
+        opacity = assignment.fill_opacity if assignment is not None else fill_opacity
+        mob = _polyline_to_vmobject(region.exterior.points, closed=True)
+        mob.set_fill(fill, opacity=opacity)
+        mob.set_stroke(width=0)
+        # Paper is -1 and the seam-closing hairline is -0.5. Keep repair fills between
+        # them and the real regions so they only show where a primary fill is absent.
+        mob.z_index = -0.75 - index * 1e-9
+        ribbons.add(mob)
+        if draw_holes:
+            for hole_index, hole in enumerate(region.holes):
+                patch_hole = _polyline_to_vmobject(hole.points, closed=True)
+                patch_hole.set_fill(hole_color, opacity=1.0)
+                patch_hole.set_stroke(width=0)
+                patch_hole.z_index = -0.7 - index * 1e-9 - hole_index * 1e-12
+                holes.add(patch_hole)
     for index, region in enumerate(ordered):
         assignment = plan.assignment_for(_object_id(region)) if plan is not None else None
+        if assignment is None and plan is not None:
+            assignment = plan.assignment_for_path(getattr(region, "path_id", ""))
         piece_opacity = assignment.opacity if assignment is not None else stroke_opacity
         paint_color = assignment.paint_color if assignment is not None else fill_color
         paint_opacity = assignment.fill_opacity if assignment is not None else fill_opacity
@@ -649,7 +688,17 @@ def _region_groups(
             opacity=piece_opacity, z_index=index,
         )
         if not region.flush_edges:
-            mob.set_stroke(stroke_color, width=stroke_width, opacity=piece_opacity)
+            if outline_above_fills:
+                # The arrangement has no painter-order hiding: a face's whole ring is
+                # visible unless it is marked flush, so keep it as a stroke-only object
+                # in the unified outline layer instead of stroking the fill in place.
+                mob.set_stroke(width=0)
+                ring = _polyline_to_vmobject(region.exterior.points, closed=True)
+                ring.set_fill(opacity=0)
+                ring.set_stroke(stroke_color, width=stroke_width, opacity=piece_opacity)
+                outlines.add(ring)
+            else:
+                mob.set_stroke(stroke_color, width=stroke_width, opacity=piece_opacity)
         else:
             # The seams are seams of the split, not boundaries of the strand: no outline
             # stroke goes along them and the outline layer draws the runs in between. A piece
@@ -681,6 +730,37 @@ def _region_groups(
                 hole_mob.set_stroke(width=0)
                 hole_mob.z_index = index
                 holes.add(hole_mob)
+    max_z = max((float(getattr(mob, "z_index", 0.0)) for mob in ribbons), default=0.0)
+    if outline_above_fills:
+        # Faces never overlap, so every visible boundary must be painted after every
+        # fill. A shared boundary stroked by one face used to be cut in half by the
+        # next face's fill, which made one side of the same line look thinner.
+        for offset, mob in enumerate(outlines):
+            if float(getattr(mob, "z_index", 0.0)) != _SEAM_FILL_Z:
+                mob.z_index = max_z + 1.0 + offset * 1e-9
+        for offset, hole in enumerate(holes):
+            hole.z_index = max_z + 0.5 + offset * 1e-9
+    for index, edge in enumerate(overlay_edges):
+        start = np.asarray(edge.start, dtype=float)
+        end = np.asarray(edge.end, dtype=float)
+        # Explicit overlay edges are drawn on top of all fills, but their butt caps
+        # can still leave an antialiased hairline against the stroke they repair.
+        # Reuse the same half-line-width extension as the normal outline runs.
+        extension = 0.5 * _STROKE_WIDTH_TO_UNITS * max(float(stroke_width), 0.0)
+        overlay = _polyline_to_vmobject(
+            _extend_ends(
+                np.array([start, end]),
+                extension,
+                cap_to_half_length=False,
+            ),
+            closed=False,
+        )
+        overlay.set_fill(opacity=0)
+        overlay.set_stroke(stroke_color, width=stroke_width, opacity=stroke_opacity)
+        overlay.z_index = (
+            max_z + 2.0 + index * 1e-9 if outline_above_fills else max_z + 1.0 + index * 1e-9
+        )
+        outlines.add(overlay)
     return ribbons, holes, outlines
 
 
@@ -813,7 +893,12 @@ def _seam_chords(region: Any) -> list[np.ndarray]:
 _STROKE_WIDTH_TO_UNITS = 0.01
 
 
-def _extend_ends(points: np.ndarray, extension: float) -> np.ndarray:
+def _extend_ends(
+    points: np.ndarray,
+    extension: float,
+    *,
+    cap_to_half_length: bool = True,
+) -> np.ndarray:
     """Push both ends of a stroke run outwards by ``extension`` world units.
 
     A run stops at a seam and the next run takes over on the far side of it, so their butt
@@ -829,7 +914,7 @@ def _extend_ends(points: np.ndarray, extension: float) -> np.ndarray:
         direction = points[end] - points[neighbour]
         length = float(np.hypot(direction[0], direction[1]))
         if length > 0.0:
-            reach = min(extension, 0.5 * length)
+            reach = min(extension, 0.5 * length) if cap_to_half_length else extension
             extended[end] = points[end] + direction * (reach / length)
     return extended
 

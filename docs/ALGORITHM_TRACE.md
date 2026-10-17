@@ -62,14 +62,16 @@ scheme, so traces of the same input can be compared across backends:
   `cut_count`, `section_cut_count`, `missing_assignment_count`, `self_crossing_count`,
   `empty_band_count`, `lens_miss_count`, `hole_count` and `region_polygon_count`. A cut band
   can break into several polygons, which is why that count is separate from `face_count` in
-  the other backend.
+  the other backend. `outline_edge_count` is the number of visible weave boundaries that no
+  final region exterior can carry; the facade strokes them as an explicit overlay.
 - arrangement (`render/arrangement.py`): the walk visits the faces of the planar arrangement
   (`node_kind = "face"`). `steps` holds one record per cell (`kind: "face"` with `decision`
   in `single` / `lens` / `conflicting-lens` / `off-crossing` / `uncovered`, the chosen
   `owner`, `covering_count` and `area`) or per dropped sliver (`kind: "sliver"`), and the
   payload counts `raw_face_count` (faces out of `polygonize`), `face_count` (cells that got an
   owner), `collapsed_count`, `subtraction_count`, `single_owner_count`, `lens_decided_count`,
-  `conflicting_count`, `off_crossing_count`, `uncovered_count` and `sliver_count`.
+  `conflicting_count`, `off_crossing_count`, `uncovered_count`, `sliver_count` and the same
+  `outline_edge_count`.
 
 Keys shared by both: `backend`, `node_kind`, `node_count`, `band_count`, `section_count`,
 `crossing_count`, `owner_count`, `congested` (the arrangement backend reports it but, unlike

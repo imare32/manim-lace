@@ -28,15 +28,23 @@ python examples/build_review.py --cases deg-bow,spec-simple
 python examples/build_review.py --no-render        # 复用已有媒体，只重算判定与页面
 python examples/build_review.py --no-audit         # 跳过 weave_audit 签名（probe 更快）
 python examples/build_review.py --no-determinism   # 跳过「解两次」检查（probe 最快）
+python examples/build_review.py --cases deg-bow --no-page   # 试渲染案例，不改写正式页面
 python examples/build_review.py --verdicts docs/review-verdicts.json   # 载入上一轮人审
 ```
 
 产物都在 `media/review/`（`media/` 不入库），打开 `media/review/index.html` 即可。
+`--no-page` 只抑制正式页面写入；所选案例的 PNG 仍会更新到 `media/review/`，适合在完整重建前
+先核对单个案例的几何或配色。
+
+完整构建时会先测量独立的 `implicit` 案例，再按目录声明顺序重排并渲染其余案例，每案结束后
+调用一次 `gc.collect()`。这是为了隔离 Windows 上 Manim/Cairo 原生状态对后续
+marching-squares 的污染（表现为 `cell` 被当成浮点数比较，或测试进程中的原生崩溃）；
+页面顺序和案例判定仍按目录声明顺序，不随执行顺序变化。
 
 ## 页面上的六类案例
 
 案例目录是 `examples/review_catalog.py`，它同时是页面、探针和测试的唯一来源，
-所以一个案例不会在两处被描述两次。共 59 个案例、177 个待渲染通道
+所以一个案例不会在两处被描述两次。共 59 个案例、178 个待渲染通道
 （另有 4 个通道按实测开销声明为「本轮未纳入」）。
 
 | 分类 | 数量 | 内容 | 审的是 |
@@ -49,7 +57,9 @@ python examples/build_review.py --verdicts docs/review-verdicts.json   # 载入�
 | `implicit` | 6 | 独立等值线提取器（`sample_implicit`）：圆、环、双曲线、退化自触的十字与八字、极点造成的假等值线 | 从方程直接取到的曲线对不对；两件做不到的事（交点丢失、假等值线）能不能接受 |
 | `rosette` | 5 | 玫瑰线编织，含两个文档承认的退化配置 | 密集自交（70 交叉 / 20 处自交）下还站得住吗 |
 
-每个案例渲染五个面板（`原始输入` → `stroke` → `ribbon(boolean)` → `ribbon(arrangement)` → `编织结果（交叉编号）`）。
+每个案例默认渲染五个面板（`原始输入` → `stroke` → `ribbon(boolean)` → `ribbon(arrangement)` → `编织结果（交叉编号）`）。
+`spec-self-intersecting` 另有一个实验性 `hybrid` 面板，用来并排核对“布尔遮挡 + 剖分短修补”；
+面板集合由 `Case.channels` 声明，不假定所有案例的通道数完全相同。
 **第一个面板是原始输入**：引擎拿到的中心线本身，按同一条股线的颜色画细线，并把检出的交叉点与交叉编号标在上面——
 没有它就没法把"引擎看错了几何"和"引擎织错了"分开。交叉数不超过上限时才加最后那张标注图
 （`annotate=False` 的案例没有它，见 `Case.annotate`）。
@@ -91,7 +101,7 @@ python examples/build_review.py --verdicts docs/review-verdicts.json   # 载入�
   并按**可见端头**计数而不是按描边条数（同一条线被两个区域各描一遍只算一处）。
   实测：`spec-self-intersecting` 两个通道各有 24 处（旧口径 0 处），`n=7` CA 卡片
   两个面板都是 0（旧口径 boolean 4 处），`n=5` CA 的 boolean 面从 28 降到 17。
-- **通道一致性**：三通道必须报告相同的交叉数、事件类型分布与上下关系来源（FR-040）。
+- **通道一致性**：同一案例的声明通道必须报告相同的交叉数、事件类型分布与上下关系来源（FR-040）。
   不一致会直接显示为失败芯片，并让该案例的「目录预期」判为不符。
 - **确定性**：同一案例解两次，交叉指纹与几何指纹必须逐位相同。这是**每个案例验一次**
   （在它的第一个通道上），因为它是案例的属性而不是某个后端的属性，而且它会把最重输入的开销
@@ -158,7 +168,7 @@ Ctrl+V」，面板里那个输入框永远可用；复制那侧也一样，异�
 | 案例 | 预期诊断 | 说明 |
 |---|---|---|
 | `deg-collinear-overlap` | `GEOM-COLLINEAR-OVERLAP` | 共线重叠是区间，不存在唯一二元上下关系 |
-| `deg-t-junction` | `GEOM-ENDPOINT_TOUCH` | 端点接触默认不进入交替求解 |
+| `deg-t-junction` | `GEOM-ENDPOINT_TOUCH` | 端点接触默认不进入交替求解；两条丝带在那里重叠，可见顺序由"结束股让位"决定 |
 | `deg-shallow-angle` | `GEOM-NEAR_TANGENT` | 浅角切口必须被钳制并上报 |
 | `deg-multiway-fan`、`index-concurrent-fan` | `GEOM-MULTIWAY-CROSSING` | 多线共点不发明唯一顺序 |
 | `deg-degenerate-path` | `GEOM-DEGENERATE-PATH` | 零长路径被点名而不是静默丢弃 |
@@ -168,9 +178,9 @@ Ctrl+V」，面板里那个输入框永远可用；复制那侧也一样，异�
 | `index-repeated-points` | `GEOM-COLLINEAR-OVERLAP`、`GEOM-NEAR_TANGENT` | 输入本身就共线且近切 |
 | `index-random-walks-6/12` | `REGION-AREA-MISMATCH`、`REGION-CONFLICTING-OVERLAP`、`REGION-LENS-APPROXIMATION`、`REGION-OFF-CROSSING-OVERLAP` | 随机游走网络里大量近切 |
 | `gal-spiral` | `TOPOLOGY-ALTERNATION-RELAXED` | 严格交替在螺线上无法全程成立，只放宽必需处 |
-| `gal-infinity` | `REGION-COINCIDENT-CROSSINGS` | 自交点与直线交点重合，扣除互相抵消 |
+| `gal-infinity` | `REGION-COINCIDENT-CROSSINGS` | 自交点与直线交点重合：boolean 的扣除互相抵消、面积不守恒；arrangement 面积守恒但共点处只能逐个面决定归属，透镜边可能只描出一半（半明半暗） |
 | `ros-n5-ca-l2-o12` | `REGION-COINCIDENT-CROSSINGS` / `REGION-LENS-APPROXIMATION` | 共点交叉退化配置，**最需要人眼**的一张 |
-| `spec-self-intersecting` | `REGION-COINCIDENT-CROSSINGS`、`REGION-DRAW-ORDER-CYCLE` | 这条曲线上有三个弧长参数（0.00 / 6.73 / 27.22）落在同一坐标，引擎在那里记录两个交叉事件，两处透镜互相重叠；boolean 后端按文档降级，arrangement 同输入 0 诊断。两个后端都在 24 处把缺口手臂断在丝带内部（`audit.dangling_ends`，人眼点名的四处「V」与两处「戳进丝带」都在其中），这是共点交叉处缺口手臂的本性，不是某一个后端的错 |
+| `spec-self-intersecting` | `REGION-LENS-APPROXIMATION`；hybrid 另报 `REGION-HYBRID-EXPERIMENTAL` | Lissajous 5:4 的自交密集区。boolean 的可见断头是 4 个——那两条 flush 接缝 stub 已由共享判据去掉（见 §9），原先被它们以 T 形接合盖住的两个端头因此露出来；arrangement 的审计通过但会在同色区域上显示长内部边界；hybrid 以 boolean 的遮挡为底，只补 arrangement 能端到端作证的短缺口——人眼点名的四角 V 缺口全部闭合（4 条桥接），也不出现 arrangement 的长横线，同时丢弃布尔画在自己填充上的 10 条亚像素黑点。hybrid 内部先后跑了两个子后端，审计探针记录的不是它返回的区域，因此 weave audit 如实报 `skip` 而不编造"通过" |
 | `imp-saddle-cross` | `GEOM-IMPLICIT-AMBIGUOUS-SADDLE` | 四角交替的格子由双线性中心值裁决；中心值恰好等于 level 时配对会随网格翻转（实测 24/96/192 一种、48/384 另一种） |
 | `imp-pole` | `GEOM-IMPLICIT-ERROR-TARGET-MISSED` | 极点不是零点：返回的「圆」上 `|F|≈400`，任何分辨率都达不到目标误差，诊断点名超标分支 |
 
@@ -184,19 +194,29 @@ Ctrl+V」，面板里那个输入框永远可用；复制那侧也一样，异�
 
 | 问题 | 实测 | 页面上怎么显示 |
 |---|---|---|
-| **boolean 区域后端在随机游走网络上病态**（已修） | `index-random-walks-6`（6 条路径 / 48 交叉）：boolean 曾 **>5 分钟且峰值内存 1.7GB**；同一输入 arrangement **2.1s**、stroke **0.2s**。`index-random-walks-12`（12 条 / 151 交叉）：boolean 曾 **>4 分钟未跑完**，arrangement **11.7s**。而 `spec-network`（27 条 / 196 交叉）boolean 只要 1.4s——所以不是交叉数的问题，是"许多短路径互相近切"这类输入 | 根因是 `_open_occlusion_holes` 的切分不保证消除孔洞、外层循环于是反复重切（实测一个 piece 切了 32 万次仍未终止），见 CHANGELOG 的孔洞展开条目。修完 boolean 是 **0.50s / 1.06s**——比同案的 arrangement 还快——两张卡的 boolean 通道因此**从「本轮未纳入」里撤出**（`Case.omitted` 已删），页面现在三个通道并排 |
-| **arrangement 后端在密集随机游走上留下悬空描边** | `index-random-walks-6`（48 交叉）：`audit.dangling_ends` **53 处**、`audit.notch_gaps` **3 段 / 0.0507**；`index-random-walks-12`（151 交叉）：悬空端头 **76 处**。两个案例同通道另有 `REGION-LENS-APPROXIMATION` 等 5 个诊断 | 该案显示为**失败**芯片，`look_for` 直接写明"需要人眼定位"。**本行原先记的是 20 / 18**：同行的 `notch_gaps` 逐位未变，只有断头数对不上，用 HEAD 的引擎 + HEAD 的审计独立复测仍是 53 / 76，所以那是写 20 / 18 时的旧口径数（同一提交收紧了口径，这两个数没有跟着重测），不是未提交改动带来的回归 |
-| **Manim 参数曲线路径上也有一个悬空描边端头** | `adp-parametric`（`ParametricFunction` 的 Lissajous 3:2）boolean 通道：`audit.dangling_ends` **1 处** | 同上；这条说明该签名不只出现在手工构造的退化输入上 |
+| **boolean 区域后端在随机游走网络上病态**（已修） | `index-random-walks-6`（6 条路径 / 48 交叉）：boolean 曾 **>5 分钟且峰值内存 1.7GB**；同一输入 arrangement **2.1s**、stroke **0.2s**。`index-random-walks-12`（12 条 / 151 交叉）：boolean 曾 **>4 分钟未跑完**，arrangement **11.7s**。而 `spec-network`（27 条 / 196 交叉）boolean 只要 1.4s——所以不是交叉数的问题，是"许多短路径互相近切"这类输入 | 根因是 `_open_occlusion_holes` 的切分不保证消除孔洞、外层循环于是反复重切（实测一个 piece 切了 32 万次仍未终止），见 CHANGELOG 的孔洞展开条目。修完 boolean 是 **0.50s / 1.06s**——比同案的 arrangement 还快（本轮 59 案例页复测 0.58s / 1.38s，同案 arrangement 0.62s / 2.08s，结论不变）——两张卡的 boolean 通道因此**从「本轮未纳入」里撤出**（`Case.omitted` 已删），页面现在三个通道并排 |
+| **arrangement 后端在密集随机游走上留下悬空描边** | `index-random-walks-6`（48 交叉）：最新完整页 `audit.dangling_ends` **39 处**（本轮判据上收前读 38）、`audit.notch_gaps` **0 段**（本轮前把 flush 接缝误报成 7 段 / 0.7461）；`index-random-walks-12`（151 交叉）：悬空端头 **63 处**、缺口 0 段（本轮前误报 22 段 / 2.5151）。两个案例同通道仍另有 `REGION-LENS-APPROXIMATION`、`REGION-AREA-MISMATCH` 等诊断 | 该案仍显示为**失败**芯片，`look_for` 直接写明需要人眼定位；短透镜缺口桥接只覆盖共线且可安全延续的部分，密集随机游走的长切弦仍保留为残余，不扩大成任意端点连线。缺口的两个读数由 `notch_gaps` 的 flush 子句改正（读数变好、画面没变，见 `docs/DEFECT_HUNTING.md` §9），悬空端头一处不差地保留 |
+| **Manim 参数曲线路径上也有一个悬空描边端头** | `adp-parametric`（`ParametricFunction` 的 Lissajous 3:2）**arrangement** 通道：`audit.dangling_ends` **1 处**（boolean 通道为 0） | 同上；这条说明该签名不只出现在手工构造的退化输入上 |
 | **boolean 区域后端在细丝带玫瑰线上报出一个不可能的可见面积（静默）** | `ros-n10-pa-l12-o05`（n=10 PA 阶 1+2，offset 0.05）boolean 通道：`painted_area` **37.702956**，而同一份结果里 161 个区域的面积之和是 **10.183419**、分段并集 10.594701、整条丝带并集 10.183419；arrangement 后端在**同一输入**上给出 10.183419。比自己的区域之和还大 3.7 倍在数学上不可能（并集不可能大于各部件之和），而引擎的自检只判 `painted < 参考面积`，因此**没有** `REGION-AREA-MISMATCH`——一个不会自我暴露的错误数字。**这一档的画面本身看不出问题**（实机渲染的丝带干净、轮廓连续），错的是面积那本账 | `region.area_conserved` 与 `region.painted_le_sum` 都显示为**失败**，并写出两个数各自是多少；案例说明里写明这是本轮查出的缺陷、且画面看不出差异 |
 | **`Arc(angle=3π)` 这类"超过一圈"的圆弧会让两个区域后端跑到分钟级** | `adp-arc-overlapping`：`Arc(angle=3π)` + 一条直线。stroke 通道 **1.1s** 出 **175** 个事件（大量共线重叠/端点接触噪声）并把整条圆弧切光（`RENDER-PATH-FULLY-CUT`）；boolean 与 arrangement 原本 **>60 秒未完成、峰值内存 2.7GB**，`mark_flush_edges` 里两处全量比对改成索引之后**都能跑完**：boolean **17.9 → 17.7s**、arrangement **74.9 → 8.3s**（同一台机器，取两处改动后的实测）。原因不是交叉数，而是**圆弧自我重叠**（后半个圈原路重走前半个圈）产出的匝数把两处"每条边 × 每条弦/每段足迹"的比对推到百万次 | 该案只渲染 stroke 通道，两个 ribbon 通道作为「本轮未纳入」列出并带上面的数字（现在带的是能跑完的 17.7s / 8.3s，不再是"跑不完"） |
 | **近零面积碎片环的朝向是数值噪声** | 各后端都会吐出面积 ~1e-19 的 sliver 环，其外环的 `shoelace` 符号随机（引擎自己的 `RegionRing.counter_clockwise` 同理） | 朝向检查跳过面积 ≤1e-12 的环并计数，不误报 |
 | **布尔运算留下重复顶点** | 部分环带零长边（连续重复点），Shapely 因此判其无效；但实测 `region.area` 与环自身面积**逐位一致**，画面不受影响 | `region.rings_clean` 作为**读数**（不是失败）列出数量与前几个环名 |
 | **审计探针的安装时机是个坑** | `benchmarks/weave_audit.py` 记录的是 `mark_flush_edges` **求解时**收到的数据；若在求解之后才 import，记录为空，于是所有自交边都被误报成"不在任何透镜边界上"（第一版判定就是这样误报了 5 个案例） | `review_checks.ensure_audit_probe()` 在首次构建前安装探针，`audit_signatures` 再校验记录的区域就是本次求解的对象，否则报 `skip` 而不是编造失败 |
 | **人眼在 Lissajous 5:4 上点出的两类缺陷，旧检查一类也没报** | 这一轮的人审记录：boolean「四个交叉口处的 V 字形差一点点没有闭合」、arrangement「两处戳进了丝带当中」。实测 `spec-self-intersecting`：boolean `audit.notch_gaps` **3 段 / 0.0386**（旧检查已报）；两个通道各有 **24 处**可见描边端头断在丝带内部——旧 `dangling_ends` 报 **0 处**，因为同一条边被两个区域各描一遍，规则把"顶点上还有第二条描边"当成了接上（两条描边方向相同，那正是断头） | 判据改准之后，该案三个通道里有两个通道显示 `audit.dangling_ends` **失败**（boolean 47 条描边 / 24 处可见，arrangement 40 / 24），人眼点名的两处 arrangement 断头就在坐标 `(0.6472, 0.0530)` 及其镜像上；boolean 的四个 V 缺口两端也各是一个断头 |
-| **`notch_gaps` 会点名一段不该描的切口** | 顺着上一条把 `notch_gaps` 报的 3 段描出来试过：它点名的是**穿过透镜的那道截面切口**（`#151.region0` 上 `(0.45538,0.91777)→(0.45642,0.93399)`，竖向 0.0163），描上去在丝带中间多出一条 **44 px** 的竖刺，而人眼看到缺的那一段（`(0.42519,0.91923)→(0.45538,0.91777)`，横向 0.0302）**没有被描到**——它不在记录的透镜足迹上（`weave_d` 0.0029–0.0268，阈值 1e-6），于是被归为「自己的丝带边被盖住」而隐藏 | 这条留在文档里，免得下一个人顺着 `notch_gaps` 往错的方向修；引擎未改（见下） |
+| **`notch_gaps` 会点名一段不该描的切口** | 顺着上一条把 `notch_gaps` 报的 3 段描出来试过：它点名的是**穿过透镜的那道截面切口**（`#151.region0` 上 `(0.45538,0.91777)→(0.45642,0.93399)`，竖向 0.0163），描上去在丝带中间多出一条 **44 px** 的竖刺，而人眼看到缺的那一段（`(0.42519,0.91923)→(0.45538,0.91777)`，横向 0.0302）**没有被描到**——它不在记录的透镜足迹上（`weave_d` 0.0029–0.0268，阈值 1e-6），于是被归为「自己的丝带边被盖住」而隐藏 | 这条留在文档里，免得下一个人顺着 `notch_gaps` 往错的方向修；引擎未改（见下）。**更新（本轮）**：`notch_gaps` 现在和 `missing_weave_outlines` 用同一条判据——某个环自己判过 flush 的边算"已经画过"，不再点名，于是这条切口不再被报成缺口（见 `docs/DEFECT_HUNTING.md` §9）；几何仍未动 |
 | **把「自己的丝带边」整类描上会多出 245 条丝带内部的线** | 同一实验的第二种做法：让 `is_hidden` 对全部"本区域丝带边"都返回"要描"。结果四个角缺口的线**确实接上了**（全画面只变了 634 px），但 `audit.defect_edges` 从 **0 变成 245**（boolean）/**0 变成 6**（arrangement）——接上的是 4 处，多出来的是 241 处横线 | 因此本轮**不动几何**：把输入本身（共点交叉处手臂该断在哪）当成待定问题，见「还没解决的」 |
+| **非交叉重叠：两个后端可能显示不同的股线（已修）** | 两块丝带重叠但没有交叉（平行重叠、L 形角、被诊断的近切/共点）时，boolean 按**输入顺序**绘制、arrangement 按 **path_id 字典序**抢面。实测"首个路径 id 为 `z`、第二个为 `a`"的平行重叠：旧规则下 arrangement 把重叠面给了先画的 `a`，boolean 却显示后画的 `z`——同一输入两个通道不一致；L 形角同病 | 两个后端改成同一把键 `(层, 输入位置, 节点)`：**最后者可见**（arrangement 取最大值，正是 boolean 最后绘制的那条），端点接触仍由"结束股让位"覆盖。`tests/test_arrangement.py` 用平行 / L 角 / id 反序的 T 接触三个用例钉住同赢家 |
+| **`deg-t-junction`：竖线端头戳进横线丝带（人眼，已修）** | boolean 通道：竖线的端盖与两条侧边露出约**半个带宽**（0.14，offset 0.14）。实测两个后端的机制**不同**：boolean 的两块区域**都**覆盖接触点（0.28 / 0.56 全量，纯粹是画序——横线 `a` 先、竖线 `b` 后），arrangement 则是把竖线尖角那块面（`0.28 × 0.14 = 0.0392`）判给横线（竖线 0.28 → 0.2408）。把输入顺序换成竖线在前：boolean 变正常，arrangement 反过来把横线咬掉 0.0392——**两个后端的"正常"都只是列表顺序／字典序的巧合** | 规则改成"结束股让位"（`diagnosed_contact_yields`，两种输入顺序同一个赢家）：boolean 先画结束股，arrangement 不再把重叠面给它；接触处仍然**不切口**（两区域各自完整），`REGION-OVERLAPPING-SECTIONS` / `REGION-OFF-CROSSING-OVERLAP` 照旧如实上报 |
+| **`gal-infinity`：共点处的透镜边被描成一根扎进丝带的线（人眼，已修）** | 原点是**三事件共点**（双纽线自交 + 两次直线×曲线）。arrangement 的两个绿色分段**都**带着那段透镜边，后画的那一份描在两个填充之上，形成一根全长黑线；boolean 同位置纯绿。旧规则只把同一路径透镜边交给先画分段，仍会留下半条被后画填充遮住的线 | 现在 arrangement 的所有可见外环/run 与显式 `outline_edges` 统一在填充之后绘制，短 recorded lens 缺口只在共线且一端确实未接续时补上。最新页 `gal-infinity` arrangement 的 `defect_edges`、`notch_gaps`、`dangling_ends` 三项全通过，只保留共点诊断 |
+| **`spec-self-intersecting`：布尔 V 缺口与剖分长内部边不能同时靠单后端解决**（实验性已组合） | Boolean 通道仍有 **4** 个可见 `audit.dangling_ends`（此前报 2：那两条 flush 接缝 stub 把其中两个端头当成了 T 形接合，本轮去掉 stub 后露出来，见 §9）；arrangement 审计为 0，但会把 31 个自交产生的部分同色区域边界显示成穿长的内部曲线。实测 hybrid 从 Boolean 的**可见断头**出发、只在 arrangement 端到端覆盖该连线时接受桥接：共 **4** 条（`0.0211..0.0345`，阈值 `0.5 * offset = 0.04`），人眼点名的四角缺口全部闭合；同时丢弃 **10** 条中点落在填充内的亚像素 Boolean overlay（`0.0003..0.0018`，即布尔画在自己填充上的孤立黑点），hybrid 的 `outline_edges` 因此只剩那 4 条桥接。人眼第二轮点名的两条"小突出物"（`0.0112` / `0.0163`）本轮由共享判据在 **boolean 参考通道上也去掉了**（`missing_weave_outlines` 把 flush 环边算作覆盖，该通道 overlay 12 → 10） | 新 `hybrid` 通道标为实验性并只渲染该案例；Boolean 原通道的失败芯片仍在（`audit.dangling_ends` 4 处，就是四角 V 缺口没被接上的那些端头），作为两后端差异的证据；hybrid 因内部先后跑了两个子后端、审计探针记录的不是它返回的区域，其 weave audit 如实报 `skip` 而不是编造"通过"。旧的两条 flush stub 及其 `dropped_seam_edges` 计数已删除——判据上收到共享函数（`docs/DEFECT_HUNTING.md` §9）；全量 57 个可跑案例复测，两个后端合计少画 **48** 条内部描边（boolean 43 条：spec 12→10、random-walks-6 25→6、random-walks-12 25→13、`adp-arc-overlapping` 731→727、`ros-n5-ca-l2-o12` 6→0；arrangement 5 条：random-walks-6 11→8、`adp-parametric` 2→0），全量面板只有 **6 张**变了、两张 hybrid 面板 `0 px` |
 
 ## 还没解决的：缺口手臂该断在哪
+
+> **更新（本轮）**：引擎现在输出显式 `outline_edges`，Manim 在填充之后补描区域环无法承载的
+> 可见编织边界；arrangement 还把全部可见外环/run 放到填充之上，并只对短的共线 recorded
+> lens 缺口做端点延续。复测 `spec-self-intersecting` 后，boolean 的缺口从 2 段降到 0，
+> 可见断头从 24 降到 2；arrangement 的可见断头从 15 降到 **0**，三项审计签名全部通过。
+> 密集随机游走里仍保留的长切弦不会用这个局部规则冒险补齐，仍按下面的设计问题保留。
 
 > **更正（本轮）**：这一节原先把断点归因于「共点交叉」。后来查清：那两个交叉事件其实是
 > **同一个交叉**——闭合路径的接缝上弧长 0 与弧长 L 是同一个位置，去重按相同角色配对漏掉了
@@ -238,6 +258,14 @@ Ctrl+V」，面板里那个输入框永远可用；复制那侧也一样，异�
 两条路都要动 `render/regions.py` / `render/arrangement.py` / `manim_api.py` 的接口，并且要
 在 `benchmarks/weave_audit.py` 的 22 个玫瑰线配置上验证没有回退——这正是本轮留在页面上的
 问题，而不是顺手改掉的地方。
+
+## 已知残余：L 形角（两条股线在同一点结束）
+
+`diagnosed_contact_yields` 的规则只在"一端结束、另一端贯通"时成立。两条开放路径都在同一点
+结束时（L 形角）没有贯通股可让，由共享的绘制顺序（后画者在上）决定谁可见，于是总有一条股的
+平头端盖落在另一条带里（`offset=0.14` 时重叠方块 `0.14² = 0.0196`）。两个后端现在给出同一个
+赢家、结果确定，但外观仍是降级；真正的解法是给共享端点做 miter 接头（新几何），不在当前
+"每条股一条偏移带"的模型里。
 
 ## 新增一个案例
 

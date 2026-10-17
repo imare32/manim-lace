@@ -24,6 +24,7 @@ from .model import (
     normalize_event_policy,
 )
 from .render.arrangement import render_arrangement_regions
+from .render.hybrid import render_hybrid_regions
 from .render.regions import render_region_geometry
 from .render.stroke import render_stroke_geometry
 from .style.caps import validate_cover_allowance
@@ -127,8 +128,10 @@ class LaceEngine:
         (default) cuts the overlap out of the under ribbon and resolves self-crossings
         with ordered sections; ``arrangement`` extracts the planar arrangement of the
         ribbon boundaries and assigns every face to one owner, so regions never overlap
-        and coincident crossings still conserve area. Differences between them are
-        reported by each backend's own diagnostics.
+        and coincident crossings still conserve area; ``hybrid`` keeps the Boolean
+        painter/occlusion model and adds only conservative local repairs from the
+        arrangement backend. The last one is experimental and its provenance is
+        reported through ``REGION-HYBRID-EXPERIMENTAL``.
     sampling_trace:
         The subdivision summaries produced when these paths were sampled (one dict per
         sampled source curve, as handed to
@@ -199,8 +202,8 @@ class LaceEngine:
             raise ValueError("join must be 'miter', 'bevel' or 'round'")
         if not np.isfinite(miter_limit) or miter_limit <= 0:
             raise ValueError("miter_limit must be positive and finite")
-        if ribbon_backend not in ("boolean", "arrangement"):
-            raise ValueError("ribbon_backend must be 'boolean' or 'arrangement'")
+        if ribbon_backend not in ("boolean", "arrangement", "hybrid"):
+            raise ValueError("ribbon_backend must be 'boolean', 'arrangement' or 'hybrid'")
         sampling_summaries = list(sampling_trace or ())
         for summary in sampling_summaries:
             if not isinstance(summary, dict):
@@ -503,7 +506,9 @@ class LaceEngine:
                 },
             )
         if self.render_mode == "ribbon":
-            output, render_diagnostics = self._render_regions(detected.crossings, topology, trace)
+            output, render_diagnostics, outline_edges, fill_underlay = self._render_regions(
+                detected.crossings, topology, trace
+            )
             extra_diagnostics: list[Diagnostic] = []
             if self.cover_allowance > 0:
                 extra_diagnostics.append(Diagnostic(
@@ -522,8 +527,12 @@ class LaceEngine:
                 "path_count": len(self.paths),
                 "crossing_count": len(detected.crossings),
                 "region_count": len(output),
+                "outline_edge_count": len(outline_edges),
+                "fill_underlay_count": len(fill_underlay),
             }
         else:
+            outline_edges = []
+            fill_underlay = []
             rendered = render_stroke_geometry(
                 self.paths, detected.crossings, topology,
                 offset=self.offset, min_sin=self.min_sin, overshoot=self.overshoot,
@@ -571,17 +580,20 @@ class LaceEngine:
             trace=trace.events,
             render_mode=self.render_mode,
             detection_stats=detected.stats,
+            outline_edges=outline_edges,
+            fill_underlay=fill_underlay,
         )
         return self.result
 
     def _render_regions(
         self, crossings: list[Any], topology: Any, trace: TraceRecorder
-    ) -> tuple[list[Any], list[Any]]:
+    ) -> tuple[list[Any], list[Any], list[Any], list[Any]]:
         """Build area-based regions and trace them (``render_mode='ribbon'``)."""
-        renderer = (
-            render_arrangement_regions if self.ribbon_backend == "arrangement"
-            else render_region_geometry
-        )
+        renderer = {
+            "boolean": render_region_geometry,
+            "arrangement": render_arrangement_regions,
+            "hybrid": render_hybrid_regions,
+        }[self.ribbon_backend]
         regions = renderer(
             self.paths, crossings, topology,
             offset=self.offset, cap_style=self.cap_style,
@@ -627,4 +639,9 @@ class LaceEngine:
                 "region_area_sum": regions.region_area_sum,
             },
         )
-        return list(regions.regions), list(regions.diagnostics)
+        return (
+            list(regions.regions),
+            list(regions.diagnostics),
+            list(regions.outline_edges),
+            list(regions.fill_underlay),
+        )

@@ -42,6 +42,8 @@ __all__ = [
     "RegionRing",
     "RibbonRegion",
     "RibbonRegionRenderer",
+    "OutlineEdge",
+    "missing_weave_outlines",
     "render_region_geometry",
 ]
 
@@ -79,13 +81,28 @@ class RegionRing:
         return _shoelace(self.points) > 0
 
 
+@dataclass(frozen=True, slots=True)
+class OutlineEdge:
+    """One visible weave boundary that no region ring can carry.
+
+    A planar arrangement can merge the two faces on either side of a self-crossing
+    notch into one owner region.  The notch is still visible, but it is now interior
+    to a polygon and therefore absent from every exterior ring.  These edges are the
+    explicit renderer layer for exactly that case.
+    """
+
+    start: tuple[float, float]
+    end: tuple[float, float]
+
+
 @dataclass(slots=True)
 class RibbonRegion:
     """The visible area of one path, or of one section of a self-crossing path.
 
     ``draw_index`` orders the regions: a region of an under strand always comes before
-    the regions over it. Overlaps only occur between sections of one self-crossing
-    path, where the paint order is what shows which strand is on top.
+    the regions over it. Overlaps only occur between sections of one self-crossing path
+    and at a diagnosed contact (a strand ending on another), where the paint order is
+    what shows which strand is on top.
     """
 
     region_id: str
@@ -343,7 +360,9 @@ def mark_flush_edges(
     *,
     cuts: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     weave: list[tuple[np.ndarray, np.ndarray]] = (),
+    weave_visible: list[tuple[np.ndarray, np.ndarray]] | None = None,
     node_bands: dict[str, Any] | None = None,
+    hide_later_same_path_lens: bool = False,
     tolerance: float = 1e-6,
     probe: float = 1e-6,
 ) -> int:
@@ -380,18 +399,30 @@ def mark_flush_edges(
     ``weave`` are the lens boundaries (the local footprint of every crossing that was
     actually cut) and ``node_bands`` maps each region's node — its strip for a sectioned
     path, else the path — to the band that node was built from. Both are what tells the
-    three interior families apart; without them only the chords can be marked.
+    three interior families apart; without them only the chords can be marked. When
+    ``weave_visible`` is supplied, the part of a lens boundary that does not lie on the
+    over band's own boundary is a covered side rather than a notch and is marked hidden.
 
     An edge can be part seam, part notch and part covered side, so the exterior ring is
     split where its status changes (at every crossing with a region boundary, a weave
     edge or a node band) and each piece is judged on its own. The fill is unchanged —
     inserted vertices are collinear, and a corner the join folds away is collinear to
     within the marking tolerance.
+
+    ``hide_later_same_path_lens`` is for a backend whose regions never overlap. Two
+    sections of one self-crossing path both carry the lens side between them, and the one
+    painted last draws its stroke *on top of both fills*, where the cutting backend leaves
+    it under the fill of the pass above it. There a same-path lens side then shows as a
+    full line inside one colour; with the flag the later section hides its copy and the
+    earlier one's stroke is the one owed, exactly as in the cutting backend (measured on
+    ``gal-infinity``). Only the duplicate is dropped, and only when the other region's
+    ring carries the same edge, so a notch nobody else draws keeps its stroke.
     """
     from shapely.strtree import STRtree
 
     LineString, Point, Polygon, unary_union, _make_valid, _orient = _require_shapely()
     ordered = sorted(regions, key=lambda item: (item.draw_index, item.region_id))
+    index_of = {region.region_id: index for index, region in enumerate(ordered)}
     fills = {
         region.region_id: Polygon(
             np.asarray(region.exterior.points, dtype=float),
@@ -407,6 +438,14 @@ def mark_flush_edges(
     # one ``unary_union`` cost 65 s of a 78 s render.
     weave_lines = [LineString([tuple(start), tuple(end)]) for start, end in weave]
     weave_tree = STRtree(weave_lines) if weave_lines else None
+    weave_visible_lines = (
+        [LineString([tuple(start), tuple(end)]) for start, end in weave_visible]
+        if weave_visible is not None
+        else None
+    )
+    weave_visible_tree = (
+        STRtree(weave_visible_lines) if weave_visible_lines else None
+    )
     # An edge's status can only change where it crosses another region's boundary, a
     # weave edge or its own node's band, so those are the split points to look for.
     segments: list[Any] = []
@@ -494,9 +533,34 @@ def mark_flush_edges(
             # leaves a hole in the notch wherever the under pass's own sections do not
             # carry that piece (measured on `n = 7` CA: 0.088 of a lens edge stayed
             # unstroked and the notch ended in the middle of the ribbon).
+            if weave_visible_tree is not None:
+                visible_hit = any(
+                    weave_visible_lines[index].distance(Point(*middle)) <= tolerance
+                    for index in weave_visible_tree.query(
+                        Point(*middle), predicate="dwithin", distance=tolerance
+                    )
+                )
+                if not visible_hit:
+                    return True  # the covered side of a lens, not its visible notch
             if outer != inner and region_id in (
                 ordered[outer].region_id, ordered[inner].region_id
             ):
+                if (
+                    hide_later_same_path_lens
+                    and ordered[outer].path_id == ordered[inner].path_id
+                    and index_of[region_id] > min(outer, inner)
+                    and fills[ordered[inner].region_id].boundary.distance(
+                        Point(*middle)
+                    ) <= tolerance
+                    and fills[ordered[outer].region_id].boundary.distance(
+                        Point(*middle)
+                    ) <= tolerance
+                ):
+                    # Both sections of one path carry this lens side and this is the one
+                    # painted last: its stroke would sit on top of both fills, where the
+                    # cutting backend leaves it under the fill of the pass above it. The
+                    # other region owes the stroke, so this copy is a duplicate.
+                    return True
                 return False
             return True  # hidden under a later strand, whose own outline is owed
         if band is not None and band.boundary.distance(Point(*middle)) <= tolerance:
@@ -596,6 +660,360 @@ def mark_flush_edges(
     return marked
 
 
+def missing_weave_outlines(
+    regions: list[RibbonRegion],
+    weave: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    max_flush_bridge: float = 0.0,
+    max_lens_bridge: float = 0.0,
+    tolerance: float = 1e-6,
+    probe: float = 2e-5,
+) -> list[OutlineEdge]:
+    """Visible lens edges that the region rings cannot stroke.
+
+    ``mark_flush_edges`` can hide a real notch when the two faces on either side were
+    merged to the same owner region. The fill is then correct, but the region has no
+    exterior edge there, so the renderer has nothing to stroke. This helper compares
+    every recorded lens edge with the strokes the regions actually emit, keeps the
+    uncovered visible intervals, and returns them as an explicit overlay layer.
+
+    Only edges on a region boundary or where the topmost owner changes are returned;
+    a notch completely hidden under a later strand stays hidden. ``max_lens_bridge``
+    additionally closes a short recorded lens edge when one of its ends is an unjoined
+    stroke end and that stroke is collinear with the gap. This is the arrangement case
+    where a lens side is split by a section seam and only one half reaches a region ring.
+
+    A recorded lens edge that some ring already carries as a *flush* edge is never
+    exposed, whatever its interval looks like to ``topmost``. Flush marks exactly the
+    edges ``mark_flush_edges`` says a renderer must not stroke, and the visible-looking
+    ones among them are the clipped arm lens's section caps: the same seam the walk
+    suppressed, which this helper re-exposed and the renderer then painted as a short
+    spur or a full chord across the middle of the ribbon. Saying "the rings cannot carry
+    this" about an edge a ring does carry is the one thing this helper must not do --
+    measured over the 57 review cases, this helper's whole contribution on 5 of them was
+    such ink (``spec-self-intersecting`` 12 -> 10, ``index-random-walks-6`` 25 -> 6,
+    ``index-random-walks-12`` 25 -> 13, ``adp-arc-overlapping`` 731 -> 727,
+    ``ros-n5-ca-l2-o12`` 6 -> 0), including the two spurs the human review marked on
+    ``spec-self-intersecting``.
+    """
+    if not regions:
+        return []
+    from shapely.strtree import STRtree
+
+    LineString, Point, Polygon, _unary_union, _make_valid, _orient = _require_shapely()
+    ordered = sorted(regions, key=lambda item: (item.draw_index, item.region_id))
+    fills = {
+        region.region_id: Polygon(
+            np.asarray(region.exterior.points, dtype=float),
+            [np.asarray(hole.points, dtype=float) for hole in region.holes] or None,
+        )
+        for region in ordered
+    }
+    fill_tree = STRtree([fills[region.region_id] for region in ordered])
+
+    def topmost(point: Point) -> int | None:
+        best: int | None = None
+        for index in fill_tree.query(point):
+            if fills[ordered[index].region_id].intersects(point):
+                best = index if best is None else max(best, index)
+        return best
+
+    ring_lines: list[Any] = []
+    ring_owners: list[int] = []
+    stroke_lines: list[Any] = []
+    flush_lines: list[Any] = []
+    for index, region in enumerate(ordered):
+        points = np.asarray(region.exterior.points, dtype=float)
+        flush = set(region.flush_edges)
+        for edge_index, (start, end) in enumerate(zip(points[:-1], points[1:], strict=False)):
+            if float(np.hypot(*(end - start))) <= 0.0:
+                continue
+            line = LineString([tuple(start), tuple(end)])
+            ring_lines.append(line)
+            ring_owners.append(index)
+            if edge_index not in flush:
+                stroke_lines.append(line)
+            else:
+                flush_lines.append(line)
+    if not ring_lines:
+        return []
+    ring_tree = STRtree(ring_lines) if ring_lines else None
+    stroke_tree = STRtree(stroke_lines) if stroke_lines else None
+    flush_tree = STRtree(flush_lines) if flush_lines else None
+    strokes_at: dict[tuple[float, float], list[Any]] = {}
+    for line in stroke_lines:
+        coords = np.asarray(line.coords, dtype=float)[:, :2]
+        if len(coords) < 2:
+            continue
+        for point in (coords[0], coords[-1]):
+            key = (round(float(point[0]), 12), round(float(point[1]), 12))
+            strokes_at.setdefault(key, []).append(line)
+
+    def collinear_stroke_at(
+        endpoint: tuple[float, float], start: np.ndarray, end: np.ndarray
+    ) -> bool:
+        """Does a stroke incident at ``endpoint`` continue the gap line straight?"""
+        span = float(np.hypot(*(end - start)))
+        if span <= tolerance:
+            return False
+        direction = (end - start) / span
+        endpoint = np.asarray(endpoint, dtype=float)
+        for key, lines in strokes_at.items():
+            if float(np.hypot(*(np.asarray(key) - endpoint))) > endpoint_tolerance:
+                continue
+            for line in lines:
+                coords = np.asarray(line.coords, dtype=float)[:, :2]
+                if len(coords) < 2:
+                    continue
+                first, second = coords[0], coords[-1]
+                other = (
+                    second
+                    if float(np.hypot(*(first - endpoint)))
+                    <= float(np.hypot(*(second - endpoint)))
+                    else first
+                )
+                other_span = float(np.hypot(*(other - endpoint)))
+                if other_span <= tolerance:
+                    continue
+                outward = (other - endpoint) / other_span
+                if abs(float(np.dot(outward, direction))) >= 0.995:
+                    return True
+        return False
+
+    def collinear_interval(
+        line: Any, start: np.ndarray, direction: np.ndarray, span: float
+    ) -> tuple[float, float] | None:
+        coords = np.asarray(line.coords, dtype=float)[:, :2]
+        if len(coords) < 2:
+            return None
+        first = coords[0] - start
+        second = coords[-1] - start
+        normal = np.array([-direction[1], direction[0]])
+        if abs(float(np.dot(first, normal))) > tolerance:
+            return None
+        if abs(float(np.dot(second, normal))) > tolerance:
+            return None
+        low = float(np.dot(first, direction))
+        high = float(np.dot(second, direction))
+        low, high = max(min(low, high), 0.0), min(max(low, high), span)
+        return (low, high) if high > low + 1e-12 else None
+
+    def unjoined_stroke_ends() -> set[tuple[float, float]]:
+        """Endpoints of visible strokes that do not meet a continuation.
+
+        This mirrors the local half of the defect audit: an endpoint is joined when
+        another stroke passes through it or leaves in a different direction. The
+        caller still restricts any continuation to a short recorded lens edge.
+        """
+        endings: dict[tuple[float, float], list[int]] = {}
+        for index, line in enumerate(stroke_lines):
+            coords = np.asarray(line.coords, dtype=float)[:, :2]
+            if len(coords) < 2:
+                continue
+            for point in (coords[0], coords[-1]):
+                key = (round(float(point[0]), 12), round(float(point[1]), 12))
+                endings.setdefault(key, []).append(index)
+
+        def outward(index: int, vertex: np.ndarray) -> np.ndarray | None:
+            coords = np.asarray(stroke_lines[index].coords, dtype=float)[:, :2]
+            if len(coords) < 2:
+                return None
+            start, end = coords[0], coords[-1]
+            other = (
+                end
+                if float(np.hypot(*(start - vertex)))
+                <= float(np.hypot(*(end - vertex)))
+                else start
+            )
+            span = float(np.hypot(*(other - vertex)))
+            if span <= tolerance:
+                return None
+            return (other - vertex) / span
+
+        unjoined: set[tuple[float, float]] = set()
+        for key, owners in endings.items():
+            vertex = np.asarray(key, dtype=float)
+            point = Point(*vertex)
+            candidates = (
+                []
+                if stroke_tree is None
+                else [
+                    index
+                    for index in stroke_tree.query(point.buffer(1e-4))
+                    if index not in owners
+                ]
+            )
+            if any(stroke_lines[index].distance(point) <= 1e-4 for index in candidates):
+                continue
+            for owner in owners:
+                direction = outward(owner, vertex)
+                if direction is None:
+                    continue
+                joined = False
+                for other in owners:
+                    if other == owner:
+                        continue
+                    other_direction = outward(other, vertex)
+                    if (
+                        other_direction is not None
+                        and float(np.dot(direction, other_direction)) <= 0.999
+                    ):
+                        joined = True
+                        break
+                if joined:
+                    continue
+                unjoined.add(key)
+                break
+        return unjoined
+
+    result: list[OutlineEdge] = []
+    seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    unjoined_ends = unjoined_stroke_ends() if max_lens_bridge > 0.0 else set()
+    endpoint_tolerance = max(probe, max_lens_bridge / 30.0)
+
+    def near_unjoined(point: np.ndarray) -> tuple[float, float] | None:
+        nearest: tuple[float, float] | None = None
+        nearest_distance = endpoint_tolerance
+        for key in unjoined_ends:
+            distance = float(np.hypot(*(np.asarray(key) - point)))
+            if distance <= nearest_distance:
+                nearest, nearest_distance = key, distance
+        return nearest
+    for raw_start, raw_end in weave:
+        start = np.asarray(raw_start, dtype=float)[:2]
+        end = np.asarray(raw_end, dtype=float)[:2]
+        span = float(np.hypot(*(end - start)))
+        if span <= tolerance:
+            continue
+        direction = (end - start) / span
+        normal = np.array([-direction[1], direction[0]])
+        edge = LineString([tuple(start), tuple(end)])
+
+        intervals: list[tuple[float, float]] = []
+        if stroke_tree is not None:
+            for index in stroke_tree.query(edge.buffer(tolerance)):
+                interval = collinear_interval(stroke_lines[index], start, direction, span)
+                if interval is not None:
+                    intervals.append(interval)
+        # Flush ink counts as covered here, exactly like a stroke. ``flush`` is the region
+        # walk's verdict that this piece of the lens boundary must *not* be stroked -- a
+        # section-cut seam, a side another strand covers, an interior boundary that is not
+        # weave. The ring carries the edge, so the fill is right; re-exposing it paints the
+        # very line the walk suppressed: a short tick, or a full chord across the ribbon.
+        # Measured over the 57 review cases, this loop's whole contribution on 5 of them was
+        # such ink (``spec-self-intersecting`` 12 -> 10, ``index-random-walks-6`` 25 -> 6,
+        # ``index-random-walks-12`` 25 -> 13, ``adp-arc-overlapping`` 731 -> 727,
+        # ``ros-n5-ca-l2-o12`` 6 -> 0). The edges that remain there are the second rule's
+        # deliberate flush-detour chords, which span a *run* of flush edges on purpose.
+        if flush_tree is not None:
+            for index in flush_tree.query(edge.buffer(tolerance)):
+                interval = collinear_interval(flush_lines[index], start, direction, span)
+                if interval is not None:
+                    intervals.append(interval)
+        intervals.sort()
+        merged: list[tuple[float, float]] = []
+        for low, high in intervals:
+            if merged and low <= merged[-1][1] + tolerance:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+                continue
+            merged.append((low, high))
+        uncovered: list[tuple[float, float]] = []
+        cursor = 0.0
+        for low, high in merged:
+            if low - cursor > tolerance:
+                uncovered.append((cursor, low))
+            cursor = max(cursor, high)
+        if span - cursor > tolerance:
+            uncovered.append((cursor, span))
+
+        for low, high in uncovered:
+            middle = start + direction * (0.5 * (low + high))
+            middle_point = Point(*(middle))
+            carriers = {
+                ring_owners[index]
+                for index in ring_tree.query(middle_point.buffer(tolerance))
+                if ring_lines[index].distance(middle_point) <= tolerance
+            }
+            outer = topmost(Point(*(middle + normal * probe)))
+            inner = topmost(Point(*(middle - normal * probe)))
+            left = start + direction * low
+            right = start + direction * high
+            first = (round(float(left[0]), 12), round(float(left[1]), 12))
+            second = (round(float(right[0]), 12), round(float(right[1]), 12))
+            if outer is None and inner is None:
+                continue
+            if outer == inner:
+                visible = outer is not None and outer in carriers
+            elif outer is None or inner is None:
+                visible = bool(carriers)
+            else:
+                visible = outer in carriers or inner in carriers
+            if (
+                not visible
+                and max_lens_bridge > 0.0
+                and high - low <= max_lens_bridge
+                and (near_unjoined(left) is not None or near_unjoined(right) is not None)
+                and (
+                    (
+                        near_unjoined(left) is not None
+                        and collinear_stroke_at(first, start, end)
+                    )
+                    or (
+                        near_unjoined(right) is not None
+                        and collinear_stroke_at(second, start, end)
+                    )
+                )
+            ):
+                # The other half of this recorded lens edge is a visible stroke, but
+                # the half on this side was merged into one owner face. Closing a
+                # short one-ended gap continues that stroke instead of leaving a
+                # dangling tick in the ribbon. Keep the rule to a recorded lens edge
+                # and a half-width-scale gap; broader endpoint chaining was measured
+                # to draw unrelated chords through the same self-crossing case.
+                visible = True
+            if not visible:
+                continue
+            key = (first, second) if first <= second else (second, first)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(OutlineEdge(first, second))
+
+    # A polygon boolean can split a straight outline into
+    # ``stroke -> flush detour -> stroke``: two cut chords meet on the boundary, walk
+    # to a point some distance inside/outside the ribbon and come straight back. The
+    # detour must stay flush, but leaving the two normal runs disconnected creates a
+    # visible dangling end. When the detour returns almost to where it left, the
+    # material boundary continues across that tiny chord; expose it as an overlay.
+    if max_flush_bridge > 0.0:
+        for index, region in enumerate(ordered):
+            points = np.asarray(region.exterior.points, dtype=float)
+            count = len(points) - 1
+            if count < 2:
+                continue
+            flush = set(region.flush_edges)
+            for start_index in range(count):
+                if start_index not in flush or (start_index - 1) % count in flush:
+                    continue
+                end_index = start_index
+                while (end_index + 1) % count in flush:
+                    end_index = (end_index + 1) % count
+                start = points[start_index]
+                end = points[(end_index + 1) % count]
+                span = float(np.hypot(*(end - start)))
+                if span <= tolerance or span > max_flush_bridge:
+                    continue
+                first = (round(float(start[0]), 12), round(float(start[1]), 12))
+                second = (round(float(end[0]), 12), round(float(end[1]), 12))
+                key = (first, second) if first <= second else (second, first)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(OutlineEdge(first, second))
+
+    return result
+
+
 def _collinear(start: np.ndarray, middle: np.ndarray, end: np.ndarray, tolerance: float) -> bool:
     """Do three points run straight on from one to the next?
 
@@ -637,6 +1055,13 @@ class RegionRenderResult:
     painted_area: float = 0.0
     region_area_sum: float = 0.0
     face_walk: dict[str, Any] = field(default_factory=dict)
+    #: Visible weave boundaries that no region exterior can carry because their two
+    #: sides were merged into one owner. Renderers must stroke these after the fills.
+    outline_edges: list[OutlineEdge] = field(default_factory=list)
+    #: Fill-only regions drawn below ``regions`` by the experimental hybrid backend.
+    #: They close area a primary backend genuinely missed without exposing any of their
+    #: own outlines, so an arrangement repair cannot promote a long internal edge.
+    fill_underlay: list[RibbonRegion] = field(default_factory=list)
 
     @property
     def covered_area(self) -> float:
@@ -1057,6 +1482,64 @@ def _nodes_for(
         group, arc, closed=path.closed, length=float(path.length)
     )
     return [strip.strip_id for strip in found] or [path_id]
+
+
+def _at_path_end(path: PolylinePath, arc: float) -> bool:
+    """Whether ``arc`` is one of the path's own ends, i.e. a ribbon cap.
+
+    Only an open path has ends: a closed path's seam is not one, and neither is an
+    interior polyline vertex.
+    """
+    length = float(path.length)
+    if path.closed or length <= 0.0:
+        return False
+    tolerance = 1e-9 * max(length, 1.0)
+    return min(abs(float(arc)), abs(length - float(arc))) <= tolerance
+
+
+def diagnosed_contact_yields(
+    paths: list[PolylinePath],
+    crossings: list[CrossingEvent],
+    topology: WeaveTopology,
+) -> list[tuple[str, float, str, float]]:
+    """``(ending, ending_arc, through, through_arc)`` at diagnosed endpoint contacts.
+
+    A diagnosed endpoint contact has no over/under and nothing is cut there, but the two
+    bands still overlap where one strand *ends* on the other: its cap and the last
+    half-width of its side edges lie inside the through ribbon. With no cut to hide them,
+    only the paint order (Boolean) or the face ownership (arrangement) can, and the input
+    order does not know which strand ends: on ``deg-t-junction`` the Boolean channel drew
+    the ending strand last and showed a stub half a ribbon width inside the through band,
+    while the arrangement channel happened to hand that face to the through strand
+    because its path id sorted first — swapping the two paths swapped the two channels'
+    verdicts.
+
+    The rule therefore comes from the input, not from the list order: the strand that
+    ends there yields, the one that runs through keeps its silhouette. Only an open path
+    has a cap, so only an open-path end can be the ending side; when both ends or neither
+    end lie at the contact (an L corner, a touch at an interior vertex) there is no rule
+    and the shared painter order decides — the strand painted last is the one visible, in
+    both backends. At an L corner that still shows one butt cap inside the other band;
+    that is the documented residual, not a rule the geometry states.
+    """
+    geometry_by_id = {path.path_id: path for path in paths}
+    yields: list[tuple[str, float, str, float]] = []
+    for crossing in crossings:
+        if crossing.kind != "endpoint_touch" or crossing.path_a == crossing.path_b:
+            continue
+        if topology.assignment_for(crossing.crossing_id) is not None:
+            continue
+        for ending_id, ending_arc, through_id, through_arc in (
+            (crossing.path_a, crossing.s_a, crossing.path_b, crossing.s_b),
+            (crossing.path_b, crossing.s_b, crossing.path_a, crossing.s_a),
+        ):
+            ending = geometry_by_id.get(ending_id)
+            through = geometry_by_id.get(through_id)
+            if ending is None or through is None:
+                continue
+            if _at_path_end(ending, ending_arc) and not _at_path_end(through, through_arc):
+                yields.append((ending_id, float(ending_arc), through_id, float(through_arc)))
+    return yields
 
 
 def build_bands(
@@ -1534,6 +2017,16 @@ def render_region_geometry(
         under_nodes = _nodes_for(under_id, under_arc, strips, geometry_by_id)
         over_nodes = _nodes_for(over_id, over_arc, strips, geometry_by_id)
         order_edges.extend((under, over) for under in under_nodes for over in over_nodes)
+    # A diagnosed endpoint contact is not woven and is not cut, so the bands overlap
+    # there and draw_index alone decides what a reader sees. The ending strand goes
+    # under, or its cap shows as a stub inside the through ribbon (see
+    # :func:`diagnosed_contact_yields`).
+    for ending_id, ending_arc, through_id, through_arc in diagnosed_contact_yields(
+        paths, crossings, topology
+    ):
+        under_nodes = _nodes_for(ending_id, ending_arc, strips, geometry_by_id)
+        over_nodes = _nodes_for(through_id, through_arc, strips, geometry_by_id)
+        order_edges.extend((under, over) for under in under_nodes for over in over_nodes)
     layers, congested = paint_order(order_nodes, order_edges)
     ordered = sorted(order_nodes, key=lambda node: (layers[node], path_position[node_of[node]], node))
     draw_index = {node: index for index, node in enumerate(ordered)}
@@ -1741,6 +2234,9 @@ def render_region_geometry(
     flush_edge_count = mark_flush_edges(
         regions, cuts=cuts, weave=weave_edges, node_bands=node_bands
     )
+    outline_edges = missing_weave_outlines(
+        regions, weave_edges, max_flush_bridge=0.05 * offset
+    )
     return RegionRenderResult(
         regions=regions,
         diagnostics=diagnostics,
@@ -1767,6 +2263,7 @@ def render_region_geometry(
             "congested": bool(congested),
             "hole_count": hole_count_total,
             "flush_edge_count": flush_edge_count,
+            "outline_edge_count": len(outline_edges),
             # This backend's traversal unit is a band (or a section), so it counts the
             # region polygons it produced rather than arrangement faces.
             "region_polygon_count": len(regions),
@@ -1774,6 +2271,7 @@ def render_region_geometry(
             "removed_area": float(removed_area),
             **walk.as_payload("steps"),
         },
+        outline_edges=outline_edges,
     )
 
 
